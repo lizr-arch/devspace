@@ -68,10 +68,6 @@ const storedToolNameSchema = z.enum([
   "run_shell",
 ]);
 const summarySchema = z.record(z.string(), z.unknown());
-const uiCardSchema = z.object({
-  card: z.string(),
-  expandable: z.boolean(),
-});
 const toolPayloadSchema = z.object({
   content: z
     .array(
@@ -103,7 +99,6 @@ function cardOutputSchema(
       .describe(
         "Model-readable result text. Mirrors the important tool output for hosts that prioritize structuredContent over content blocks.",
       ),
-    ui: uiCardSchema,
     ...extra,
   };
 }
@@ -399,7 +394,6 @@ function createMcpServer(
           agentsFiles: z.number().int().nonnegative(),
         }),
         result: z.string(),
-        ui: uiCardSchema,
       },
       _meta: {
         ui: {
@@ -467,10 +461,6 @@ function createMcpServer(
           root: workspace.root,
           summary,
           result: contentText(resultContent),
-          ui: {
-            card: "workspace",
-            expandable: agentsFiles.length > 0,
-          },
         },
       };
     },
@@ -557,10 +547,6 @@ function createMcpServer(
           path: input.path,
           summary,
           result: contentText(response.content),
-          ui: {
-            card: "text",
-            expandable: true,
-          },
         },
       };
     },
@@ -641,10 +627,6 @@ function createMcpServer(
           path: input.path,
           summary,
           result: contentText(response.content),
-          ui: {
-            card: "write",
-            expandable: true,
-          },
         },
       };
     },
@@ -743,10 +725,6 @@ function createMcpServer(
           path: input.path,
           summary: storedResult.summary,
           result: contentText(editContent),
-          ui: {
-            card: "file-diff",
-            expandable: true,
-          },
         },
       };
     },
@@ -829,10 +807,6 @@ function createMcpServer(
             path: input.path,
             summary,
             result: contentText(response.content),
-            ui: {
-              card: "search",
-              expandable: true,
-            },
           },
         };
       },
@@ -911,10 +885,6 @@ function createMcpServer(
             path: input.path,
             summary,
             result: contentText(response.content),
-            ui: {
-              card: "search",
-              expandable: true,
-            },
           },
         };
       },
@@ -985,10 +955,6 @@ function createMcpServer(
             path: input.path,
             summary,
             result: contentText(response.content),
-            ui: {
-              card: "directory",
-              expandable: true,
-            },
           },
         };
       },
@@ -1082,10 +1048,6 @@ function createMcpServer(
           path: workingDirectory,
           summary,
           result: contentText(response.content),
-          ui: {
-            card: "shell",
-            expandable: true,
-          },
         },
       };
     },

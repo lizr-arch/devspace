@@ -34,10 +34,6 @@ interface ToolResultCard {
   root?: string;
   status?: string;
   summary?: Record<string, unknown>;
-  ui?: {
-    card?: string;
-    expandable?: boolean;
-  };
 }
 
 interface ToolContent {
@@ -263,7 +259,7 @@ function AppRoot() {
   }
 
   const display = getToolDisplay(card);
-  const expandable = card.ui?.expandable !== false;
+  const expandable = isExpandableCard(card);
 
   return (
     <main className="shell">
@@ -441,6 +437,14 @@ function SummaryBadges({ card }: { card: ToolResultCard }) {
 
 
   return <span className="badge">{String(summary.lines ?? 0)} lines</span>;
+}
+
+function isExpandableCard(card: ToolResultCard): boolean {
+  if (card.tool === "open_workspace") {
+    return Number(card.summary?.agentsFiles ?? 0) > 0;
+  }
+
+  return true;
 }
 
 function getToolDisplay(card: ToolResultCard): {
