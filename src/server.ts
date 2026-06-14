@@ -1058,11 +1058,7 @@ export function createServer(config = loadConfig()): RunningServer {
   });
   const transports = new Map<string, Transport>();
   const workspaces = new WorkspaceRegistry(config);
-  const results = createResultStore({
-    persistResults: config.persistResults,
-    resultTtlMs: config.resultTtlMs,
-    stateDir: config.stateDir,
-  });
+  const results = createResultStore(config.stateDir);
 
   app.options("/mcp-app-assets/{*asset}", (_req, res) => {
     setAssetHeaders(res);

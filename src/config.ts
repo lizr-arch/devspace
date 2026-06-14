@@ -9,8 +9,6 @@ export interface ServerConfig {
   allowedHosts: string[];
   publicBaseUrl: string;
   minimalTools: boolean;
-  persistResults: boolean;
-  resultTtlMs: number;
   stateDir: string;
 }
 
@@ -54,17 +52,6 @@ function parseMinimalTools(env: NodeJS.ProcessEnv): boolean {
   return env.PI_ON_MCP_TOOL_MODE === "minimal" || parseBoolean(env.PI_ON_MCP_MINIMAL_TOOLS);
 }
 
-function parsePositiveInteger(value: string | undefined, fallback: number, label: string): number {
-  if (!value) return fallback;
-
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`Invalid ${label}: ${value}`);
-  }
-
-  return parsed;
-}
-
 function defaultStateDir(): string {
   return join(homedir(), ".local", "share", "pi-on-mcp");
 }
@@ -78,8 +65,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedHosts: parseAllowedHosts(env.PI_ON_MCP_ALLOWED_HOSTS),
     publicBaseUrl: env.PI_ON_MCP_PUBLIC_BASE_URL ?? "https://agent.gitcms.blog",
     minimalTools: parseMinimalTools(env),
-    persistResults: env.PI_ON_MCP_PERSIST_RESULTS === "0" ? false : true,
-    resultTtlMs: parsePositiveInteger(env.PI_ON_MCP_RESULT_TTL_DAYS, 14, "PI_ON_MCP_RESULT_TTL_DAYS") * 24 * 60 * 60 * 1000,
     stateDir: resolve(env.PI_ON_MCP_STATE_DIR ?? defaultStateDir()),
   };
 }

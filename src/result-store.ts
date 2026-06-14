@@ -45,47 +45,7 @@ export type NewStoredToolResult = Omit<StoredToolResult, "id" | "createdAt">;
 export interface ToolResultStore {
   put(input: NewStoredToolResult): StoredToolResult;
   get(resultId: string, workspaceId?: string): StoredToolResult;
-  prune(): void;
   close?(): void;
-}
-
-export class MemoryResultStore implements ToolResultStore {
-  private readonly results = new Map<string, StoredToolResult>();
-
-  constructor(private readonly ttlMs = 30 * 60 * 1000) {}
-
-  put(input: NewStoredToolResult): StoredToolResult {
-    this.prune();
-
-    const result: StoredToolResult = {
-      ...input,
-      id: `res_${randomUUID()}`,
-      createdAt: new Date().toISOString(),
-    };
-
-    this.results.set(result.id, result);
-    return result;
-  }
-
-  get(resultId: string, workspaceId?: string): StoredToolResult {
-    this.prune();
-
-    const result = this.results.get(resultId);
-    if (!result || (workspaceId && result.workspaceId !== workspaceId)) {
-      throw new Error(`Unknown tool result: ${resultId}`);
-    }
-
-    return result;
-  }
-
-  prune(): void {
-    const expiresBefore = Date.now() - this.ttlMs;
-    for (const [id, result] of this.results) {
-      if (Date.parse(result.createdAt) < expiresBefore) {
-        this.results.delete(id);
-      }
-    }
-  }
 }
 
 interface ToolResultRow {
@@ -103,7 +63,7 @@ interface ToolResultRow {
 export class SqliteResultStore implements ToolResultStore {
   private readonly db: Database.Database;
 
-  constructor(stateDir: string, private readonly ttlMs: number) {
+  constructor(stateDir: string) {
     mkdirSync(stateDir, { recursive: true });
     this.db = new Database(join(stateDir, "pi-on-mcp.sqlite"));
     this.db.pragma("journal_mode = WAL");
@@ -112,8 +72,6 @@ export class SqliteResultStore implements ToolResultStore {
   }
 
   put(input: NewStoredToolResult): StoredToolResult {
-    this.prune();
-
     const result: StoredToolResult = {
       ...input,
       id: `res_${randomUUID()}`,
@@ -150,8 +108,6 @@ export class SqliteResultStore implements ToolResultStore {
   }
 
   get(resultId: string, workspaceId?: string): StoredToolResult {
-    this.prune();
-
     const row = this.db
       .prepare("select * from tool_results where id = ?")
       .get(resultId) as ToolResultRow | undefined;
@@ -161,11 +117,6 @@ export class SqliteResultStore implements ToolResultStore {
     }
 
     return rowToStoredToolResult(row);
-  }
-
-  prune(): void {
-    const expiresBefore = new Date(Date.now() - this.ttlMs).toISOString();
-    this.db.prepare("delete from tool_results where created_at < ?").run(expiresBefore);
   }
 
   close(): void {
@@ -198,13 +149,8 @@ export class SqliteResultStore implements ToolResultStore {
   }
 }
 
-export function createResultStore(options: {
-  persistResults: boolean;
-  resultTtlMs: number;
-  stateDir: string;
-}): ToolResultStore {
-  if (!options.persistResults) return new MemoryResultStore(options.resultTtlMs);
-  return new SqliteResultStore(options.stateDir, options.resultTtlMs);
+export function createResultStore(stateDir: string): ToolResultStore {
+  return new SqliteResultStore(stateDir);
 }
 
 function rowToStoredToolResult(row: ToolResultRow): StoredToolResult {

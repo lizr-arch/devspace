@@ -25,6 +25,16 @@ search and directory inspection.
 Server-level workflow guidance is exposed through MCP initialize instructions,
 not a dedicated info tool.
 
+## Persistent Result Payloads
+
+Tool result payloads are persisted in a global SQLite database under
+`~/.local/share/pi-on-mcp/pi-on-mcp.sqlite`, or under `PI_ON_MCP_STATE_DIR` when
+that variable is set. This lets UI cards such as edit/write diff viewers reload
+historical payloads after the MCP server process restarts.
+
+Workspace IDs remain live-session identifiers; after a restart, open the
+workspace again for new file, edit, search, or shell tool calls.
+
 ## Workspace Flow
 
 Call `open_workspace` before using the coding tools:
