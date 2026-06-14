@@ -68,12 +68,17 @@ function formHtml(params: {
   clientName: string;
   scopes: string[];
   resource?: URL;
+  fields: Record<string, string | undefined>;
 }): string {
   const scopeText = params.scopes.length > 0 ? params.scopes.join(" ") : "devspace";
   const resourceText = params.resource?.href ?? "DevSpace MCP endpoint";
   const error = params.error
     ? `<p class="error">${htmlEscape(params.error)}</p>`
     : "";
+  const hiddenFields = Object.entries(params.fields)
+    .filter((entry): entry is [string, string] => entry[1] !== undefined)
+    .map(([name, value]) => `        <input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}" />`)
+    .join("\n");
 
   return `<!doctype html>
 <html lang="en">
@@ -107,6 +112,7 @@ function formHtml(params: {
         <dt>Resource</dt><dd>${htmlEscape(resourceText)}</dd>
       </dl>
       <form method="post">
+${hiddenFields}
         <label for="owner_token">Local owner token</label>
         <input id="owner_token" name="owner_token" type="password" autocomplete="current-password" autofocus required />
         <button type="submit">Authorize DevSpace</button>
@@ -196,6 +202,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
           clientName: client.client_name ?? client.client_id,
           scopes: params.scopes ?? this.config.scopes,
           resource: params.resource,
+          fields: authorizationFormFields(client, params),
         }),
       );
       return;
@@ -210,6 +217,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
           clientName: client.client_name ?? client.client_id,
           scopes: params.scopes ?? this.config.scopes,
           resource: params.resource,
+          fields: authorizationFormFields(client, params),
         }),
       );
       return;
@@ -340,6 +348,22 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       scope: scopes.join(" "),
     };
   }
+}
+
+function authorizationFormFields(
+  client: OAuthClientInformationFull,
+  params: AuthorizationParams,
+): Record<string, string | undefined> {
+  return {
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: params.redirectUri,
+    code_challenge: params.codeChallenge,
+    code_challenge_method: "S256",
+    scope: params.scopes?.join(" "),
+    state: params.state,
+    resource: params.resource?.href,
+  };
 }
 
 function hashToken(token: string): string {
