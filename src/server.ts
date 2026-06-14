@@ -20,6 +20,7 @@ import {
   logEvent,
   requestIp,
   requestPath,
+  commandPreview,
   sessionIdPrefix,
 } from "./logger.js";
 import {
@@ -88,6 +89,18 @@ interface ToolNames {
   glob: "find_files" | "glob";
   ls: "list_directory" | "ls";
   shell: "run_shell" | "bash";
+}
+
+interface ToolLogFields {
+  tool: string;
+  workspaceId?: string;
+  path?: string;
+  workingDirectory?: string;
+  command?: string;
+  commandLength?: number;
+  success: boolean;
+  durationMs: number;
+  error?: string;
 }
 
 function toolNamesFor(config: ServerConfig): ToolNames {
@@ -186,6 +199,16 @@ function requestLogFields(req: Request, config: ServerConfig): Record<string, un
 
 function authFailureReason(req: Request): "missing_bearer_token" | "invalid_bearer_token" {
   return req.header("authorization") ? "invalid_bearer_token" : "missing_bearer_token";
+}
+
+function logToolCall(config: ServerConfig, fields: ToolLogFields): void {
+  if (!config.logging.toolCalls) return;
+
+  const { command, ...safeFields } = fields;
+  logEvent(config.logging, fields.success ? "info" : "warn", "tool_call", {
+    ...safeFields,
+    commandPreview: config.logging.shellCommands && command ? commandPreview(command) : undefined,
+  });
 }
 
 function contentText(content: ToolContent[]): string {
@@ -448,6 +471,7 @@ function createMcpServer(
       annotations: { readOnlyHint: true },
     },
     async ({ path, mode, baseRef }) => {
+      const startedAt = performance.now();
       const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
       void autoCommit.initializeWorkspace({
         workspaceId: workspace.id,
@@ -490,6 +514,13 @@ function createMcpServer(
           ].filter(Boolean).join("\n"),
         },
       ];
+      logToolCall(config, {
+        tool: "open_workspace",
+        workspaceId: workspace.id,
+        path: workspace.root,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
 
       return {
         content: resultContent,
@@ -572,6 +603,7 @@ function createMcpServer(
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, ...input }) => {
+      const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const readPath = workspaces.resolveReadPath(workspace, input.path);
       const response = await readFileTool(
@@ -591,6 +623,13 @@ function createMcpServer(
         offset: input.offset ?? 1,
         limited: input.limit !== undefined,
       };
+      logToolCall(config, {
+        tool: toolNames.read,
+        workspaceId,
+        path: input.path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
 
       return {
         ...response,
@@ -636,6 +675,7 @@ function createMcpServer(
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, ...input }) => {
+      const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       workspaces.resolvePath(workspace, input.path);
       const response = await writeFileTool(input, {
@@ -660,6 +700,13 @@ function createMcpServer(
         path: input.path,
         additions: stats.additions,
         removals: stats.removals,
+      });
+      logToolCall(config, {
+        tool: toolNames.write,
+        workspaceId,
+        path: input.path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
       });
 
       return {
@@ -722,6 +769,7 @@ function createMcpServer(
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, ...input }) => {
+      const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       workspaces.resolvePath(workspace, input.path);
       const response = await editFileTool(input, {
@@ -749,6 +797,13 @@ function createMcpServer(
         additions: stats.additions,
         removals: stats.removals,
         editCount: input.edits.length,
+      });
+      logToolCall(config, {
+        tool: toolNames.edit,
+        workspaceId,
+        path: input.path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
       });
 
       return {
@@ -804,6 +859,7 @@ function createMcpServer(
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, ...input }) => {
+        const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
         const response = await grepFilesTool(input, {
@@ -818,6 +874,13 @@ function createMcpServer(
           scope: input.path ?? ".",
           ...textSummary(response.content),
         };
+        logToolCall(config, {
+          tool: toolNames.grep,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
 
         return {
           ...response,
@@ -864,6 +927,7 @@ function createMcpServer(
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, ...input }) => {
+        const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
         const response = await findFilesTool(input, {
@@ -878,6 +942,13 @@ function createMcpServer(
           scope: input.path ?? ".",
           ...textSummary(response.content),
         };
+        logToolCall(config, {
+          tool: toolNames.glob,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
 
         return {
           ...response,
@@ -924,6 +995,7 @@ function createMcpServer(
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, ...input }) => {
+        const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         workspaces.resolvePath(workspace, input.path);
         const response = await listDirectoryTool(input, {
@@ -934,6 +1006,13 @@ function createMcpServer(
         if (response.isError) return response;
 
         const summary = textSummary(response.content);
+        logToolCall(config, {
+          tool: toolNames.ls,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
 
         return {
           ...response,
@@ -994,6 +1073,7 @@ function createMcpServer(
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, workingDirectory, ...input }) => {
+      const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const cwd = workspaces.resolveWorkingDirectory(
         workspace,
@@ -1018,6 +1098,15 @@ function createMcpServer(
         success: true,
         command: input.command,
         workingDirectory: workingDirectory ?? ".",
+      });
+      logToolCall(config, {
+        tool: toolNames.shell,
+        workspaceId,
+        workingDirectory: workingDirectory ?? ".",
+        command: input.command,
+        commandLength: input.command.length,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
       });
 
       return {
