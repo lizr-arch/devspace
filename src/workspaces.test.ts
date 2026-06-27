@@ -29,7 +29,8 @@ try {
     PORT: "1",
   });
   const registry = new WorkspaceRegistry(config);
-  const { workspace, agentsFiles, availableAgentsFiles } = await registry.openWorkspace(root);
+  const { workspace, agentsFiles, availableAgentsFiles } =
+    await registry.openWorkspace(root);
 
   assert.equal(workspace.mode, "checkout");
   assert.deepEqual(
@@ -50,7 +51,8 @@ try {
   await assert.rejects(
     () => registry.openWorkspace({ path: root, mode: "worktree" }),
     (error: unknown) =>
-      error instanceof GitWorktreeError && error.code === "GIT_REPOSITORY_NOT_FOUND",
+      error instanceof GitWorktreeError &&
+      error.code === "GIT_REPOSITORY_NOT_FOUND",
   );
 
   const gitRoot = join(root, "git-project");
@@ -75,12 +77,27 @@ try {
   assert.equal(worktreeWorkspace.workspace.worktree?.baseRef, "HEAD");
   assert.equal(worktreeWorkspace.workspace.worktree?.dirtySource, true);
   assert.equal(worktreeWorkspace.workspace.worktree?.managed, true);
-  assert.equal((await stat(worktreeWorkspace.workspace.root)).isDirectory(), true);
-  assert.match(worktreeWorkspace.agentsFiles.map((file) => file.content).join("\n"), /global instructions/);
-  assert.match(worktreeWorkspace.agentsFiles.map((file) => file.content).join("\n"), /git root instructions/);
+  assert.equal(
+    (await stat(worktreeWorkspace.workspace.root)).isDirectory(),
+    true,
+  );
+  assert.match(
+    worktreeWorkspace.agentsFiles.map((file) => file.content).join("\n"),
+    /global instructions/,
+  );
+  assert.match(
+    worktreeWorkspace.agentsFiles.map((file) => file.content).join("\n"),
+    /git root instructions/,
+  );
 
-  const worktreeReadmePath = registry.resolvePath(worktreeWorkspace.workspace, "README.md");
-  assert.equal(worktreeReadmePath.startsWith(worktreeWorkspace.workspace.root), true);
+  const worktreeReadmePath = registry.resolvePath(
+    worktreeWorkspace.workspace,
+    "README.md",
+  );
+  assert.equal(
+    worktreeReadmePath.startsWith(worktreeWorkspace.workspace.root),
+    true,
+  );
 
   const stateDir = join(root, ".state");
   const firstStore = new SqliteWorkspaceStore(stateDir);
@@ -94,11 +111,15 @@ try {
 
   const secondStore = new SqliteWorkspaceStore(stateDir);
   const restoredRegistry = new WorkspaceRegistry(config, secondStore);
-  const restoredWorkspace = restoredRegistry.getWorkspace(persistentWorkspace.workspace.id);
+  const restoredWorkspace = restoredRegistry.getWorkspace(
+    persistentWorkspace.workspace.id,
+  );
   assert.equal(restoredWorkspace.root, root);
   assert.equal(restoredWorkspace.mode, "checkout");
 
-  const restoredWorktree = restoredRegistry.getWorkspace(persistentWorktree.workspace.id);
+  const restoredWorktree = restoredRegistry.getWorkspace(
+    persistentWorktree.workspace.id,
+  );
   assert.equal(restoredWorktree.mode, "worktree");
   assert.equal(restoredWorktree.sourceRoot, gitRoot);
   assert.equal(restoredWorktree.root, persistentWorktree.workspace.root);
@@ -115,11 +136,16 @@ try {
       DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
       PORT: "1",
     });
-    const aliasWorkspace = await new WorkspaceRegistry(aliasConfig).openWorkspace({
+    const aliasWorkspace = await new WorkspaceRegistry(
+      aliasConfig,
+    ).openWorkspace({
       path: join(aliasRoot, "git-project"),
       mode: "worktree",
     });
-    assert.equal(aliasWorkspace.workspace.sourceRoot, join(aliasRoot, "git-project"));
+    assert.equal(
+      aliasWorkspace.workspace.sourceRoot,
+      join(aliasRoot, "git-project"),
+    );
   }
 } finally {
   await rm(root, { recursive: true, force: true });

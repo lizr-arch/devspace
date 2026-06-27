@@ -15,7 +15,9 @@ try {
   const projectRoot = join(root, "project");
   const agentDir = join(root, "agent");
   const explicitSkills = join(root, "explicit-skills");
-  await mkdir(join(projectRoot, ".pi", "skills", "project-skill"), { recursive: true });
+  await mkdir(join(projectRoot, ".pi", "skills", "project-skill"), {
+    recursive: true,
+  });
   await mkdir(join(agentDir, "skills", "global-skill"), { recursive: true });
   await mkdir(join(explicitSkills, "duplicate"), { recursive: true });
   await mkdir(join(explicitSkills, "disabled"), { recursive: true });
@@ -84,25 +86,49 @@ try {
     PORT: "1",
   });
   const loaded = loadWorkspaceSkills(config, projectRoot);
-  assert.equal(loaded.skills.some((skill) => skill.name === "project-skill"), true);
-  assert.equal(loaded.skills.filter((skill) => skill.name === "duplicate-skill").length, 1);
-  assert.equal(loaded.skills.some((skill) => skill.name === "hidden-skill"), true);
-  assert.equal(loaded.diagnostics.some((diagnostic) => diagnostic.type === "collision"), true);
+  assert.equal(
+    loaded.skills.some((skill) => skill.name === "project-skill"),
+    true,
+  );
+  assert.equal(
+    loaded.skills.filter((skill) => skill.name === "duplicate-skill").length,
+    1,
+  );
+  assert.equal(
+    loaded.skills.some((skill) => skill.name === "hidden-skill"),
+    true,
+  );
+  assert.equal(
+    loaded.diagnostics.some((diagnostic) => diagnostic.type === "collision"),
+    true,
+  );
 
-  const projectSkill = loaded.skills.find((skill) => skill.name === "project-skill");
+  const projectSkill = loaded.skills.find(
+    (skill) => skill.name === "project-skill",
+  );
   assert.ok(projectSkill);
   assert.match(formatPathForPrompt(projectSkill.filePath), /SKILL\.md$/);
 
-  const skillFileRead = resolveSkillReadPath(loaded.skills, new Set(), projectSkill.filePath);
+  const skillFileRead = resolveSkillReadPath(
+    loaded.skills,
+    new Set(),
+    projectSkill.filePath,
+  );
   assert.equal(skillFileRead?.isSkillFile, true);
   assert.equal(skillFileRead?.absolutePath, projectSkill.filePath);
 
   const resourcePath = join(projectSkill.baseDir, "references.md");
   await writeFile(resourcePath, "reference\n");
-  assert.equal(resolveSkillReadPath(loaded.skills, new Set(), resourcePath), undefined);
   assert.equal(
-    resolveSkillReadPath(loaded.skills, new Set([projectSkill.baseDir]), resourcePath)
-      ?.isSkillFile,
+    resolveSkillReadPath(loaded.skills, new Set(), resourcePath),
+    undefined,
+  );
+  assert.equal(
+    resolveSkillReadPath(
+      loaded.skills,
+      new Set([projectSkill.baseDir]),
+      resourcePath,
+    )?.isSkillFile,
     false,
   );
 } finally {

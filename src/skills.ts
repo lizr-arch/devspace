@@ -19,7 +19,10 @@ export interface SkillReadResolution {
   isSkillFile: boolean;
 }
 
-export function loadWorkspaceSkills(config: ServerConfig, cwd: string): LoadedSkills {
+export function loadWorkspaceSkills(
+  config: ServerConfig,
+  cwd: string,
+): LoadedSkills {
   if (!config.skillsEnabled) return { skills: [], diagnostics: [] };
 
   return loadSkills({
@@ -68,7 +71,10 @@ export function formatPathForPrompt(path: string): string {
 
   if (resolvedPath === home) return "~";
   if (resolvedPath.startsWith(`${home}${sep}`)) {
-    return `~/${resolvedPath.slice(home.length + 1).split(sep).join("/")}`;
+    return `~/${resolvedPath
+      .slice(home.length + 1)
+      .split(sep)
+      .join("/")}`;
   }
 
   return resolvedPath.split(sep).join("/");

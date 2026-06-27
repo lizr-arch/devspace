@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import {
+  InvalidGrantError,
+  InvalidTokenError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { databasePath, openDatabase } from "./db/client.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
@@ -32,13 +35,21 @@ try {
 async function testDatabaseConfiguration(stateDir: string): Promise<void> {
   const database = openDatabase(stateDir);
   try {
-    assert.equal(database.sqlite.pragma("journal_mode", { simple: true }), "wal");
+    assert.equal(
+      database.sqlite.pragma("journal_mode", { simple: true }),
+      "wal",
+    );
     assert.equal(database.sqlite.pragma("synchronous", { simple: true }), 1);
-    assert.equal(database.sqlite.pragma("busy_timeout", { simple: true }), 5000);
+    assert.equal(
+      database.sqlite.pragma("busy_timeout", { simple: true }),
+      5000,
+    );
     assert.equal(database.sqlite.pragma("foreign_keys", { simple: true }), 1);
 
     const migrations = database.sqlite
-      .prepare("select version, name from devspace_schema_migrations order by version")
+      .prepare(
+        "select version, name from devspace_schema_migrations order by version",
+      )
       .all();
     assert.deepEqual(migrations, [
       { version: 1, name: "workspace-state" },
@@ -58,7 +69,10 @@ function testPersistenceAndTokenHashing(stateDir: string): void {
   const accessToken = "access-token-example";
   const refreshToken = "refresh-token-example";
   const firstStore = new SqliteOAuthStore(stateDir);
-  const firstClients = new SqliteOAuthClientsStore(firstStore, oauthConfig.allowedRedirectHosts);
+  const firstClients = new SqliteOAuthClientsStore(
+    firstStore,
+    oauthConfig.allowedRedirectHosts,
+  );
   const client = firstClients.registerClient({
     redirect_uris: [redirectUri],
     client_name: "ChatGPT",
@@ -104,8 +118,14 @@ function testPersistenceAndTokenHashing(stateDir: string): void {
   try {
     const restoredClient = restoredStore.getClient(client.client_id);
     assert.equal(restoredClient?.client_id, client.client_id);
-    assert.equal(restoredStore.getAccessToken(hashToken(accessToken))?.resource, mcpUrl.href);
-    assert.equal(restoredStore.getRefreshToken(hashToken(refreshToken))?.clientId, client.client_id);
+    assert.equal(
+      restoredStore.getAccessToken(hashToken(accessToken))?.resource,
+      mcpUrl.href,
+    );
+    assert.equal(
+      restoredStore.getRefreshToken(hashToken(refreshToken))?.clientId,
+      client.client_id,
+    );
   } finally {
     restoredStore.close();
   }
@@ -113,15 +133,26 @@ function testPersistenceAndTokenHashing(stateDir: string): void {
 
 function testExpiredTokenCleanup(stateDir: string): void {
   const store = new SqliteOAuthStore(stateDir);
-  const client = new SqliteOAuthClientsStore(store, oauthConfig.allowedRedirectHosts).registerClient({
+  const client = new SqliteOAuthClientsStore(
+    store,
+    oauthConfig.allowedRedirectHosts,
+  ).registerClient({
     redirect_uris: [redirectUri],
   });
   const expiredAt = Math.floor(Date.now() / 1000) - 1;
   store.saveTokenPair({
     accessTokenHash: "expired-access-hash",
-    accessToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt: expiredAt },
+    accessToken: {
+      clientId: client.client_id,
+      scopes: ["devspace"],
+      expiresAt: expiredAt,
+    },
     refreshTokenHash: "expired-refresh-hash",
-    refreshToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt: expiredAt },
+    refreshToken: {
+      clientId: client.client_id,
+      scopes: ["devspace"],
+      expiresAt: expiredAt,
+    },
   });
   store.close();
 
@@ -137,7 +168,10 @@ function testExpiredTokenCleanup(stateDir: string): void {
 function testTransactionalTokenRotation(stateDir: string): void {
   const store = new SqliteOAuthStore(stateDir);
   try {
-    const client = new SqliteOAuthClientsStore(store, oauthConfig.allowedRedirectHosts).registerClient({
+    const client = new SqliteOAuthClientsStore(
+      store,
+      oauthConfig.allowedRedirectHosts,
+    ).registerClient({
       redirect_uris: [redirectUri],
     });
     const expiresAt = Math.floor(Date.now() / 1000) + 3600;
@@ -151,9 +185,17 @@ function testTransactionalTokenRotation(stateDir: string): void {
       store.saveTokenPair(
         {
           accessTokenHash: "new-access-hash",
-          accessToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
+          accessToken: {
+            clientId: client.client_id,
+            scopes: ["devspace"],
+            expiresAt,
+          },
           refreshTokenHash: "new-refresh-hash",
-          refreshToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
+          refreshToken: {
+            clientId: client.client_id,
+            scopes: ["devspace"],
+            expiresAt,
+          },
         },
         "old-refresh-hash",
       ),
@@ -167,9 +209,17 @@ function testTransactionalTokenRotation(stateDir: string): void {
       store.saveTokenPair(
         {
           accessTokenHash: "losing-access-hash",
-          accessToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
+          accessToken: {
+            clientId: client.client_id,
+            scopes: ["devspace"],
+            expiresAt,
+          },
           refreshTokenHash: "losing-refresh-hash",
-          refreshToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
+          refreshToken: {
+            clientId: client.client_id,
+            scopes: ["devspace"],
+            expiresAt,
+          },
         },
         "old-refresh-hash",
       ),
@@ -182,8 +232,14 @@ function testTransactionalTokenRotation(stateDir: string): void {
   }
 }
 
-async function testProviderRestartRotationAndRevocation(stateDir: string): Promise<void> {
-  const firstProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+async function testProviderRestartRotationAndRevocation(
+  stateDir: string,
+): Promise<void> {
+  const firstProvider = new SingleUserOAuthProvider(
+    oauthConfig,
+    mcpUrl,
+    stateDir,
+  );
   const client = await firstProvider.clientsStore.registerClient?.({
     redirect_uris: [redirectUri],
     client_name: "ChatGPT",
@@ -211,9 +267,15 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
   assert.ok(issued.refresh_token);
   firstProvider.close();
 
-  const secondProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  const secondProvider = new SingleUserOAuthProvider(
+    oauthConfig,
+    mcpUrl,
+    stateDir,
+  );
   try {
-    const verified = await secondProvider.verifyAccessToken(issued.access_token);
+    const verified = await secondProvider.verifyAccessToken(
+      issued.access_token,
+    );
     assert.equal(verified.clientId, client.client_id);
 
     const refreshed = await secondProvider.exchangeRefreshToken(
@@ -226,16 +288,31 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
     assert.notEqual(refreshed.access_token, issued.access_token);
 
     await assert.rejects(
-      secondProvider.exchangeRefreshToken(client, issued.refresh_token, ["devspace"], mcpUrl),
+      secondProvider.exchangeRefreshToken(
+        client,
+        issued.refresh_token,
+        ["devspace"],
+        mcpUrl,
+      ),
       InvalidGrantError,
     );
 
     await secondProvider.revokeToken(client, { token: refreshed.access_token });
-    await assert.rejects(secondProvider.verifyAccessToken(refreshed.access_token), InvalidTokenError);
-
-    await secondProvider.revokeToken(client, { token: refreshed.refresh_token });
     await assert.rejects(
-      secondProvider.exchangeRefreshToken(client, refreshed.refresh_token, ["devspace"], mcpUrl),
+      secondProvider.verifyAccessToken(refreshed.access_token),
+      InvalidTokenError,
+    );
+
+    await secondProvider.revokeToken(client, {
+      token: refreshed.refresh_token,
+    });
+    await assert.rejects(
+      secondProvider.exchangeRefreshToken(
+        client,
+        refreshed.refresh_token,
+        ["devspace"],
+        mcpUrl,
+      ),
       InvalidGrantError,
     );
   } finally {

@@ -24,11 +24,16 @@ export function isPathInsideRoot(path: string, root: string): boolean {
 
   return (
     relationship === "" ||
-    (!relationship.startsWith("..") && relationship !== ".." && !relationship.includes(`..${sep}`))
+    (!relationship.startsWith("..") &&
+      relationship !== ".." &&
+      !relationship.includes(`..${sep}`))
   );
 }
 
-export function assertAllowedPath(path: string, allowedRoots: string[]): string {
+export function assertAllowedPath(
+  path: string,
+  allowedRoots: string[],
+): string {
   const resolvedPath = resolve(expandHomePath(path));
   if (allowedRoots.some((root) => isPathInsideRoot(resolvedPath, root))) {
     return resolvedPath;
@@ -37,7 +42,11 @@ export function assertAllowedPath(path: string, allowedRoots: string[]): string 
   throw new AccessDeniedError(`Path is outside allowed roots: ${path}`);
 }
 
-export function resolveAllowedPath(inputPath: string, cwd: string, allowedRoots: string[]): string {
+export function resolveAllowedPath(
+  inputPath: string,
+  cwd: string,
+  allowedRoots: string[],
+): string {
   const absolutePath = resolve(cwd, inputPath);
   return assertAllowedPath(absolutePath, allowedRoots);
 }

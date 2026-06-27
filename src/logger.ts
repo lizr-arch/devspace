@@ -23,7 +23,10 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
   debug: 4,
 };
 
-export function shouldLog(config: LoggingConfig, level: Exclude<LogLevel, "silent">): boolean {
+export function shouldLog(
+  config: LoggingConfig,
+  level: Exclude<LogLevel, "silent">,
+): boolean {
   return LEVEL_WEIGHT[config.level] >= LEVEL_WEIGHT[level];
 }
 
@@ -42,7 +45,8 @@ export function logEvent(
     ...fields,
   };
 
-  const line = config.format === "pretty" ? formatPretty(entry) : JSON.stringify(entry);
+  const line =
+    config.format === "pretty" ? formatPretty(entry) : JSON.stringify(entry);
   if (level === "error") {
     console.error(line);
   } else if (level === "warn") {
@@ -52,7 +56,10 @@ export function logEvent(
   }
 }
 
-export function requestIp(req: Request, trustProxy: boolean): string | undefined {
+export function requestIp(
+  req: Request,
+  trustProxy: boolean,
+): string | undefined {
   if (trustProxy) {
     const cfConnectingIp = firstHeaderValue(req.header("cf-connecting-ip"));
     if (cfConnectingIp) return cfConnectingIp;
@@ -68,13 +75,17 @@ export function requestPath(req: Request): string {
   return req.path || req.url.split("?")[0] || req.url;
 }
 
-export function sessionIdPrefix(sessionId: string | undefined): string | undefined {
+export function sessionIdPrefix(
+  sessionId: string | undefined,
+): string | undefined {
   return sessionId ? sessionId.slice(0, 8) : undefined;
 }
 
 export function commandPreview(command: string): string {
   const normalized = command.replace(/\s+/g, " ").trim();
-  return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
+  return normalized.length > 120
+    ? `${normalized.slice(0, 117)}...`
+    : normalized;
 }
 
 function firstHeaderValue(value: string | undefined): string | undefined {
@@ -86,7 +97,10 @@ function formatPretty(entry: LogFields): string {
   const level = String(entry.level).toUpperCase();
   const event = String(entry.event);
   const rest = Object.entries(entry)
-    .filter(([key, value]) => !["ts", "level", "event"].includes(key) && value !== undefined)
+    .filter(
+      ([key, value]) =>
+        !["ts", "level", "event"].includes(key) && value !== undefined,
+    )
     .map(([key, value]) => `${key}=${formatPrettyValue(value)}`)
     .join(" ");
 

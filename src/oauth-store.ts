@@ -25,7 +25,10 @@ export interface PersistedTokenPair {
   refreshToken: PersistedRefreshTokenRecord;
 }
 
-function redirectHostAllowed(redirectUri: string, allowedHosts: string[]): boolean {
+function redirectHostAllowed(
+  redirectUri: string,
+  allowedHosts: string[],
+): boolean {
   let parsed: URL;
   try {
     parsed = new URL(redirectUri);
@@ -33,7 +36,8 @@ function redirectHostAllowed(redirectUri: string, allowedHosts: string[]): boole
     return false;
   }
 
-  if (["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) return true;
+  if (["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname))
+    return true;
   return allowedHosts.includes(parsed.hostname);
 }
 
@@ -50,15 +54,26 @@ export class SqliteOAuthStore {
       .prepare("select client_json from oauth_clients where client_id = ?")
       .get(clientId) as { client_json: string } | undefined;
 
-    return row ? (JSON.parse(row.client_json) as OAuthClientInformationFull) : undefined;
+    return row
+      ? (JSON.parse(row.client_json) as OAuthClientInformationFull)
+      : undefined;
   }
 
   registerClient(
-    client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
+    client: Omit<
+      OAuthClientInformationFull,
+      "client_id" | "client_id_issued_at"
+    >,
     allowedRedirectHosts: string[],
   ): OAuthClientInformationFull {
-    if (!client.redirect_uris.every((uri) => redirectHostAllowed(String(uri), allowedRedirectHosts))) {
-      throw new InvalidRequestError("Client redirect_uri is not allowed for this DevSpace server");
+    if (
+      !client.redirect_uris.every((uri) =>
+        redirectHostAllowed(String(uri), allowedRedirectHosts),
+      )
+    ) {
+      throw new InvalidRequestError(
+        "Client redirect_uri is not allowed for this DevSpace server",
+      );
     }
 
     const now = Math.floor(Date.now() / 1000);
@@ -67,12 +82,17 @@ export class SqliteOAuthStore {
       client_id: `devspace-${randomUUID()}`,
       client_id_issued_at: now,
       token_endpoint_auth_method: client.token_endpoint_auth_method ?? "none",
-      grant_types: client.grant_types ?? ["authorization_code", "refresh_token"],
+      grant_types: client.grant_types ?? [
+        "authorization_code",
+        "refresh_token",
+      ],
       response_types: client.response_types ?? ["code"],
     };
 
     this.database.sqlite
-      .prepare("insert into oauth_clients (client_id, client_json, issued_at) values (?, ?, ?)")
+      .prepare(
+        "insert into oauth_clients (client_id, client_json, issued_at) values (?, ?, ?)",
+      )
       .run(registered.client_id, JSON.stringify(registered), now);
 
     return registered;
@@ -116,10 +136,15 @@ export class SqliteOAuthStore {
   }
 
   deleteAccessToken(tokenHash: string): void {
-    this.database.sqlite.prepare("delete from oauth_access_tokens where token_hash = ?").run(tokenHash);
+    this.database.sqlite
+      .prepare("delete from oauth_access_tokens where token_hash = ?")
+      .run(tokenHash);
   }
 
-  saveRefreshToken(tokenHash: string, record: PersistedRefreshTokenRecord): void {
+  saveRefreshToken(
+    tokenHash: string,
+    record: PersistedRefreshTokenRecord,
+  ): void {
     this.database.sqlite
       .prepare(
         `insert into oauth_refresh_tokens (token_hash, client_id, scopes_json, expires_at, resource)
@@ -139,7 +164,10 @@ export class SqliteOAuthStore {
       );
   }
 
-  saveTokenPair(pair: PersistedTokenPair, consumedRefreshTokenHash?: string): boolean {
+  saveTokenPair(
+    pair: PersistedTokenPair,
+    consumedRefreshTokenHash?: string,
+  ): boolean {
     const save = this.database.sqlite.transaction(() => {
       if (consumedRefreshTokenHash) {
         const result = this.database.sqlite
@@ -174,7 +202,9 @@ export class SqliteOAuthStore {
   }
 
   deleteRefreshToken(tokenHash: string): void {
-    this.database.sqlite.prepare("delete from oauth_refresh_tokens where token_hash = ?").run(tokenHash);
+    this.database.sqlite
+      .prepare("delete from oauth_refresh_tokens where token_hash = ?")
+      .run(tokenHash);
   }
 
   close(): void {
@@ -182,8 +212,12 @@ export class SqliteOAuthStore {
   }
 
   private deleteExpiredTokens(nowSeconds: number): void {
-    this.database.sqlite.prepare("delete from oauth_access_tokens where expires_at < ?").run(nowSeconds);
-    this.database.sqlite.prepare("delete from oauth_refresh_tokens where expires_at < ?").run(nowSeconds);
+    this.database.sqlite
+      .prepare("delete from oauth_access_tokens where expires_at < ?")
+      .run(nowSeconds);
+    this.database.sqlite
+      .prepare("delete from oauth_refresh_tokens where expires_at < ?")
+      .run(nowSeconds);
   }
 }
 
@@ -198,7 +232,10 @@ export class SqliteOAuthClientsStore implements OAuthRegisteredClientsStore {
   }
 
   registerClient(
-    client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
+    client: Omit<
+      OAuthClientInformationFull,
+      "client_id" | "client_id_issued_at"
+    >,
   ): OAuthClientInformationFull {
     return this.store.registerClient(client, this.allowedRedirectHosts);
   }

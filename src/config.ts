@@ -42,7 +42,9 @@ function parsePort(value: string | number | undefined): number {
 function parseAllowedRoots(value: string | string[] | undefined): string[] {
   if (Array.isArray(value)) {
     const roots = value.map((entry) => entry.trim()).filter(Boolean);
-    return (roots.length > 0 ? roots : [process.cwd()]).map((root) => resolve(expandHomePath(root)));
+    return (roots.length > 0 ? roots : [process.cwd()]).map((root) =>
+      resolve(expandHomePath(root)),
+    );
   }
 
   const rawRoots =
@@ -55,7 +57,10 @@ function parseAllowedRoots(value: string | string[] | undefined): string[] {
   return roots.map((root) => resolve(expandHomePath(root)));
 }
 
-function parseAllowedHosts(value: string | string[] | undefined, derivedHosts: string[]): string[] {
+function parseAllowedHosts(
+  value: string | string[] | undefined,
+  derivedHosts: string[],
+): string[] {
   if (Array.isArray(value)) {
     return normalizeAllowedHosts(value, derivedHosts);
   }
@@ -69,7 +74,10 @@ function parseAllowedHosts(value: string | string[] | undefined, derivedHosts: s
   return normalizeAllowedHosts(rawHosts, derivedHosts);
 }
 
-function normalizeAllowedHosts(rawHosts: string[], derivedHosts: string[]): string[] {
+function normalizeAllowedHosts(
+  rawHosts: string[],
+  derivedHosts: string[],
+): string[] {
   const hosts = rawHosts.length > 0 ? rawHosts : derivedHosts;
   if (hosts.includes("*")) return ["*"];
   return Array.from(new Set(hosts.map((host) => host.trim()).filter(Boolean)));
@@ -85,13 +93,15 @@ function parseMinimalTools(env: NodeJS.ProcessEnv): boolean {
   if (env.DEVSPACE_TOOL_MODE) {
     throw new Error(`Invalid DEVSPACE_TOOL_MODE: ${env.DEVSPACE_TOOL_MODE}`);
   }
-  if (env.DEVSPACE_MINIMAL_TOOLS !== undefined) return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS);
+  if (env.DEVSPACE_MINIMAL_TOOLS !== undefined)
+    return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS);
   return true;
 }
 
 function parseLogLevel(value: string | undefined): LogLevel {
   if (!value || value === "info") return "info";
-  if (["silent", "error", "warn", "debug"].includes(value)) return value as LogLevel;
+  if (["silent", "error", "warn", "debug"].includes(value))
+    return value as LogLevel;
 
   throw new Error(`Invalid DEVSPACE_LOG_LEVEL: ${value}`);
 }
@@ -113,7 +123,10 @@ function parsePathList(value: string | undefined): string[] {
   );
 }
 
-function parseStringList(value: string | undefined, fallback: string[]): string[] {
+function parseStringList(
+  value: string | undefined,
+  fallback: string[],
+): string[] {
   const entries = value
     ?.split(",")
     .map((entry) => entry.trim())
@@ -122,7 +135,11 @@ function parseStringList(value: string | undefined, fallback: string[]): string[
   return entries && entries.length > 0 ? entries : fallback;
 }
 
-function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
   if (!value) return fallback;
 
   const parsed = Number(value);
@@ -144,9 +161,15 @@ function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
   return {
     level: parseLogLevel(env.DEVSPACE_LOG_LEVEL),
     format: parseLogFormat(env.DEVSPACE_LOG_FORMAT),
-    requests: env.DEVSPACE_LOG_REQUESTS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_REQUESTS),
+    requests:
+      env.DEVSPACE_LOG_REQUESTS === undefined
+        ? true
+        : parseBoolean(env.DEVSPACE_LOG_REQUESTS),
     assets: parseBoolean(env.DEVSPACE_LOG_ASSETS),
-    toolCalls: env.DEVSPACE_LOG_TOOL_CALLS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_TOOL_CALLS),
+    toolCalls:
+      env.DEVSPACE_LOG_TOOL_CALLS === undefined
+        ? true
+        : parseBoolean(env.DEVSPACE_LOG_TOOL_CALLS),
     shellCommands: parseBoolean(env.DEVSPACE_LOG_SHELL_COMMANDS),
     trustProxy: parseBoolean(env.DEVSPACE_TRUST_PROXY),
   };
@@ -162,7 +185,9 @@ function parseWidgetMode(value: string | undefined): WidgetMode {
 function parseRequiredSecret(value: string | undefined, name: string): string {
   const secret = value?.trim();
   if (!secret) {
-    throw new Error(`${name} is required for DevSpace OAuth. Run: devspace init`);
+    throw new Error(
+      `${name} is required for DevSpace OAuth. Run: devspace init`,
+    );
   }
   if (secret.length < 16) {
     throw new Error(`${name} must be at least 16 characters long.`);
@@ -170,9 +195,15 @@ function parseRequiredSecret(value: string | undefined, name: string): string {
   return secret;
 }
 
-function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined): OAuthConfig {
+function parseOAuthConfig(
+  env: NodeJS.ProcessEnv,
+  ownerToken: string | undefined,
+): OAuthConfig {
   return {
-    ownerToken: parseRequiredSecret(env.DEVSPACE_OAUTH_OWNER_TOKEN ?? ownerToken, "DEVSPACE_OAUTH_OWNER_TOKEN"),
+    ownerToken: parseRequiredSecret(
+      env.DEVSPACE_OAUTH_OWNER_TOKEN ?? ownerToken,
+      "DEVSPACE_OAUTH_OWNER_TOKEN",
+    ),
     accessTokenTtlSeconds: parsePositiveInteger(
       env.DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS,
       DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS,
@@ -184,11 +215,10 @@ function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined
       "DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS",
     ),
     scopes: parseStringList(env.DEVSPACE_OAUTH_SCOPES, ["devspace"]),
-    allowedRedirectHosts: parseStringList(env.DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS, [
-      "chatgpt.com",
-      "localhost",
-      "127.0.0.1",
-    ]),
+    allowedRedirectHosts: parseStringList(
+      env.DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS,
+      ["chatgpt.com", "localhost", "127.0.0.1"],
+    ),
   };
 }
 
@@ -209,7 +239,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const host = env.HOST ?? files.config.host ?? "127.0.0.1";
   const port = parsePort(env.PORT ?? files.config.port);
   const publicBaseUrl = parsePublicBaseUrl(
-    env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port),
+    env.DEVSPACE_PUBLIC_BASE_URL ??
+      files.config.publicBaseUrl ??
+      localPublicBaseUrl(host, port),
   );
   const derivedAllowedHosts = [
     "localhost",
@@ -224,17 +256,39 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     host,
     port,
     oauth: parseOAuthConfig(env, files.auth.ownerToken),
-    allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
-    allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
+    allowedRoots: parseAllowedRoots(
+      env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots,
+    ),
+    allowedHosts: parseAllowedHosts(
+      env.DEVSPACE_ALLOWED_HOSTS,
+      derivedAllowedHosts,
+    ),
     publicBaseUrl,
     minimalTools: parseMinimalTools(env),
     toolNaming: parseToolNaming(env.DEVSPACE_TOOL_NAMING),
     widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
-    stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),
-    worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
-    skillsEnabled: env.DEVSPACE_SKILLS === undefined ? true : parseBoolean(env.DEVSPACE_SKILLS),
+    stateDir: resolve(
+      expandHomePath(
+        env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir(),
+      ),
+    ),
+    worktreeRoot: resolve(
+      expandHomePath(
+        env.DEVSPACE_WORKTREE_ROOT ??
+          files.config.worktreeRoot ??
+          defaultWorktreeRoot(),
+      ),
+    ),
+    skillsEnabled:
+      env.DEVSPACE_SKILLS === undefined
+        ? true
+        : parseBoolean(env.DEVSPACE_SKILLS),
     skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
-    agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    agentDir: resolve(
+      expandHomePath(
+        env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir(),
+      ),
+    ),
     logging: parseLoggingConfig(env),
   };
 }
@@ -249,8 +303,9 @@ function parsePublicBaseUrl(value: string): string {
 
 function localPublicBaseUrl(host: string, port: number): string {
   const publicHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const formattedHost = publicHost.includes(":") && !publicHost.startsWith("[")
-    ? `[${publicHost}]`
-    : publicHost;
+  const formattedHost =
+    publicHost.includes(":") && !publicHost.startsWith("[")
+      ? `[${publicHost}]`
+      : publicHost;
   return `http://${formattedHost}:${port}`;
 }

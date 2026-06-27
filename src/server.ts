@@ -4,11 +4,17 @@ import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import {
+  mcpAuthRouter,
+  getOAuthProtectedResourceMetadataUrl,
+} from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
+import {
+  checkResourceAllowed,
+  resourceUrlFromServerUrl,
+} from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import {
   registerAppResource,
   registerAppTool,
@@ -184,7 +190,10 @@ function toolNamesFor(config: ServerConfig): ToolNames {
       };
 }
 
-function serverInstructions(config: ServerConfig, toolNames: ToolNames): string {
+function serverInstructions(
+  config: ServerConfig,
+  toolNames: ToolNames,
+): string {
   const inspection = config.minimalTools
     ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
     : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
@@ -255,7 +264,10 @@ function sendJsonRpcError(
   });
 }
 
-function requestLogFields(req: Request, config: ServerConfig): Record<string, unknown> {
+function requestLogFields(
+  req: Request,
+  config: ServerConfig,
+): Record<string, unknown> {
   return {
     ip: requestIp(req, config.logging.trustProxy),
     host: req.header("host"),
@@ -272,7 +284,10 @@ function logToolCall(config: ServerConfig, fields: ToolLogFields): void {
   const { command, ...safeFields } = fields;
   logEvent(config.logging, fields.success ? "info" : "warn", "tool_call", {
     ...safeFields,
-    commandPreview: config.logging.shellCommands && command ? commandPreview(command) : undefined,
+    commandPreview:
+      config.logging.shellCommands && command
+        ? commandPreview(command)
+        : undefined,
   });
 }
 
@@ -374,7 +389,9 @@ function uiManifestUrl(): URL {
 }
 
 function readWorkspaceAppManifest(): WorkspaceAppManifest {
-  return JSON.parse(readFileSync(uiManifestUrl(), "utf8")) as WorkspaceAppManifest;
+  return JSON.parse(
+    readFileSync(uiManifestUrl(), "utf8"),
+  ) as WorkspaceAppManifest;
 }
 
 function getWorkspaceAppManifestEntry(): WorkspaceAppManifestEntry {
@@ -508,7 +525,7 @@ function createMcpServer(
     {
       title: "Open workspace",
       description:
-        "Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode=\"worktree\" when the user asks for an isolated or parallel coding session. Returns a workspaceId, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.",
+        'Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. Returns a workspaceId, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.',
       inputSchema: {
         path: z
           .string()
@@ -524,7 +541,9 @@ function createMcpServer(
         baseRef: z
           .string()
           .optional()
-          .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
+          .describe(
+            'Git ref to base a worktree on. Only used with mode="worktree". Defaults to HEAD.',
+          ),
       },
       outputSchema: {
         workspaceId: z.string(),
@@ -552,7 +571,8 @@ function createMcpServer(
     },
     async ({ path, mode, baseRef }) => {
       const startedAt = performance.now();
-      const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
+      const { workspace, agentsFiles, availableAgentsFiles } =
+        await workspaces.openWorkspace({ path, mode, baseRef });
       if (config.widgets === "changes") {
         void reviewCheckpoints.initializeWorkspace({
           workspaceId: workspace.id,
@@ -593,7 +613,9 @@ function createMcpServer(
               ? `Available skills: ${visibleSkills.map((skill) => skill.name).join(", ")}`
               : undefined,
             instruction,
-          ].filter(Boolean).join("\n"),
+          ]
+            .filter(Boolean)
+            .join("\n"),
         },
       ];
       logToolCall(config, {
@@ -641,16 +663,15 @@ function createMcpServer(
     toolNames.read,
     {
       title: "Read file",
-      description:
-        [
-          "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId.",
-          "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
-          config.skillsEnabled
-            ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
-            : "",
-        ]
-          .filter(Boolean)
-          .join(" "),
+      description: [
+        "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId.",
+        "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
+        config.skillsEnabled
+          ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
       inputSchema: {
         workspaceId: z
           .string()
@@ -693,11 +714,16 @@ function createMcpServer(
       );
 
       if (response.isError) {
-        logFailedToolResponse(config, {
-          tool: toolNames.read,
-          workspaceId,
-          path: input.path,
-        }, response.content, startedAt);
+        logFailedToolResponse(
+          config,
+          {
+            tool: toolNames.read,
+            workspaceId,
+            path: input.path,
+          },
+          response.content,
+          startedAt,
+        );
         return response;
       }
       workspaces.markReadPathLoaded(workspace, readPath);
@@ -738,8 +764,7 @@ function createMcpServer(
     toolNames.write,
     {
       title: "Write file",
-      description:
-        `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
+      description: `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
       inputSchema: {
         workspaceId: z
           .string()
@@ -763,11 +788,16 @@ function createMcpServer(
       });
 
       if (response.isError) {
-        logFailedToolResponse(config, {
-          tool: toolNames.write,
-          workspaceId,
-          path: input.path,
-        }, response.content, startedAt);
+        logFailedToolResponse(
+          config,
+          {
+            tool: toolNames.write,
+            workspaceId,
+            path: input.path,
+          },
+          response.content,
+          startedAt,
+        );
         return response;
       }
 
@@ -812,8 +842,7 @@ function createMcpServer(
     toolNames.edit,
     {
       title: "Edit file",
-      description:
-        `Edit one file inside an open workspace by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.`,
+      description: `Edit one file inside an open workspace by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.`,
       inputSchema: {
         workspaceId: z
           .string()
@@ -850,11 +879,16 @@ function createMcpServer(
       });
 
       if (response.isError) {
-        logFailedToolResponse(config, {
-          tool: toolNames.edit,
-          workspaceId,
-          path: input.path,
-        }, response.content, startedAt);
+        logFailedToolResponse(
+          config,
+          {
+            tool: toolNames.edit,
+            workspaceId,
+            path: input.path,
+          },
+          response.content,
+          startedAt,
+        );
         return response;
       }
 
@@ -912,11 +946,15 @@ function createMcpServer(
           since: z
             .enum(["last_shown", "workspace_open"])
             .optional()
-            .describe("Defaults to last_shown. Use workspace_open to compare against the initial open_workspace checkpoint."),
+            .describe(
+              "Defaults to last_shown. Use workspace_open to compare against the initial open_workspace checkpoint.",
+            ),
           markReviewed: z
             .boolean()
             .optional()
-            .describe("Defaults to true. When true, advances the last shown checkpoint to the current workspace state."),
+            .describe(
+              "Defaults to true. When true, advances the last shown checkpoint to the current workspace state.",
+            ),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "show_changes"),
@@ -996,11 +1034,16 @@ function createMcpServer(
         });
 
         if (response.isError) {
-          logFailedToolResponse(config, {
-            tool: toolNames.grep,
-            workspaceId,
-            path: input.path,
-          }, response.content, startedAt);
+          logFailedToolResponse(
+            config,
+            {
+              tool: toolNames.grep,
+              workspaceId,
+              path: input.path,
+            },
+            response.content,
+            startedAt,
+          );
           return response;
         }
 
@@ -1066,11 +1109,16 @@ function createMcpServer(
         });
 
         if (response.isError) {
-          logFailedToolResponse(config, {
-            tool: toolNames.glob,
-            workspaceId,
-            path: input.path,
-          }, response.content, startedAt);
+          logFailedToolResponse(
+            config,
+            {
+              tool: toolNames.glob,
+              workspaceId,
+              path: input.path,
+            },
+            response.content,
+            startedAt,
+          );
           return response;
         }
 
@@ -1136,11 +1184,16 @@ function createMcpServer(
         });
 
         if (response.isError) {
-          logFailedToolResponse(config, {
-            tool: toolNames.ls,
-            workspaceId,
-            path: input.path,
-          }, response.content, startedAt);
+          logFailedToolResponse(
+            config,
+            {
+              tool: toolNames.ls,
+              workspaceId,
+              path: input.path,
+            },
+            response.content,
+            startedAt,
+          );
           return response;
         }
 
@@ -1219,13 +1272,18 @@ function createMcpServer(
       });
 
       if (response.isError) {
-        logFailedToolResponse(config, {
-          tool: toolNames.shell,
-          workspaceId,
-          workingDirectory: workingDirectory ?? ".",
-          command: input.command,
-          commandLength: input.command.length,
-        }, response.content, startedAt);
+        logFailedToolResponse(
+          config,
+          {
+            tool: toolNames.shell,
+            workspaceId,
+            workingDirectory: workingDirectory ?? ".",
+            command: input.command,
+            commandLength: input.command.length,
+          },
+          response.content,
+          startedAt,
+        );
         return response;
       }
 
@@ -1276,11 +1334,16 @@ export function createServer(config = loadConfig()): RunningServer {
   const transports = new Map<string, Transport>();
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const oauthProvider = new SingleUserOAuthProvider(
+    config.oauth,
+    mcpUrl,
+    config.stateDir,
+  );
   const bearerAuth = requireBearerAuth({
     verifier: oauthProvider,
     requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
+    resourceMetadataUrl:
+      getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
   });
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
@@ -1346,7 +1409,8 @@ export function createServer(config = loadConfig()): RunningServer {
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
     const sessionId = req.header("mcp-session-id");
-    const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
+    const initializeRequest =
+      req.method === "POST" && isInitializeRequest(req.body);
 
     await new Promise<void>((resolve, reject) => {
       bearerAuth(req, res, (error?: unknown) => {
@@ -1356,7 +1420,13 @@ export function createServer(config = loadConfig()): RunningServer {
     });
     if (res.headersSent) return;
 
-    if (!req.auth?.resource || !checkResourceAllowed({ requestedResource: req.auth.resource, configuredResource: resourceServerUrl })) {
+    if (
+      !req.auth?.resource ||
+      !checkResourceAllowed({
+        requestedResource: req.auth.resource,
+        configuredResource: resourceServerUrl,
+      })
+    ) {
       logEvent(config.logging, "warn", "auth_denied", {
         requestId,
         method: req.method,
@@ -1457,9 +1527,15 @@ if (await isMainModule()) {
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log("auth: oauth owner-token flow required");
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
-    console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
-    console.log(`asset logging: ${config.logging.assets ? "enabled" : "disabled"}`);
-    console.log(`trust proxy: ${config.logging.trustProxy ? "enabled" : "disabled"}`);
+    console.log(
+      `request logging: ${config.logging.requests ? "enabled" : "disabled"}`,
+    );
+    console.log(
+      `asset logging: ${config.logging.assets ? "enabled" : "disabled"}`,
+    );
+    console.log(
+      `trust proxy: ${config.logging.trustProxy ? "enabled" : "disabled"}`,
+    );
   });
 
   const shutdown = () => {

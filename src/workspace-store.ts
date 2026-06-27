@@ -1,9 +1,6 @@
 import { eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
-import {
-  workspaceSessions,
-  type WorkspaceSessionRow,
-} from "./db/schema.js";
+import { workspaceSessions, type WorkspaceSessionRow } from "./db/schema.js";
 
 export type WorkspaceMode = "checkout" | "worktree";
 
@@ -105,7 +102,6 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
   close(): void {
     this.database.close();
   }
-
 }
 
 export function createWorkspaceStore(stateDir: string): WorkspaceStore {

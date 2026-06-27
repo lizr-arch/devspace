@@ -1,4 +1,10 @@
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
 
 export const workspaceSessions = sqliteTable(
   "workspace_sessions",
@@ -38,40 +44,31 @@ export const loadedAgentFiles = sqliteTable(
   ],
 );
 
-export const oauthClients = sqliteTable(
-  "oauth_clients",
-  {
-    clientId: text("client_id").primaryKey(),
-    clientJson: text("client_json").notNull(),
-    issuedAt: integer("issued_at").notNull(),
-  },
-);
+export const oauthClients = sqliteTable("oauth_clients", {
+  clientId: text("client_id").primaryKey(),
+  clientJson: text("client_json").notNull(),
+  issuedAt: integer("issued_at").notNull(),
+});
 
-export const oauthAccessTokens = sqliteTable(
-  "oauth_access_tokens",
-  {
-    tokenHash: text("token_hash").primaryKey(),
-    clientId: text("client_id")
-      .notNull()
-      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
-    scopesJson: text("scopes_json").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    resource: text("resource"),
-  },
-);
+export const oauthAccessTokens = sqliteTable("oauth_access_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  clientId: text("client_id")
+    .notNull()
+    .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+  scopesJson: text("scopes_json").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  resource: text("resource"),
+});
 
-export const oauthRefreshTokens = sqliteTable(
-  "oauth_refresh_tokens",
-  {
-    tokenHash: text("token_hash").primaryKey(),
-    clientId: text("client_id")
-      .notNull()
-      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
-    scopesJson: text("scopes_json").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    resource: text("resource"),
-  },
-);
+export const oauthRefreshTokens = sqliteTable("oauth_refresh_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  clientId: text("client_id")
+    .notNull()
+    .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+  scopesJson: text("scopes_json").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  resource: text("resource"),
+});
 
 export type WorkspaceSessionRow = typeof workspaceSessions.$inferSelect;
 export type NewWorkspaceSessionRow = typeof workspaceSessions.$inferInsert;

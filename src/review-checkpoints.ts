@@ -35,7 +35,10 @@ interface WorkspaceReviewState {
 }
 
 export interface ReviewCheckpointManager {
-  initializeWorkspace(input: { workspaceId: string; root: string }): Promise<void>;
+  initializeWorkspace(input: {
+    workspaceId: string;
+    root: string;
+  }): Promise<void>;
   reviewChanges(input: {
     workspaceId: string;
     root: string;
@@ -58,20 +61,32 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
       try {
         const eligibility = await getGitEligibility(root);
         if (!eligibility.ok || !eligibility.gitRoot) {
-          state.diagnostic = eligibility.message ?? "show_changes requires a Git workspace in this version.";
+          state.diagnostic =
+            eligibility.message ??
+            "show_changes requires a Git workspace in this version.";
           return;
         }
 
         state.gitRoot = eligibility.gitRoot;
         const commit = await createWorkingTreeSnapshot(eligibility.gitRoot);
         await git(eligibility.gitRoot, ["update-ref", state.openRef, commit]);
-        await git(eligibility.gitRoot, ["update-ref", state.baselineRef, commit]);
+        await git(eligibility.gitRoot, [
+          "update-ref",
+          state.baselineRef,
+          commit,
+        ]);
       } catch (error) {
-        state.diagnostic = error instanceof Error ? error.message : String(error);
+        state.diagnostic =
+          error instanceof Error ? error.message : String(error);
       }
     },
 
-    async reviewChanges({ workspaceId, root, since = "last_shown", markReviewed = true }) {
+    async reviewChanges({
+      workspaceId,
+      root,
+      since = "last_shown",
+      markReviewed = true,
+    }) {
       let state = states.get(workspaceId);
       if (!state) {
         await this.initializeWorkspace({ workspaceId, root });
@@ -79,18 +94,40 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
       }
 
       if (!state?.gitRoot) {
-        throw new Error(state?.diagnostic ?? "show_changes requires a Git workspace in this version.");
+        throw new Error(
+          state?.diagnostic ??
+            "show_changes requires a Git workspace in this version.",
+        );
       }
 
-      const baselineRef = since === "workspace_open" ? state.openRef : state.baselineRef;
-      const baseline = (await git(state.gitRoot, ["rev-parse", "--verify", `${baselineRef}^{commit}`])).stdout.trim();
+      const baselineRef =
+        since === "workspace_open" ? state.openRef : state.baselineRef;
+      const baseline = (
+        await git(state.gitRoot, [
+          "rev-parse",
+          "--verify",
+          `${baselineRef}^{commit}`,
+        ])
+      ).stdout.trim();
       const current = await createWorkingTreeSnapshot(state.gitRoot);
-      const patch = (await git(state.gitRoot, ["diff", "--binary", "--no-color", baseline, current], {
-        maxBuffer: 50 * 1024 * 1024,
-      })).stdout;
-      const numstat = (await git(state.gitRoot, ["diff", "--numstat", "-z", baseline, current], {
-        maxBuffer: 50 * 1024 * 1024,
-      })).stdout;
+      const patch = (
+        await git(
+          state.gitRoot,
+          ["diff", "--binary", "--no-color", baseline, current],
+          {
+            maxBuffer: 50 * 1024 * 1024,
+          },
+        )
+      ).stdout;
+      const numstat = (
+        await git(
+          state.gitRoot,
+          ["diff", "--numstat", "-z", baseline, current],
+          {
+            maxBuffer: 50 * 1024 * 1024,
+          },
+        )
+      ).stdout;
       const files = parseNumstat(numstat);
       const summary = summarizeFiles(files);
 
@@ -111,7 +148,9 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
   };
 }
 
-function reviewRefs(workspaceId: string): Pick<WorkspaceReviewState, "openRef" | "baselineRef"> {
+function reviewRefs(
+  workspaceId: string,
+): Pick<WorkspaceReviewState, "openRef" | "baselineRef"> {
   const segment = safeWorkspaceRefSegment(workspaceId);
   return {
     openRef: `${REVIEW_REF_PREFIX}/${segment}/open`,
@@ -128,8 +167,16 @@ async function createWorkingTreeSnapshot(gitRoot: string): Promise<string> {
     await git(gitRoot, ["read-tree", "HEAD"], { env });
     await git(gitRoot, ["add", "-A", "--", "."], { env });
     const tree = (await git(gitRoot, ["write-tree"], { env })).stdout.trim();
-    const parent = (await git(gitRoot, ["rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim();
-    return (await git(gitRoot, ["commit-tree", tree, "-p", parent, "-m", "DevSpace review snapshot"], { env })).stdout.trim();
+    const parent = (
+      await git(gitRoot, ["rev-parse", "--verify", "HEAD^{commit}"])
+    ).stdout.trim();
+    return (
+      await git(
+        gitRoot,
+        ["commit-tree", tree, "-p", parent, "-m", "DevSpace review snapshot"],
+        { env },
+      )
+    ).stdout.trim();
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -157,7 +204,13 @@ function parseNumstat(output: string): ReviewFile[] {
 
     if (parts.length >= 3) {
       const path = parts[2] ?? "";
-      if (path) files.push({ path, type: fileType(path, undefined, additions, removals), additions, removals });
+      if (path)
+        files.push({
+          path,
+          type: fileType(path, undefined, additions, removals),
+          additions,
+          removals,
+        });
       continue;
     }
 
@@ -189,7 +242,8 @@ function fileType(
   additions: number,
   removals: number,
 ): ReviewFile["type"] {
-  if (previousPath) return additions === 0 && removals === 0 ? "rename-pure" : "rename-changed";
+  if (previousPath)
+    return additions === 0 && removals === 0 ? "rename-pure" : "rename-changed";
   if (additions > 0 && removals === 0) return "new";
   if (additions === 0 && removals > 0) return "deleted";
   return "change";

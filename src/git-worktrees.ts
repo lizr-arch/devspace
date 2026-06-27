@@ -38,7 +38,10 @@ export async function createManagedWorktree(input: {
   baseRef?: string;
   config: ServerConfig;
 }): Promise<ManagedWorktree> {
-  const sourcePath = assertAllowedPath(input.sourcePath, input.config.allowedRoots);
+  const sourcePath = assertAllowedPath(
+    input.sourcePath,
+    input.config.allowedRoots,
+  );
 
   try {
     const sourceStats = await stat(sourcePath);
@@ -56,10 +59,14 @@ export async function createManagedWorktree(input: {
     );
   }
 
-  const sourceRoot = await resolveGitRoot(sourcePath, input.config.allowedRoots);
+  const sourceRoot = await resolveGitRoot(
+    sourcePath,
+    input.config.allowedRoots,
+  );
   const baseRef = input.baseRef ?? "HEAD";
   const baseSha = await resolveBaseCommit(sourceRoot, baseRef);
-  const dirtySource = (await git(["status", "--porcelain=v1"], sourceRoot)).trim().length > 0;
+  const dirtySource =
+    (await git(["status", "--porcelain=v1"], sourceRoot)).trim().length > 0;
   const worktreePath = managedWorktreePath({
     worktreeRoot: input.config.worktreeRoot,
     repoRoot: sourceRoot,
@@ -69,7 +76,10 @@ export async function createManagedWorktree(input: {
   assertAllowedPath(worktreePath, [input.config.worktreeRoot]);
 
   try {
-    await git(["worktree", "add", "--detach", worktreePath, baseSha], sourceRoot);
+    await git(
+      ["worktree", "add", "--detach", worktreePath, baseSha],
+      sourceRoot,
+    );
   } catch (error) {
     await rm(worktreePath, { recursive: true, force: true });
     const message = error instanceof Error ? error.message : String(error);
@@ -90,7 +100,10 @@ export async function createManagedWorktree(input: {
   };
 }
 
-async function resolveGitRoot(path: string, allowedRoots: string[]): Promise<string> {
+async function resolveGitRoot(
+  path: string,
+  allowedRoots: string[],
+): Promise<string> {
   try {
     const output = await git(["rev-parse", "--show-toplevel"], path);
     return await assertGitRootAllowed(output.trim(), allowedRoots);
@@ -109,18 +122,29 @@ async function resolveGitRoot(path: string, allowedRoots: string[]): Promise<str
   }
 }
 
-async function assertGitRootAllowed(gitRoot: string, allowedRoots: string[]): Promise<string> {
+async function assertGitRootAllowed(
+  gitRoot: string,
+  allowedRoots: string[],
+): Promise<string> {
   try {
     return assertAllowedPath(gitRoot, allowedRoots);
   } catch {
     const canonicalGitRoot = await realpath(gitRoot);
     for (const allowedRoot of allowedRoots) {
-      const canonicalAllowedRoot = await realpath(allowedRoot).catch(() => undefined);
-      if (!canonicalAllowedRoot || !isPathInsideRoot(canonicalGitRoot, canonicalAllowedRoot)) {
+      const canonicalAllowedRoot = await realpath(allowedRoot).catch(
+        () => undefined,
+      );
+      if (
+        !canonicalAllowedRoot ||
+        !isPathInsideRoot(canonicalGitRoot, canonicalAllowedRoot)
+      ) {
         continue;
       }
 
-      const logicalGitRoot = resolve(allowedRoot, relative(canonicalAllowedRoot, canonicalGitRoot));
+      const logicalGitRoot = resolve(
+        allowedRoot,
+        relative(canonicalAllowedRoot, canonicalGitRoot),
+      );
       return assertAllowedPath(logicalGitRoot, allowedRoots);
     }
 
@@ -128,14 +152,19 @@ async function assertGitRootAllowed(gitRoot: string, allowedRoots: string[]): Pr
   }
 }
 
-async function resolveBaseCommit(sourceRoot: string, baseRef: string): Promise<string> {
+async function resolveBaseCommit(
+  sourceRoot: string,
+  baseRef: string,
+): Promise<string> {
   try {
-    return (await git(["rev-parse", "--verify", `${baseRef}^{commit}`], sourceRoot)).trim();
+    return (
+      await git(["rev-parse", "--verify", `${baseRef}^{commit}`], sourceRoot)
+    ).trim();
   } catch (error) {
     if (baseRef === "HEAD") {
       throw new GitWorktreeError(
         "GIT_REPOSITORY_HAS_NO_COMMITS",
-        "Cannot open workspace in worktree mode because the repository has no commits yet. Create an initial commit first, or use mode=\"checkout\".",
+        'Cannot open workspace in worktree mode because the repository has no commits yet. Create an initial commit first, or use mode="checkout".',
       );
     }
 
@@ -146,7 +175,10 @@ async function resolveBaseCommit(sourceRoot: string, baseRef: string): Promise<s
   }
 }
 
-function managedWorktreePath(input: { worktreeRoot: string; repoRoot: string }): string {
+function managedWorktreePath(input: {
+  worktreeRoot: string;
+  repoRoot: string;
+}): string {
   const repoName = sanitizePathSegment(basename(input.repoRoot)) || "repo";
   const worktreeId = randomBytes(4).toString("hex");
   return join(input.worktreeRoot, `${repoName}-${worktreeId}`);
@@ -169,13 +201,18 @@ async function git(args: string[], cwd: string): Promise<string> {
   } catch (error) {
     if (isGitUnavailable(error)) throw error;
 
-    const stderr = typeof error === "object" && error && "stderr" in error
-      ? String((error as { stderr?: unknown }).stderr ?? "").trim()
-      : "";
-    const stdout = typeof error === "object" && error && "stdout" in error
-      ? String((error as { stdout?: unknown }).stdout ?? "").trim()
-      : "";
-    const details = stderr || stdout || (error instanceof Error ? error.message : String(error));
+    const stderr =
+      typeof error === "object" && error && "stderr" in error
+        ? String((error as { stderr?: unknown }).stderr ?? "").trim()
+        : "";
+    const stdout =
+      typeof error === "object" && error && "stdout" in error
+        ? String((error as { stdout?: unknown }).stdout ?? "").trim()
+        : "";
+    const details =
+      stderr ||
+      stdout ||
+      (error instanceof Error ? error.message : String(error));
     throw new Error(details);
   }
 }
@@ -183,8 +220,8 @@ async function git(args: string[], cwd: string): Promise<string> {
 function isGitUnavailable(error: unknown): boolean {
   return Boolean(
     typeof error === "object" &&
-      error &&
-      "code" in error &&
-      (error as { code?: unknown }).code === "ENOENT",
+    error &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT",
   );
 }

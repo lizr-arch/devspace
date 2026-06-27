@@ -36,8 +36,14 @@ try {
   assert.equal(firstReview.summary.files, 2);
   assert.equal(firstReview.summary.additions, 2);
   assert.equal(firstReview.summary.removals, 0);
-  assert.equal(firstReview.files.some((file) => file.path === "README.md"), true);
-  assert.equal(firstReview.files.some((file) => file.path === "new.txt"), true);
+  assert.equal(
+    firstReview.files.some((file) => file.path === "README.md"),
+    true,
+  );
+  assert.equal(
+    firstReview.files.some((file) => file.path === "new.txt"),
+    true,
+  );
   assert.match(firstReview.patch, /world/);
 
   const stillUnreviewed = await manager.reviewChanges({
@@ -47,7 +53,10 @@ try {
   });
   assert.equal(stillUnreviewed.summary.files, 2);
 
-  const afterReviewed = await manager.reviewChanges({ workspaceId: "ws_review", root });
+  const afterReviewed = await manager.reviewChanges({
+    workspaceId: "ws_review",
+    root,
+  });
   assert.equal(afterReviewed.summary.files, 0);
 } finally {
   await rm(root, { recursive: true, force: true });

@@ -98,7 +98,12 @@ export function isEditTool(tool: ToolName): boolean {
 }
 
 export function isSearchTool(tool: ToolName): boolean {
-  return tool === "grep_files" || tool === "find_files" || tool === "grep" || tool === "glob";
+  return (
+    tool === "grep_files" ||
+    tool === "find_files" ||
+    tool === "grep" ||
+    tool === "glob"
+  );
 }
 
 export function isShellTool(tool: ToolName): boolean {
@@ -109,7 +114,9 @@ export function isReviewTool(tool: ToolName): boolean {
   return tool === "show_changes";
 }
 
-export function isToolResultCard(value: unknown): value is Omit<ToolResultCard, "tool"> {
+export function isToolResultCard(
+  value: unknown,
+): value is Omit<ToolResultCard, "tool"> {
   return Boolean(value && typeof value === "object");
 }
 
@@ -130,7 +137,9 @@ export function summaryNumber(
   key: string,
 ): number | undefined {
   const value = summary?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 export function isExpandableCard(card: ToolResultCard): boolean {
@@ -146,7 +155,8 @@ export function isExpandableCard(card: ToolResultCard): boolean {
     );
   }
 
-  if (isReviewTool(card.tool)) return Boolean(card.files?.length || card.payload?.patch);
+  if (isReviewTool(card.tool))
+    return Boolean(card.files?.length || card.payload?.patch);
 
   return Boolean(card.payload);
 }

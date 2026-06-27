@@ -1,15 +1,31 @@
-import { timingSafeEqual, randomBytes, randomUUID, createHash } from "node:crypto";
+import {
+  timingSafeEqual,
+  randomBytes,
+  randomUUID,
+  createHash,
+} from "node:crypto";
 import type { Response } from "express";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
-import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
-import { AccessDeniedError, InvalidGrantError, InvalidRequestError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import type {
+  OAuthServerProvider,
+  AuthorizationParams,
+} from "@modelcontextprotocol/sdk/server/auth/provider.js";
+import {
+  AccessDeniedError,
+  InvalidGrantError,
+  InvalidRequestError,
+  InvalidTokenError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type {
   OAuthClientInformationFull,
   OAuthTokenRevocationRequest,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
+import {
+  checkResourceAllowed,
+  resourceUrlFromServerUrl,
+} from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
 
 export interface OAuthConfig {
@@ -55,14 +71,18 @@ function formHtml(params: {
   resource?: URL;
   fields: Record<string, string | undefined>;
 }): string {
-  const scopeText = params.scopes.length > 0 ? params.scopes.join(" ") : "devspace";
+  const scopeText =
+    params.scopes.length > 0 ? params.scopes.join(" ") : "devspace";
   const resourceText = params.resource?.href ?? "DevSpace MCP endpoint";
   const error = params.error
     ? `<p class="error">${htmlEscape(params.error)}</p>`
     : "";
   const hiddenFields = Object.entries(params.fields)
     .filter((entry): entry is [string, string] => entry[1] !== undefined)
-    .map(([name, value]) => `        <input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}" />`)
+    .map(
+      ([name, value]) =>
+        `        <input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}" />`,
+    )
     .join("\n");
 
   return `<!doctype html>
@@ -107,7 +127,10 @@ ${hiddenFields}
 </html>`;
 }
 
-function requestedScopesAllowed(requested: string[], supported: string[]): boolean {
+function requestedScopesAllowed(
+  requested: string[],
+  supported: string[],
+): boolean {
   return requested.every((scope) => supported.includes(scope));
 }
 
@@ -124,7 +147,10 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   ) {
     this.resourceServerUrl = resourceUrlFromServerUrl(resourceServerUrl);
     this.oauthStore = new SqliteOAuthStore(stateDir);
-    this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
+    this.clientsStore = new SqliteOAuthClientsStore(
+      this.oauthStore,
+      config.allowedRedirectHosts,
+    );
   }
 
   async authorize(
@@ -132,7 +158,13 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     params: AuthorizationParams,
     res: Response,
   ): Promise<void> {
-    if (!params.resource || !checkResourceAllowed({ requestedResource: params.resource, configuredResource: this.resourceServerUrl })) {
+    if (
+      !params.resource ||
+      !checkResourceAllowed({
+        requestedResource: params.resource,
+        configuredResource: this.resourceServerUrl,
+      })
+    ) {
       throw new InvalidRequestError("Invalid or missing OAuth resource");
     }
     if (!requestedScopesAllowed(params.scopes ?? [], this.config.scopes)) {
@@ -176,7 +208,8 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
 
     const redirectUrl = new URL(params.redirectUri);
     redirectUrl.searchParams.set("code", code);
-    if (params.state !== undefined) redirectUrl.searchParams.set("state", params.state);
+    if (params.state !== undefined)
+      redirectUrl.searchParams.set("state", params.state);
     res.redirect(302, redirectUrl.href);
   }
 
@@ -197,14 +230,26 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const record = this.validCodeRecord(client, authorizationCode);
     if (redirectUri && redirectUri !== record.params.redirectUri) {
-      throw new InvalidGrantError("redirect_uri does not match the authorization request");
+      throw new InvalidGrantError(
+        "redirect_uri does not match the authorization request",
+      );
     }
-    if (resource && !checkResourceAllowed({ requestedResource: resource, configuredResource: this.resourceServerUrl })) {
+    if (
+      resource &&
+      !checkResourceAllowed({
+        requestedResource: resource,
+        configuredResource: this.resourceServerUrl,
+      })
+    ) {
       throw new InvalidGrantError("Invalid resource");
     }
 
     this.codes.delete(authorizationCode);
-    return this.issueTokens(client.client_id, record.params.scopes ?? this.config.scopes, record.params.resource);
+    return this.issueTokens(
+      client.client_id,
+      record.params.scopes ?? this.config.scopes,
+      record.params.resource,
+    );
   }
 
   async exchangeRefreshToken(
@@ -215,16 +260,28 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const refreshTokenHash = hashToken(refreshToken);
     const record = this.oauthStore.getRefreshToken(refreshTokenHash);
-    if (!record || record.clientId !== client.client_id || record.expiresAt < Math.floor(Date.now() / 1000)) {
+    if (
+      !record ||
+      record.clientId !== client.client_id ||
+      record.expiresAt < Math.floor(Date.now() / 1000)
+    ) {
       throw new InvalidGrantError("Invalid refresh token");
     }
-    if (resource && !checkResourceAllowed({ requestedResource: resource, configuredResource: this.resourceServerUrl })) {
+    if (
+      resource &&
+      !checkResourceAllowed({
+        requestedResource: resource,
+        configuredResource: this.resourceServerUrl,
+      })
+    ) {
       throw new InvalidGrantError("Invalid resource");
     }
 
     const requestedScopes = scopes ?? record.scopes;
     if (!requestedScopes.every((scope) => record.scopes.includes(scope))) {
-      throw new AccessDeniedError("Refresh token cannot grant requested scopes");
+      throw new AccessDeniedError(
+        "Refresh token cannot grant requested scopes",
+      );
     }
 
     return this.issueTokens(
@@ -250,7 +307,10 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     };
   }
 
-  async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
+  async revokeToken(
+    _client: OAuthClientInformationFull,
+    request: OAuthTokenRevocationRequest,
+  ): Promise<void> {
     const hashed = hashToken(request.token);
     this.oauthStore.deleteAccessToken(hashed);
     this.oauthStore.deleteRefreshToken(hashed);
@@ -265,7 +325,11 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     authorizationCode: string,
   ): AuthorizationCodeRecord {
     const record = this.codes.get(authorizationCode);
-    if (!record || record.clientId !== client.client_id || record.expiresAtMs < Date.now()) {
+    if (
+      !record ||
+      record.clientId !== client.client_id ||
+      record.expiresAtMs < Date.now()
+    ) {
       throw new InvalidGrantError("Invalid authorization code");
     }
     return record;

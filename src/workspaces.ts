@@ -5,7 +5,11 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
+import {
+  assertAllowedPath,
+  isPathInsideRoot,
+  resolveAllowedPath,
+} from "./roots.js";
 import {
   loadWorkspaceSkills,
   markSkillActivated,
@@ -69,7 +73,9 @@ export class WorkspaceRegistry {
     private readonly store?: WorkspaceStore,
   ) {}
 
-  async openWorkspace(input: string | OpenWorkspaceInput): Promise<WorkspaceContext> {
+  async openWorkspace(
+    input: string | OpenWorkspaceInput,
+  ): Promise<WorkspaceContext> {
     const options = typeof input === "string" ? { path: input } : input;
     const mode = options.mode ?? "checkout";
 
@@ -89,10 +95,16 @@ export class WorkspaceRegistry {
 
     const session = this.store?.getSession(workspaceId);
     if (!session) {
-      throw new Error(`Unknown workspaceId: ${workspaceId}. Call open_workspace first.`);
+      throw new Error(
+        `Unknown workspaceId: ${workspaceId}. Call open_workspace first.`,
+      );
     }
 
-    const root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
+    const root = this.assertWorkspaceRootAllowed(
+      session.root,
+      session.mode,
+      session.sourceRoot,
+    );
     const restoredWorkspace: Workspace = {
       id: session.id,
       root,
@@ -119,7 +131,9 @@ export class WorkspaceRegistry {
   }
 
   resolvePath(workspace: Workspace, inputPath: string): string {
-    const absolutePath = resolveAllowedPath(inputPath, workspace.root, [workspace.root]);
+    const absolutePath = resolveAllowedPath(inputPath, workspace.root, [
+      workspace.root,
+    ]);
     if (!isPathInsideRoot(absolutePath, workspace.root)) {
       throw new Error(`Path is outside workspace root: ${inputPath}`);
     }
@@ -151,12 +165,20 @@ export class WorkspaceRegistry {
 
   markReadPathLoaded(workspace: Workspace, readPath: WorkspaceReadPath): void {
     if (readPath.skillRead?.isSkillFile) {
-      markSkillActivated(workspace.activatedSkillDirs, readPath.skillRead.skill);
+      markSkillActivated(
+        workspace.activatedSkillDirs,
+        readPath.skillRead.skill,
+      );
     }
   }
 
-  resolveWorkingDirectory(workspace: Workspace, workingDirectory: string | undefined): string {
-    const directory = workingDirectory ? this.resolvePath(workspace, workingDirectory) : workspace.root;
+  resolveWorkingDirectory(
+    workspace: Workspace,
+    workingDirectory: string | undefined,
+  ): string {
+    const directory = workingDirectory
+      ? this.resolvePath(workspace, workingDirectory)
+      : workspace.root;
     return assertAllowedPath(directory, [workspace.root]);
   }
 
@@ -172,7 +194,10 @@ export class WorkspaceRegistry {
     return this.createWorkspaceContext({ root, mode: "checkout" });
   }
 
-  private async openWorktreeWorkspace(path: string, baseRef: string | undefined): Promise<WorkspaceContext> {
+  private async openWorktreeWorkspace(
+    path: string,
+    baseRef: string | undefined,
+  ): Promise<WorkspaceContext> {
     const worktree = await createManagedWorktree({
       sourcePath: path,
       baseRef,
@@ -214,12 +239,17 @@ export class WorkspaceRegistry {
     });
     this.workspaces.set(workspace.id, workspace);
     const agentsFiles = this.loadInitialAgentsFiles(workspace.root);
-    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const availableAgentsFiles = await this.findAvailableAgentsFiles(
+      workspace.root,
+      agentsFiles,
+    );
 
     return { workspace, agentsFiles, availableAgentsFiles };
   }
 
-  private loadSkillsForWorkspace(root: string): Pick<Workspace, "skills" | "skillDiagnostics"> {
+  private loadSkillsForWorkspace(
+    root: string,
+  ): Pick<Workspace, "skills" | "skillDiagnostics"> {
     const result = loadWorkspaceSkills(this.config, root);
     return {
       skills: result.skills,
@@ -227,10 +257,16 @@ export class WorkspaceRegistry {
     };
   }
 
-  private assertWorkspaceRootAllowed(root: string, mode: WorkspaceMode, sourceRoot: string | undefined): string {
+  private assertWorkspaceRootAllowed(
+    root: string,
+    mode: WorkspaceMode,
+    sourceRoot: string | undefined,
+  ): string {
     if (mode === "worktree") {
       if (!sourceRoot) {
-        throw new Error(`Stored worktree workspace is missing sourceRoot: ${root}`);
+        throw new Error(
+          `Stored worktree workspace is missing sourceRoot: ${root}`,
+        );
       }
       assertAllowedPath(sourceRoot, this.config.allowedRoots);
       return assertAllowedPath(root, [this.config.worktreeRoot]);
@@ -273,7 +309,12 @@ export class WorkspaceRegistry {
   }
 }
 
-const CONTEXT_FILE_NAMES = new Set(["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
+const CONTEXT_FILE_NAMES = new Set([
+  "AGENTS.md",
+  "AGENTS.MD",
+  "CLAUDE.md",
+  "CLAUDE.MD",
+]);
 const SKIPPED_CONTEXT_DIRS = new Set([
   ".git",
   ".hg",
@@ -287,7 +328,10 @@ const SKIPPED_CONTEXT_DIRS = new Set([
   ".cache",
 ]);
 
-export function formatAgentsPath(path: string, workspaceRoot: string | undefined): string {
+export function formatAgentsPath(
+  path: string,
+  workspaceRoot: string | undefined,
+): string {
   if (!workspaceRoot) return path.split(sep).join("/");
 
   const relationship = relative(workspaceRoot, path);
@@ -305,7 +349,10 @@ export function formatAgentsPath(path: string, workspaceRoot: string | undefined
 
 async function walkWorkspace(
   directory: string,
-  visit: (path: string, entry: { name: string; isFile(): boolean; isDirectory(): boolean }) => Promise<void> | void,
+  visit: (
+    path: string,
+    entry: { name: string; isFile(): boolean; isDirectory(): boolean },
+  ) => Promise<void> | void,
 ): Promise<void> {
   let entries;
   try {

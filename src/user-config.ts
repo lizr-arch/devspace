@@ -1,10 +1,5 @@
 import { randomBytes } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
@@ -34,11 +29,17 @@ export interface DevspaceFiles {
   auth: DevspaceAuthConfig;
 }
 
-export function devspaceConfigDir(env: NodeJS.ProcessEnv = process.env): string {
-  return resolve(expandHomePath(env.DEVSPACE_CONFIG_DIR ?? join(homedir(), ".devspace")));
+export function devspaceConfigDir(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolve(
+    expandHomePath(env.DEVSPACE_CONFIG_DIR ?? join(homedir(), ".devspace")),
+  );
 }
 
-export function devspaceConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+export function devspaceConfigPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
   return join(devspaceConfigDir(env), "config.json");
 }
 
@@ -46,7 +47,9 @@ export function devspaceAuthPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(devspaceConfigDir(env), "auth.json");
 }
 
-export function loadDevspaceFiles(env: NodeJS.ProcessEnv = process.env): DevspaceFiles {
+export function loadDevspaceFiles(
+  env: NodeJS.ProcessEnv = process.env,
+): DevspaceFiles {
   const dir = devspaceConfigDir(env);
   const configPath = join(dir, "config.json");
   const authPath = join(dir, "auth.json");

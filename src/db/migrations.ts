@@ -31,7 +31,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
 
     const applied = new Set(
       (
-        sqlite.prepare("select version from devspace_schema_migrations").all() as Array<{
+        sqlite
+          .prepare("select version from devspace_schema_migrations")
+          .all() as Array<{
           version: number;
         }>
       ).map((row) => row.version),
@@ -43,7 +45,11 @@ export function migrateDatabase(sqlite: Database.Database): void {
     for (const migration of migrations) {
       if (applied.has(migration.version)) continue;
       migration.up(sqlite);
-      recordMigration.run(migration.version, migration.name, new Date().toISOString());
+      recordMigration.run(
+        migration.version,
+        migration.name,
+        new Date().toISOString(),
+      );
     }
   });
 
@@ -88,11 +94,21 @@ function migrateWorkspaceState(sqlite: Database.Database): void {
       on loaded_agent_files(path);
   `);
 
-  addColumnIfMissing(sqlite, "workspace_sessions", "mode", "text not null default 'checkout'");
+  addColumnIfMissing(
+    sqlite,
+    "workspace_sessions",
+    "mode",
+    "text not null default 'checkout'",
+  );
   addColumnIfMissing(sqlite, "workspace_sessions", "source_root", "text");
   addColumnIfMissing(sqlite, "workspace_sessions", "base_ref", "text");
   addColumnIfMissing(sqlite, "workspace_sessions", "base_sha", "text");
-  addColumnIfMissing(sqlite, "workspace_sessions", "managed", "text not null default 'false'");
+  addColumnIfMissing(
+    sqlite,
+    "workspace_sessions",
+    "managed",
+    "text not null default 'false'",
+  );
 }
 
 function migrateOAuthState(sqlite: Database.Database): void {
@@ -144,7 +160,9 @@ function addColumnIfMissing(
   column: string,
   definition: string,
 ): void {
-  const columns = sqlite.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>;
+  const columns = sqlite.prepare(`pragma table_info(${table})`).all() as Array<{
+    name: string;
+  }>;
   if (columns.some((existingColumn) => existingColumn.name === column)) return;
 
   sqlite.exec(`alter table ${table} add column ${column} ${definition}`);

@@ -1,0 +1,19 @@
+# DevSpace Worker Configuration
+
+# Ollama API URL
+ollama_url: http://localhost:11434
+
+# Model to use for code generation
+model: llama3
+
+# How often to check for new tasks (seconds)
+poll_interval: 10
+
+# Maximum execution time per task (seconds)
+max_execution_time: 1800
+
+# Number of retries when tests fail
+max_retries: 1
+
+# Project root directory (default: current directory)
+# project_root: .
