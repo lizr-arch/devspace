@@ -22,6 +22,8 @@ DEVSPACE_CONFIG_DIR=/path/to/config npx @waishnav/devspace serve
 npx @waishnav/devspace init
 npx @waishnav/devspace serve
 npx @waishnav/devspace doctor
+npx @waishnav/devspace doctor --live
+npx @waishnav/devspace doctor --public
 npx @waishnav/devspace config get
 npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 ```
@@ -33,9 +35,10 @@ npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 | `HOST` | Local bind host. Defaults to `127.0.0.1`. |
 | `PORT` | Local port. Defaults to `7676`. |
 | `DEVSPACE_ALLOWED_ROOTS` | Comma-separated local roots that workspaces may open. |
-| `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the server, without `/mcp`. |
+| `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the MCP endpoint and built-in OAuth pages, without `/mcp`. |
 | `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
+| `DEVSPACE_READ_ONLY` | Set to `1` to expose a read-only MCP surface with no write, edit, or shell tools. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
 | `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
 
@@ -57,6 +60,10 @@ MCP clients discover metadata from:
 /.well-known/oauth-authorization-server
 ```
 
+`DEVSPACE_PUBLIC_BASE_URL` becomes the OAuth issuer and base URL for DevSpace's
+built-in Owner password flow. The user's browser must be able to reach that
+origin during OAuth approval.
+
 ## Tool Modes
 
 `DEVSPACE_TOOL_NAMING` controls tool names.
@@ -72,6 +79,12 @@ MCP clients discover metadata from:
 | --- | --- |
 | `minimal` | Default. Disables dedicated search and list tools. Clients use the shell tool with `rg`, `grep`, `find`, `ls`, or `tree` for inspection. |
 | `full` | Enables dedicated `grep`, `glob`, and `ls` tools. |
+
+`DEVSPACE_READ_ONLY=1` switches DevSpace into a read-only profile. In that
+mode, DevSpace exposes `open_workspace`, `read`, `grep`, `glob`, and `ls`, and
+disables `write`, `edit`, and `bash`. Dedicated read/search tools stay enabled
+even when `DEVSPACE_TOOL_MODE=minimal`, because the shell fallback is
+intentionally unavailable in read-only mode.
 
 ## Widgets
 
@@ -122,6 +135,7 @@ DEVSPACE_OAUTH_OWNER_TOKEN="$(openssl rand -base64 32)" \
 DEVSPACE_ALLOWED_ROOTS="$HOME/personal,$HOME/work" \
 DEVSPACE_PUBLIC_BASE_URL="https://devspace.example.com" \
 DEVSPACE_WORKTREE_ROOT="$HOME/.devspace/worktrees" \
+DEVSPACE_READ_ONLY="1" \
 DEVSPACE_TOOL_MODE="minimal" \
 DEVSPACE_TOOL_NAMING="short" \
 DEVSPACE_WIDGETS="full" \

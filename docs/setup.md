@@ -3,6 +3,11 @@
 This guide is for users who want ChatGPT or another MCP host to work in local
 projects through DevSpace.
 
+ChatGPT-side developer mode access, MCP write permissions, and model/reasoning
+tiers are controlled by OpenAI and can change independently of DevSpace. Verify
+your current ChatGPT plan, workspace entitlements, and connector permissions in
+ChatGPT itself before treating DevSpace as the blocker.
+
 ## Requirements
 
 - Node `>=20.12 <27`; Node 22 LTS is recommended
@@ -13,6 +18,15 @@ projects through DevSpace.
 
 DevSpace does not create the public tunnel for you. Use Cloudflare Tunnel,
 ngrok, Pinggy, Tailscale Funnel, or your own HTTPS reverse proxy.
+
+For Pinggy on Windows, prefer an explicit IPv4 SSH forward:
+
+```bash
+ssh -T -p 443 -R0:127.0.0.1:7676 qr@a.pinggy.io
+```
+
+Using `localhost:7676` can produce tunnel-side `502` errors when the local
+service is listening on `127.0.0.1`.
 
 ## Install And Configure
 
@@ -74,6 +88,28 @@ Configure the MCP client with the full MCP endpoint:
 https://your-tunnel-host.example.com/mcp
 ```
 
+This same public origin is also used for DevSpace OAuth approval pages. Do not
+point ChatGPT at a private-only URL unless the browser-facing OAuth endpoints
+are reachable too.
+
+If your tunnel assigns a fresh hostname each run, restart DevSpace with that
+exact hostname so the host allowlist and OAuth metadata stay aligned. If the
+hostname changes underneath a running DevSpace process, public requests may fail
+with `Invalid Host`.
+
+### Fast Verified Tunnel Path
+
+One verified public HTTPS path is Cloudflare Quick Tunnel:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:7676
+DEVSPACE_PUBLIC_BASE_URL="https://your-assigned.trycloudflare.com" npx @waishnav/devspace serve
+npx @waishnav/devspace doctor --public
+```
+
+That sequence has been validated against DevSpace's public `/healthz`, OAuth
+metadata, dynamic client registration, and Owner password approval page.
+
 ## Start The Server
 
 Run:
@@ -109,16 +145,48 @@ The default config files are:
 
 Keep `auth.json` private.
 
+## Connect From ChatGPT Web
+
+Use this flow when you want ChatGPT web to operate on your local machine through
+DevSpace:
+
+1. In ChatGPT web, enable developer mode.
+2. Create a custom connector.
+3. Enter your public DevSpace MCP URL:
+
+```text
+https://your-tunnel-host.example.com/mcp
+```
+
+4. Let ChatGPT start the OAuth flow.
+5. Enter the DevSpace Owner password on the approval page.
+6. Start a chat, attach the connector, and ask ChatGPT to open a project.
+
+DevSpace does not pick the ChatGPT model or reasoning level. Choose the
+strongest model and highest reasoning level available in ChatGPT before you
+start the coding session.
+
+For a fuller explanation of the network path and OAuth boundary, see
+[ChatGPT Web Connection Path](./chatgpt-web-connection.md).
+
 ## Check Your Setup
 
 Run:
 
 ```bash
 npx @waishnav/devspace doctor
+npx @waishnav/devspace doctor --live
+npx @waishnav/devspace doctor --public
+npx @waishnav/devspace doctor --public --full-loop
 ```
 
 The doctor command reports the resolved config, Node version, Node ABI, platform,
-Git, Bash, public URL, allowed hosts, and SQLite native dependency status.
+Git, Bash, public URL, allowed hosts, SQLite native dependency status, and
+ChatGPT Web readiness details. `--live` also probes local health, OAuth
+metadata, dynamic registration, and the Owner password approval page. `--public`
+probes the configured public URL through your live tunnel or reverse proxy.
+`--public --full-loop` additionally completes a real external OAuth flow and a
+real `open_workspace` MCP call through that public URL.
 
 ## Running From A Local Checkout
 

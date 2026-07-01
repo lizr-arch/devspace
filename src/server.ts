@@ -190,13 +190,17 @@ function toolNamesFor(config: ServerConfig): ToolNames {
       };
 }
 
+function exposeDedicatedReadTools(config: ServerConfig): boolean {
+  return config.readOnly || !config.minimalTools;
+}
+
 function serverInstructions(
   config: ServerConfig,
   toolNames: ToolNames,
 ): string {
-  const inspection = config.minimalTools
-    ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
-    : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
+  const inspectionText = exposeDedicatedReadTools(config)
+    ? `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `
+    : `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `;
 
   const skills = config.skillsEnabled
     ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
@@ -209,7 +213,11 @@ function serverInstructions(
       ? " After creating, editing, or overwriting files, call show_changes once after the related file changes are complete so the user can see the aggregate diff."
       : "";
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}`;
+  if (config.readOnly) {
+    return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.`;
+  }
+
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}`;
 }
 function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
   return {
@@ -524,8 +532,9 @@ function createMcpServer(
     "open_workspace",
     {
       title: "Open workspace",
-      description:
-        'Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. Returns a workspaceId, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.',
+      description: config.readOnly
+        ? 'Open a local project directory as a read-only coding workspace. Call this once per project folder or worktree before reading, searching, listing directories, or showing changes. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. Returns a workspaceId, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.'
+        : 'Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. Returns a workspaceId, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.',
       inputSchema: {
         path: z
           .string()
@@ -593,9 +602,18 @@ function createMcpServer(
       const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
       }));
-      const instruction = config.skillsEnabled
-        ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
-        : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+      const instructionPrefix = config.readOnly
+        ? "Use this workspaceId in all subsequent read-only tool calls for this project."
+        : "Use this workspaceId in all subsequent tool calls for this project.";
+      const instructionCore =
+        " Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+      const instructionSkills = config.skillsEnabled
+        ? " When a task matches an available skill in skills, read its path before proceeding."
+        : "";
+      const instructionReadOnly = config.readOnly
+        ? ` ${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are unavailable in this server mode.`
+        : "";
+      const instruction = `${instructionPrefix}${instructionCore}${instructionSkills}${instructionReadOnly}`;
       const resultContent: ToolContent[] = [
         {
           type: "text" as const,
@@ -759,177 +777,179 @@ function createMcpServer(
     },
   );
 
-  registerAppTool(
-    server,
-    toolNames.write,
-    {
-      title: "Write file",
-      description: `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
-      inputSchema: {
-        workspaceId: z
-          .string()
-          .describe("Workspace identifier returned by open_workspace."),
-        path: z
-          .string()
-          .describe("File path to write, relative to the workspace root."),
-        content: z.string().describe("Complete new file content."),
+  if (!config.readOnly) {
+    registerAppTool(
+      server,
+      toolNames.write,
+      {
+        title: "Write file",
+        description: `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          path: z
+            .string()
+            .describe("File path to write, relative to the workspace root."),
+          content: z.string().describe("Complete new file content."),
+        },
+        outputSchema: resultOutputSchema(),
+        ...toolWidgetDescriptorMeta(config, "write"),
+        annotations: WRITE_TOOL_ANNOTATIONS,
       },
-      outputSchema: resultOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "write"),
-      annotations: WRITE_TOOL_ANNOTATIONS,
-    },
-    async ({ workspaceId, ...input }) => {
-      const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
-      const response = await writeFileTool(input, {
-        cwd: workspace.root,
-        root: workspace.root,
-      });
+      async ({ workspaceId, ...input }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        workspaces.resolvePath(workspace, input.path);
+        const response = await writeFileTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+        });
 
-      if (response.isError) {
-        logFailedToolResponse(
-          config,
-          {
-            tool: toolNames.write,
-            workspaceId,
-            path: input.path,
-          },
-          response.content,
-          startedAt,
-        );
-        return response;
-      }
+        if (response.isError) {
+          logFailedToolResponse(
+            config,
+            {
+              tool: toolNames.write,
+              workspaceId,
+              path: input.path,
+            },
+            response.content,
+            startedAt,
+          );
+          return response;
+        }
 
-      const patch = newFilePatch(input.path, input.content);
-      const stats = countDiffStats(patch);
-      const summary = {
-        ...stats,
-        lines: contentLineCount(input.content),
-        characters: input.content.length,
-      };
-      logToolCall(config, {
-        tool: toolNames.write,
-        workspaceId,
-        path: input.path,
-        success: true,
-        durationMs: Math.round(performance.now() - startedAt),
-      });
-
-      return {
-        ...response,
-        _meta: {
+        const patch = newFilePatch(input.path, input.content);
+        const stats = countDiffStats(patch);
+        const summary = {
+          ...stats,
+          lines: contentLineCount(input.content),
+          characters: input.content.length,
+        };
+        logToolCall(config, {
           tool: toolNames.write,
-          card: {
-            workspaceId,
-            path: input.path,
-            summary,
-            payload: {
-              content: response.content,
-              patch,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          ...response,
+          _meta: {
+            tool: toolNames.write,
+            card: {
+              workspaceId,
+              path: input.path,
+              summary,
+              payload: {
+                content: response.content,
+                patch,
+              },
             },
           },
-        },
-        structuredContent: {
-          result: contentText(response.content),
-        },
-      };
-    },
-  );
-
-  registerAppTool(
-    server,
-    toolNames.edit,
-    {
-      title: "Edit file",
-      description: `Edit one file inside an open workspace by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.`,
-      inputSchema: {
-        workspaceId: z
-          .string()
-          .describe("Workspace identifier returned by open_workspace."),
-        path: z
-          .string()
-          .describe("File path to edit, relative to the workspace root."),
-        edits: z
-          .array(
-            z.object({
-              oldText: z
-                .string()
-                .describe(
-                  "Exact text to replace. Must match uniquely in the original file.",
-                ),
-              newText: z.string().describe("Replacement text."),
-            }),
-          )
-          .min(1),
+          structuredContent: {
+            result: contentText(response.content),
+          },
+        };
       },
-      outputSchema: resultOutputSchema({
-        status: z.literal("applied"),
-      }),
-      ...toolWidgetDescriptorMeta(config, "edit"),
-      annotations: EDIT_TOOL_ANNOTATIONS,
-    },
-    async ({ workspaceId, ...input }) => {
-      const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
-      const response = await editFileTool(input, {
-        cwd: workspace.root,
-        root: workspace.root,
-      });
+    );
 
-      if (response.isError) {
-        logFailedToolResponse(
-          config,
-          {
-            tool: toolNames.edit,
-            workspaceId,
-            path: input.path,
-          },
-          response.content,
-          startedAt,
+    registerAppTool(
+      server,
+      toolNames.edit,
+      {
+        title: "Edit file",
+        description: `Edit one file inside an open workspace by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.`,
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          path: z
+            .string()
+            .describe("File path to edit, relative to the workspace root."),
+          edits: z
+            .array(
+              z.object({
+                oldText: z
+                  .string()
+                  .describe(
+                    "Exact text to replace. Must match uniquely in the original file.",
+                  ),
+                newText: z.string().describe("Replacement text."),
+              }),
+            )
+            .min(1),
+        },
+        outputSchema: resultOutputSchema({
+          status: z.literal("applied"),
+        }),
+        ...toolWidgetDescriptorMeta(config, "edit"),
+        annotations: EDIT_TOOL_ANNOTATIONS,
+      },
+      async ({ workspaceId, ...input }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        workspaces.resolvePath(workspace, input.path);
+        const response = await editFileTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+        });
+
+        if (response.isError) {
+          logFailedToolResponse(
+            config,
+            {
+              tool: toolNames.edit,
+              workspaceId,
+              path: input.path,
+            },
+            response.content,
+            startedAt,
+          );
+          return response;
+        }
+
+        const stats = countDiffStats(
+          response.details?.patch ?? response.details?.diff,
         );
-        return response;
-      }
-
-      const stats = countDiffStats(
-        response.details?.patch ?? response.details?.diff,
-      );
-      const summary = {
-        ...stats,
-        editCount: input.edits.length,
-      };
-      const editResultText = `Edited ${input.path} (+${stats.additions} -${stats.removals}).`;
-      const editContent = [textBlock(editResultText)];
-      logToolCall(config, {
-        tool: toolNames.edit,
-        workspaceId,
-        path: input.path,
-        success: true,
-        durationMs: Math.round(performance.now() - startedAt),
-      });
-
-      return {
-        content: editContent,
-        _meta: {
+        const summary = {
+          ...stats,
+          editCount: input.edits.length,
+        };
+        const editResultText = `Edited ${input.path} (+${stats.additions} -${stats.removals}).`;
+        const editContent = [textBlock(editResultText)];
+        logToolCall(config, {
           tool: toolNames.edit,
-          card: {
-            workspaceId,
-            path: input.path,
-            summary,
-            payload: {
-              diff: response.details?.diff,
-              patch: response.details?.patch,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          content: editContent,
+          _meta: {
+            tool: toolNames.edit,
+            card: {
+              workspaceId,
+              path: input.path,
+              summary,
+              payload: {
+                diff: response.details?.diff,
+                patch: response.details?.patch,
+              },
             },
           },
-        },
-        structuredContent: {
-          status: "applied",
-          result: contentText(editContent),
-        },
-      };
-    },
-  );
+          structuredContent: {
+            status: "applied",
+            result: contentText(editContent),
+          },
+        };
+      },
+    );
+  }
 
   if (config.widgets === "changes") {
     registerAppTool(
@@ -999,7 +1019,7 @@ function createMcpServer(
     );
   }
 
-  if (!config.minimalTools) {
+  if (exposeDedicatedReadTools(config)) {
     registerAppTool(
       server,
       toolNames.grep,
@@ -1225,100 +1245,102 @@ function createMcpServer(
     );
   }
 
-  registerAppTool(
-    server,
-    toolNames.shell,
-    {
-      title: config.toolNaming === "short" ? "Bash" : "Run shell",
-      description: config.minimalTools
-        ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
-        : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
-      inputSchema: {
-        workspaceId: z
-          .string()
-          .describe("Workspace identifier returned by open_workspace."),
-        command: z
-          .string()
-          .describe(
-            `Shell command to run. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
-          ),
-        workingDirectory: z
-          .string()
-          .optional()
-          .describe(
-            "Optional working directory relative to the workspace root. Defaults to the workspace root.",
-          ),
-        timeout: z
-          .number()
-          .positive()
-          .max(300)
-          .optional()
-          .describe("Timeout in seconds. Defaults to 30, max 300."),
+  if (!config.readOnly) {
+    registerAppTool(
+      server,
+      toolNames.shell,
+      {
+        title: config.toolNaming === "short" ? "Bash" : "Run shell",
+        description: config.minimalTools
+          ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
+          : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          command: z
+            .string()
+            .describe(
+              `Shell command to run. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
+            ),
+          workingDirectory: z
+            .string()
+            .optional()
+            .describe(
+              "Optional working directory relative to the workspace root. Defaults to the workspace root.",
+            ),
+          timeout: z
+            .number()
+            .positive()
+            .max(300)
+            .optional()
+            .describe("Timeout in seconds. Defaults to 30, max 300."),
+        },
+        outputSchema: resultOutputSchema(),
+        ...toolWidgetDescriptorMeta(config, "shell"),
+        annotations: SHELL_TOOL_ANNOTATIONS,
       },
-      outputSchema: resultOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
-      annotations: SHELL_TOOL_ANNOTATIONS,
-    },
-    async ({ workspaceId, workingDirectory, ...input }) => {
-      const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const cwd = workspaces.resolveWorkingDirectory(
-        workspace,
-        workingDirectory,
-      );
-      const response = await runShellTool(input, {
-        cwd,
-        root: workspace.root,
-      });
-
-      if (response.isError) {
-        logFailedToolResponse(
-          config,
-          {
-            tool: toolNames.shell,
-            workspaceId,
-            workingDirectory: workingDirectory ?? ".",
-            command: input.command,
-            commandLength: input.command.length,
-          },
-          response.content,
-          startedAt,
+      async ({ workspaceId, workingDirectory, ...input }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const cwd = workspaces.resolveWorkingDirectory(
+          workspace,
+          workingDirectory,
         );
-        return response;
-      }
+        const response = await runShellTool(input, {
+          cwd,
+          root: workspace.root,
+        });
 
-      const summary = {
-        command: input.command,
-        workingDirectory: workingDirectory ?? ".",
-        ...textSummary(response.content),
-      };
-      logToolCall(config, {
-        tool: toolNames.shell,
-        workspaceId,
-        workingDirectory: workingDirectory ?? ".",
-        command: input.command,
-        commandLength: input.command.length,
-        success: true,
-        durationMs: Math.round(performance.now() - startedAt),
-      });
+        if (response.isError) {
+          logFailedToolResponse(
+            config,
+            {
+              tool: toolNames.shell,
+              workspaceId,
+              workingDirectory: workingDirectory ?? ".",
+              command: input.command,
+              commandLength: input.command.length,
+            },
+            response.content,
+            startedAt,
+          );
+          return response;
+        }
 
-      return {
-        ...response,
-        _meta: {
+        const summary = {
+          command: input.command,
+          workingDirectory: workingDirectory ?? ".",
+          ...textSummary(response.content),
+        };
+        logToolCall(config, {
           tool: toolNames.shell,
-          card: {
-            workspaceId,
-            path: workingDirectory,
-            summary,
-            payload: { content: response.content },
+          workspaceId,
+          workingDirectory: workingDirectory ?? ".",
+          command: input.command,
+          commandLength: input.command.length,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          ...response,
+          _meta: {
+            tool: toolNames.shell,
+            card: {
+              workspaceId,
+              path: workingDirectory,
+              summary,
+              payload: { content: response.content },
+            },
           },
-        },
-        structuredContent: {
-          result: contentText(response.content),
-        },
-      };
-    },
-  );
+          structuredContent: {
+            result: contentText(response.content),
+          },
+        };
+      },
+    );
+  }
 
   return server;
 }

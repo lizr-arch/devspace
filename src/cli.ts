@@ -7,6 +7,12 @@ import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
 import {
+  deriveChatGptWebInfo,
+  probePublicExternalClientFlow,
+  probeLocalChatGptFlow,
+  probePublicChatGptFlow,
+} from "./doctor.js";
+import {
   generateOwnerToken,
   loadDevspaceFiles,
   writeDevspaceAuth,
@@ -14,6 +20,12 @@ import {
   type DevspaceUserConfig,
 } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
+import { runCurrentTaskCommand, runReportCommand } from "./run-commands.js";
+import {
+  runCoachIngestCommand,
+  runCoachPackCommand,
+  runCoachSessionCommand,
+} from "./bridge/commands.js";
 import { execSync, spawn } from "node:child_process";
 import {
   existsSync,
@@ -36,7 +48,10 @@ type Command =
   | "delegate"
   | "run"
   | "timeline"
-  | "mcp";
+  | "mcp"
+  | "coach-pack"
+  | "coach-ingest"
+  | "coach-session";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -55,7 +70,7 @@ async function main(argv: string[]): Promise<void> {
       await runInit({ force: args.includes("--force") });
       return;
     case "doctor":
-      await runDoctor();
+      await runDoctor(args);
       return;
     case "config":
       runConfigCommand(args);
@@ -77,6 +92,15 @@ async function main(argv: string[]): Promise<void> {
       return;
     case "timeline":
       await runTimelineCommand(args);
+      return;
+    case "coach-pack":
+      await runCoachPackCommand(args);
+      return;
+    case "coach-ingest":
+      await runCoachIngestCommand(args);
+      return;
+    case "coach-session":
+      await runCoachSessionCommand(args);
       return;
     case "mcp":
       await runMcpCommand(args);
@@ -100,7 +124,10 @@ function normalizeCommand(command: string | undefined): Command {
     command === "delegate" ||
     command === "run" ||
     command === "timeline" ||
-    command === "mcp"
+    command === "mcp" ||
+    command === "coach-pack" ||
+    command === "coach-ingest" ||
+    command === "coach-session"
   )
     return command;
   throw new Error(`Unknown command: ${command}`);
@@ -263,7 +290,10 @@ async function serve(): Promise<void> {
   process.once("SIGTERM", shutdown);
 }
 
-async function runDoctor(): Promise<void> {
+async function runDoctor(args: string[] = []): Promise<void> {
+  const live = args.includes("--live");
+  const fullLoop = args.includes("--full-loop");
+  const publicProbe = args.includes("--public") || fullLoop;
   const files = loadDevspaceFiles();
   console.log(`Config dir: ${files.dir}`);
   console.log(
@@ -279,12 +309,125 @@ async function runDoctor(): Promise<void> {
 
   try {
     const config = loadConfig();
+    const workspaceArgIndex = args.indexOf("--workspace");
+    const fullLoopWorkspace =
+      workspaceArgIndex !== -1 && args[workspaceArgIndex + 1]
+        ? args[workspaceArgIndex + 1]
+        : config.allowedRoots[0];
+    const chatgpt = deriveChatGptWebInfo(config);
     console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
     console.log(
       `Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`,
     );
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+    console.log("");
+    console.log("ChatGPT Web:");
+    console.log(`  Public base URL: ${chatgpt.publicBaseUrl}`);
+    console.log(`  Public MCP URL: ${chatgpt.publicMcpUrl}`);
+    console.log(`  OAuth issuer: ${chatgpt.oauthIssuer}`);
+    console.log(
+      `  OAuth protected-resource metadata: ${chatgpt.protectedResourceMetadataUrl}`,
+    );
+    console.log(
+      `  OAuth authorization-server metadata: ${chatgpt.authorizationServerMetadataUrl}`,
+    );
+    console.log(
+      `  OAuth authorize endpoint: ${chatgpt.authorizationEndpoint}`,
+    );
+    console.log(`  OAuth token endpoint: ${chatgpt.tokenEndpoint}`);
+    console.log(
+      `  ChatGPT redirect allowed: ${chatgpt.chatgptRedirectAllowed ? "yes" : "no"}`,
+    );
+    console.log(`  Reasoning control: ${chatgpt.reasoningNote}`);
+    console.log(`  Plan requirement: ${chatgpt.planRequirementNote}`);
+    if (live) {
+      const probe = await probeLocalChatGptFlow(config);
+      console.log(`  Local live probe: ${probe.ready ? "ready" : "attention needed"}`);
+      console.log(`    Local base URL: ${probe.localBaseUrl}`);
+      console.log(
+        `    /healthz: ${probe.healthz.ok ? "OK" : "FAIL"}${probe.healthz.status ? ` (${probe.healthz.status})` : ""} - ${probe.healthz.detail}`,
+      );
+      console.log(
+        `    protected resource metadata: ${probe.protectedResourceMetadata.ok ? "OK" : "FAIL"}${probe.protectedResourceMetadata.status ? ` (${probe.protectedResourceMetadata.status})` : ""} - ${probe.protectedResourceMetadata.detail}`,
+      );
+      console.log(
+        `    authorization server metadata: ${probe.authorizationServerMetadata.ok ? "OK" : "FAIL"}${probe.authorizationServerMetadata.status ? ` (${probe.authorizationServerMetadata.status})` : ""} - ${probe.authorizationServerMetadata.detail}`,
+      );
+      console.log(
+        `    dynamic client registration: ${probe.clientRegistration.ok ? "OK" : "FAIL"}${probe.clientRegistration.status ? ` (${probe.clientRegistration.status})` : ""} - ${probe.clientRegistration.detail}`,
+      );
+      console.log(
+        `    owner password page: ${probe.authorizationPage.ok ? "OK" : "FAIL"}${probe.authorizationPage.status ? ` (${probe.authorizationPage.status})` : ""} - ${probe.authorizationPage.detail}`,
+      );
+    } else {
+      console.log(
+        "  Local live probe: run `devspace doctor --live` while `devspace serve` is running.",
+      );
+    }
+    if (publicProbe) {
+      const probe = await probePublicChatGptFlow(config);
+      console.log(`  Public probe: ${probe.ready ? "ready" : "attention needed"}`);
+      if (probe.transportNote) {
+        console.log(`    Transport note: ${probe.transportNote}`);
+      }
+      console.log(
+        `    /healthz: ${probe.healthz.ok ? "OK" : "FAIL"}${probe.healthz.status ? ` (${probe.healthz.status})` : ""} - ${probe.healthz.detail}`,
+      );
+      console.log(
+        `    protected resource metadata: ${probe.protectedResourceMetadata.ok ? "OK" : "FAIL"}${probe.protectedResourceMetadata.status ? ` (${probe.protectedResourceMetadata.status})` : ""} - ${probe.protectedResourceMetadata.detail}`,
+      );
+      console.log(
+        `    authorization server metadata: ${probe.authorizationServerMetadata.ok ? "OK" : "FAIL"}${probe.authorizationServerMetadata.status ? ` (${probe.authorizationServerMetadata.status})` : ""} - ${probe.authorizationServerMetadata.detail}`,
+      );
+      console.log(
+        `    dynamic client registration: ${probe.clientRegistration.ok ? "OK" : "FAIL"}${probe.clientRegistration.status ? ` (${probe.clientRegistration.status})` : ""} - ${probe.clientRegistration.detail}`,
+      );
+      console.log(
+        `    owner password page: ${probe.authorizationPage.ok ? "OK" : "FAIL"}${probe.authorizationPage.status ? ` (${probe.authorizationPage.status})` : ""} - ${probe.authorizationPage.detail}`,
+      );
+      if (fullLoop) {
+        const external = await probePublicExternalClientFlow(config, {
+          workspacePath: fullLoopWorkspace,
+        });
+        console.log(
+          `  Public external client probe: ${external.ready ? "ready" : "attention needed"}`,
+        );
+        console.log(`    Workspace path: ${fullLoopWorkspace}`);
+        console.log(
+          `    client registration: ${external.clientRegistration.ok ? "OK" : "FAIL"}${external.clientRegistration.status ? ` (${external.clientRegistration.status})` : ""} - ${external.clientRegistration.detail}`,
+        );
+        console.log(
+          `    owner password approval: ${external.authorization.ok ? "OK" : "FAIL"}${external.authorization.status ? ` (${external.authorization.status})` : ""} - ${external.authorization.detail}`,
+        );
+        console.log(
+          `    token exchange: ${external.tokenExchange.ok ? "OK" : "FAIL"}${external.tokenExchange.status ? ` (${external.tokenExchange.status})` : ""} - ${external.tokenExchange.detail}`,
+        );
+        console.log(
+          `    MCP initialize: ${external.initialize.ok ? "OK" : "FAIL"}${external.initialize.status ? ` (${external.initialize.status})` : ""} - ${external.initialize.detail}`,
+        );
+        console.log(
+          `    MCP tools/list: ${external.toolsList.ok ? "OK" : "FAIL"}${external.toolsList.status ? ` (${external.toolsList.status})` : ""} - ${external.toolsList.detail}`,
+        );
+        console.log(
+          `    MCP open_workspace: ${external.openWorkspace.ok ? "OK" : "FAIL"}${external.openWorkspace.status ? ` (${external.openWorkspace.status})` : ""} - ${external.openWorkspace.detail}`,
+        );
+        if (external.workspaceId) {
+          console.log(`    workspaceId: ${external.workspaceId}`);
+        }
+        if (external.workspaceRoot) {
+          console.log(`    workspace root: ${external.workspaceRoot}`);
+        }
+      } else {
+        console.log(
+          "  Public external client probe: run `devspace doctor --public --full-loop` to verify OAuth token exchange and a real open_workspace tool call through the public URL.",
+        );
+      }
+    } else {
+      console.log(
+        "  Public probe: run `devspace doctor --public` while your tunnel or reverse proxy is live.",
+      );
+    }
   } catch (error) {
     console.log(
       `Config status: ${error instanceof Error ? error.message : String(error)}`,
@@ -1172,17 +1315,12 @@ async function runRunCommand(args: string[]): Promise<void> {
   const [subcommand] = args;
 
   if (!subcommand || subcommand === "current") {
-    console.log("Run current task...");
-    console.log(
-      "This command will execute the current task using Local Orchestrator.",
-    );
-    console.log("Implementation pending...");
+    await runCurrentTaskCommand(args.slice(1));
     return;
   }
 
   if (subcommand === "report") {
-    console.log("Show run report...");
-    console.log("Implementation pending...");
+    runReportCommand();
     return;
   }
 
@@ -1261,9 +1399,25 @@ function printHelp(): void {
       "  devspace                 Run first-time setup if needed, then start the server",
       "  devspace serve           Start the server",
       "  devspace init            Create or update ~/.devspace/config.json and auth.json",
-      "  devspace doctor          Show config, runtime, and native dependency status",
+      "  devspace doctor          Show config, runtime, and ChatGPT Web readiness details",
+      "  devspace doctor --live   Probe local health, OAuth metadata, registration, and Owner password page",
+      "  devspace doctor --public Probe the configured publicBaseUrl through your tunnel or reverse proxy",
+      "  devspace doctor --public --full-loop",
+      "                           Verify the full public OAuth flow and a real open_workspace MCP call",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
+      "  devspace coach-pack --path <repo> --task \"...\" --out coach_pack.md",
+      "                           Build a bounded read-only context pack and manifest",
+      "  devspace coach-ingest <reply.md> [--out summary.json]",
+      "                           Parse a coach reply into structured local next steps",
+      "  devspace coach-session start --path <repo> --task \"...\" [--budget n] [--out coach_pack.md]",
+      "                           Start a local read-only multi-turn coach session",
+      "  devspace coach-session ingest --session <id> <reply.md> [--out summary.json]",
+      "                           Attach a coach reply to an existing session",
+      "  devspace coach-session next-pack --session <id> [--task \"...\"] [--budget n] [--out coach_pack.md]",
+      "                           Build the next follow-up pack from session state",
+      "  devspace coach-session status --session <id>",
+      "                           Show session metadata, usage, and pending follow-up reads",
       "",
       "Collaboration Commands:",
       "  devspace collab init     Initialize collaboration workspace (.devspace/)",
@@ -1292,6 +1446,16 @@ function printHelp(): void {
       "",
       "Timeline:",
       "  devspace timeline               Show conversation timeline",
+      "",
+      "Run Commands:",
+      "  devspace run current [options] Execute the current .devspace task and write .devspace/execution_report.md",
+      "    --provider <type>                      Provider: mock/ollama/openai",
+      "    --executor-provider <type>             Executor provider override",
+      "    --coach-provider <type>                Coach provider override",
+      "    --mode <mode>                          Mode: manual/guided/delegate/free",
+      "    --max-rounds <n>                       Max rounds (default: 1)",
+      "    --timeout <seconds>                    Timeout (default: 60)",
+      "  devspace run report            Show latest run summary and artifact paths",
       "",
       "MCP Commands:",
       "  devspace mcp serve              Start MCP server (stdin/stdout)",

@@ -52,6 +52,11 @@ assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "1" }).minimalTools,
   true,
 );
+assert.equal(loadConfig(baseEnv).readOnly, false);
+assert.equal(
+  loadConfig({ ...baseEnv, DEVSPACE_READ_ONLY: "1" }).readOnly,
+  true,
+);
 assert.equal(loadConfig(baseEnv).skillsEnabled, true);
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled,

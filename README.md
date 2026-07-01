@@ -117,11 +117,101 @@ Most users should connect through a public HTTPS tunnel:
 https://your-tunnel-host.example.com/mcp
 ```
 
+For ChatGPT web, enable developer mode, create a custom connector, and point it
+at that public `/mcp` URL. DevSpace then handles OAuth approval with the Owner
+password page it serves from the same public base URL.
+
+DevSpace does not choose the ChatGPT model or reasoning level for you. Pick the
+strongest model and highest reasoning level available in ChatGPT before starting
+the coding session.
+
+OpenAI controls developer mode eligibility, MCP write permissions, and the
+model picker on the ChatGPT side. Verify your current plan's developer mode and
+connector tool permissions in ChatGPT before assuming the blocker is in
+DevSpace.
+
+If your MCP host can connect but should only inspect code, start DevSpace in
+read-only mode:
+
+```bash
+DEVSPACE_READ_ONLY=1 devspace serve
+```
+
+This exposes `open_workspace`, `read`, `grep`, `glob`, and `ls`, while hiding
+`write`, `edit`, and `bash`.
+
+## Local Coach Bridge
+
+DevSpace also supports a second path for code inspection when direct MCP access
+is unavailable or inconvenient:
+
+```bash
+devspace coach-pack --path D:\Code\git\devspace --task "Explain delegate flow" --budget 4000 --out coach_pack.md
+devspace coach-ingest coach_reply.md
+```
+
+This `Local Coach Bridge` flow is for non-Pro or non-MCP situations where you
+still want an external coach to inspect a bounded slice of local code.
+
+It does **not** require:
+
+- ChatGPT Pro
+- MCP access
+- developer mode
+- public tunnel
+- OAuth
+
+It does:
+
+- keep extraction local
+- build a bounded read-only markdown pack
+- omit sensitive paths by default
+- return a metadata-only manifest beside the pack
+- parse a coach reply back into structured next steps
+
+It does **not** give ChatGPT direct repo access, and it does not auto-apply
+changes.
+
+See [Local Coach Bridge](https://github.com/Waishnav/devspace/blob/main/docs/local-coach-bridge.md)
+for the safety model, quickstart, and FAQ.
+
+Run `devspace doctor --live` to verify the local HTTP and OAuth chain, then run
+`devspace doctor --public` while your tunnel is active to verify the real public
+URL ChatGPT will use.
+
+Run `devspace doctor --public --full-loop` to go one step further: it performs
+dynamic client registration, completes the Owner password OAuth flow, exchanges
+an access token, initializes MCP over the public tunnel, lists tools, and calls
+`open_workspace` as a real external client.
+
+A verified quick path is Cloudflare Quick Tunnel:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:7676
+DEVSPACE_PUBLIC_BASE_URL="https://your-assigned.trycloudflare.com" devspace serve
+devspace doctor --public
+```
+
+If the tunnel hostname changes, restart DevSpace with the exact new public base
+URL. Otherwise DevSpace may reject requests with `Invalid Host`.
+
+If you use Pinggy over SSH on Windows, prefer:
+
+```bash
+ssh -T -p 443 -R0:127.0.0.1:7676 qr@a.pinggy.io
+```
+
+Using `localhost:7676` can lead to tunnel-side `502` responses when the local
+service is bound only on IPv4.
+
 ## What ChatGPT Can Do
 
 Once connected, ChatGPT can open one of your approved project folders as a
 workspace. From there, it can inspect the repo, make scoped edits, run commands,
 and show you what changed.
+
+In read-only mode, it can still open workspaces, read files, search code, and
+inspect directories, but it cannot modify files or execute shell commands.
 
 DevSpace gives ChatGPT tools to:
 
@@ -170,7 +260,9 @@ devspace doctor
 ## Documentation
 
 - [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
+- [ChatGPT Web Connection Path](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-web-connection.md)
 - [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
+- [Local Coach Bridge](https://github.com/Waishnav/devspace/blob/main/docs/local-coach-bridge.md)
 - [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
 - [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)
 - [Troubleshooting Gotchas](https://github.com/Waishnav/devspace/blob/main/docs/gotchas.md)

@@ -18,6 +18,7 @@ export interface ServerConfig {
   allowedHosts: string[];
   publicBaseUrl: string;
   minimalTools: boolean;
+  readOnly: boolean;
   toolNaming: ToolNamingMode;
   widgets: WidgetMode;
   stateDir: string;
@@ -96,6 +97,10 @@ function parseMinimalTools(env: NodeJS.ProcessEnv): boolean {
   if (env.DEVSPACE_MINIMAL_TOOLS !== undefined)
     return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS);
   return true;
+}
+
+function parseReadOnly(env: NodeJS.ProcessEnv): boolean {
+  return parseBoolean(env.DEVSPACE_READ_ONLY);
 }
 
 function parseLogLevel(value: string | undefined): LogLevel {
@@ -265,6 +270,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ),
     publicBaseUrl,
     minimalTools: parseMinimalTools(env),
+    readOnly: parseReadOnly(env),
     toolNaming: parseToolNaming(env.DEVSPACE_TOOL_NAMING),
     widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
     stateDir: resolve(
