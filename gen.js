@@ -1,0 +1,1 @@
+const fs=require("fs");const p=require("path");const c=fs.readFileSync(p.join("d:\\Code\\git\\devspace","handlers_template.txt"),"utf-8");fs.writeFileSync(p.join("d:\\Code\\git\\devspace","src","mcp","handlers.ts"),c,"utf-8");console.log("done");
