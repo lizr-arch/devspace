@@ -26,7 +26,7 @@
     "dev": "node scripts/dev-server.mjs",
     "start": "node dist/cli.js serve",
     "test": "npm run test:unit",
-    "test:unit": "tsx src/config.test.ts && tsx src/roots.test.ts && tsx src/skills.test.ts && tsx src/workspaces.test.ts && tsx src/review-checkpoints.test.ts && tsx src/oauth-store.test.ts && tsx src/doctor.test.ts && tsx src/run-commands.test.ts && tsx src/coach-commands.test.ts",
+    "test:unit": "tsx src/config.test.ts && tsx src/roots.test.ts && tsx src/skills.test.ts && tsx src/workspaces.test.ts && tsx src/review-checkpoints.test.ts && tsx src/oauth-store.test.ts && tsx src/doctor.test.ts && tsx src/run-commands.test.ts && tsx src/coach-commands.test.ts && tsx src/project-memory-characterization.test.ts",
     "test:mcp": "tsx tests/test_mcp_jsonrpc.ts && tsx tests/test_mcp_write_guard.ts && tsx tests/test_gated_loop_e2e.ts && tsx tests/test_webgpt_full_loop.ts && tsx tests/test_mcp_real_provider_loop.ts",
     "test:all": "npm run test:unit && npm run test:mcp",
     "test:ci": "npm run test:unit && tsx tests/test_mcp_jsonrpc.ts && tsx tests/test_mcp_write_guard.ts && tsx tests/test_gated_loop_e2e.ts && tsx tests/test_webgpt_full_loop.ts && tsx tests/test_mcp_real_provider_loop.ts",
