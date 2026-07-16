@@ -4,10 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  loadConfig,
-  type ProjectMemoryRepositoryConfig,
-} from "./config.js";
+import { loadConfig, type ProjectMemoryRepositoryConfig } from "./config.js";
 import { openDatabase } from "./db/client.js";
 import {
   canonicalJson,
@@ -86,13 +83,7 @@ try {
     records: ["feature:project-memory-coding-gateway"],
   });
   assert.deepEqual(observedCommands, [
-    [
-      "rtk",
-      "proxy",
-      "py",
-      "-3.11",
-      "scripts/manage_project_memory.py",
-    ],
+    ["rtk", "proxy", "py", "-3.11", "scripts/manage_project_memory.py"],
   ]);
   assert.equal("task" in context.workspace, false);
 
@@ -198,7 +189,10 @@ try {
 
   assert.equal(receiptRows.length, 1);
   assert.equal(receiptRows[0].receipt_json.includes(secretTask), false);
-  assert.equal(events.some((event) => event.event_type === "preflight"), true);
+  assert.equal(
+    events.some((event) => event.event_type === "preflight"),
+    true,
+  );
   assert.equal(
     events.some((event) => event.event_type === "bundle_delivery"),
     true,

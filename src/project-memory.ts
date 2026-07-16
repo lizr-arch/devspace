@@ -7,10 +7,7 @@ import type {
 } from "./config.js";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 
-export type ProjectMemoryDecision =
-  | "allow"
-  | "observe_would_deny"
-  | "deny";
+export type ProjectMemoryDecision = "allow" | "observe_would_deny" | "deny";
 
 export interface ProjectMemoryActiveState {
   receiptId?: string;
@@ -258,7 +255,9 @@ export class ProjectMemoryStore {
     assertSha256(input.taskSha256, "taskSha256");
     const ttlSeconds = input.ttlSeconds ?? 900;
     if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 900) {
-      throw new Error("Project Memory privilege TTL must be between 1 and 900 seconds");
+      throw new Error(
+        "Project Memory privilege TTL must be between 1 and 900 seconds",
+      );
     }
     const now = input.now ?? new Date();
     const authorizationId = `pma_${randomUUID()}`;
@@ -416,8 +415,7 @@ export class ProjectMemoryController {
   constructor(
     private readonly config: ProjectMemoryConfig,
     stateDir: string,
-    private readonly runner: ProjectMemoryCommandRunner =
-      runProjectMemoryCommand,
+    private readonly runner: ProjectMemoryCommandRunner = runProjectMemoryCommand,
   ) {
     this.store = new ProjectMemoryStore(stateDir);
   }
@@ -440,7 +438,10 @@ export class ProjectMemoryController {
 
     let payload: GatewayPreflightPayload;
     try {
-      payload = validatePreflightPayload(await this.runner(repository, task), task);
+      payload = validatePreflightPayload(
+        await this.runner(repository, task),
+        task,
+      );
     } catch {
       this.store.saveUnavailableState(input.workspaceId, "error");
       return {
@@ -482,7 +483,9 @@ export class ProjectMemoryController {
     this.store.close();
   }
 
-  private repositoryFor(root: string): ProjectMemoryRepositoryConfig | undefined {
+  private repositoryFor(
+    root: string,
+  ): ProjectMemoryRepositoryConfig | undefined {
     const key = pathKey(resolve(root));
     return this.config.repositories.find(
       (repository) => pathKey(repository.root) === key,
@@ -542,7 +545,11 @@ export async function runProjectMemoryCommand(
     child.once("close", (code) => {
       if (settled) return;
       if (code !== 0) {
-        finish(new Error(`Project Memory preflight exited with code ${String(code)}`));
+        finish(
+          new Error(
+            `Project Memory preflight exited with code ${String(code)}`,
+          ),
+        );
         return;
       }
       try {
@@ -551,7 +558,9 @@ export async function runProjectMemoryCommand(
         );
         finish(undefined, JSON.parse(decoded));
       } catch {
-        finish(new Error("Project Memory preflight returned invalid UTF-8 JSON"));
+        finish(
+          new Error("Project Memory preflight returned invalid UTF-8 JSON"),
+        );
       }
     });
     const timer = setTimeout(() => {
@@ -606,7 +615,9 @@ function validatePreflightPayload(
       ? null
       : validateReceipt(payload.receipt, normalizeTask(task));
   if ((receipt === null) !== (bundle === null)) {
-    throw new Error("Project Memory bundle and receipt must both be present or absent");
+    throw new Error(
+      "Project Memory bundle and receipt must both be present or absent",
+    );
   }
   if (receipt && sha256(canonicalJson(bundle)) !== receipt.bundle_sha256) {
     throw new Error("Project Memory receipt bundle hash mismatch");
@@ -668,10 +679,16 @@ function validateReceipt(value: unknown, task: string): GatewayReceipt {
   }
   const expiresAt = Date.parse(String(receipt.expires_at));
   const issuedAt = Date.parse(String(receipt.issued_at));
-  if (!Number.isFinite(expiresAt) || !Number.isFinite(issuedAt) || expiresAt <= issuedAt) {
+  if (
+    !Number.isFinite(expiresAt) ||
+    !Number.isFinite(issuedAt) ||
+    expiresAt <= issuedAt
+  ) {
     throw new Error("Invalid Project Memory receipt timestamps");
   }
-  for (const owner of receipt.selected_owners as Array<Record<string, unknown>>) {
+  for (const owner of receipt.selected_owners as Array<
+    Record<string, unknown>
+  >) {
     if (
       !owner ||
       typeof owner !== "object" ||
@@ -699,7 +716,9 @@ function validateReceipt(value: unknown, task: string): GatewayReceipt {
     }
     assertSha256(String(owner.source_sha256), "owner source_sha256");
   }
-  if ((receipt.query_iterations as Array<Record<string, unknown>>).length === 0) {
+  if (
+    (receipt.query_iterations as Array<Record<string, unknown>>).length === 0
+  ) {
     throw new Error("Project Memory receipt has no query iterations");
   }
   for (const iteration of receipt.query_iterations as Array<
@@ -750,7 +769,8 @@ function normalizeTask(task: string): string {
 function parseStringArray(value: string): string[] {
   try {
     const parsed = JSON.parse(value);
-    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string")
+    return Array.isArray(parsed) &&
+      parsed.every((item) => typeof item === "string")
       ? parsed
       : [];
   } catch {
@@ -765,7 +785,9 @@ function hasParentSegment(path: string): boolean {
 }
 
 function isPortableAbsolutePath(path: string): boolean {
-  return isAbsolute(path) || /^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path);
+  return (
+    isAbsolute(path) || /^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path)
+  );
 }
 
 function hasExactKeys(
