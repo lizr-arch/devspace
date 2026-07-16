@@ -17,6 +17,11 @@ const migrations: Migration[] = [
     name: "oauth-state",
     up: migrateOAuthState,
   },
+  {
+    version: 3,
+    name: "project-memory-shadow-state",
+    up: migrateProjectMemoryShadowState,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -151,6 +156,81 @@ function migrateOAuthState(sqlite: Database.Database): void {
 
     create index if not exists oauth_refresh_tokens_expires_at_idx
       on oauth_refresh_tokens(expires_at);
+  `);
+}
+
+function migrateProjectMemoryShadowState(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists project_memory_receipts (
+      receipt_id text primary key,
+      workspace_session_id text not null,
+      mode text not null,
+      task_sha256 text not null,
+      receipt_json text not null,
+      expires_at text not null,
+      created_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists project_memory_receipts_workspace_idx
+      on project_memory_receipts(workspace_session_id, created_at desc);
+    create index if not exists project_memory_receipts_expiry_idx
+      on project_memory_receipts(expires_at);
+
+    create table if not exists project_memory_active_state (
+      workspace_session_id text primary key,
+      receipt_id text,
+      decision text not null,
+      would_deny integer not null,
+      denial_reasons_json text not null,
+      bundle_delivered_at text,
+      updated_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade,
+      foreign key (receipt_id)
+        references project_memory_receipts(receipt_id)
+    );
+
+    create index if not exists project_memory_active_receipt_idx
+      on project_memory_active_state(receipt_id);
+
+    create table if not exists project_memory_access_events (
+      id text primary key,
+      workspace_session_id text not null,
+      receipt_id text,
+      event_type text not null,
+      tool_name text,
+      outcome text not null,
+      details_json text not null,
+      created_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists project_memory_access_workspace_idx
+      on project_memory_access_events(workspace_session_id, created_at desc);
+    create index if not exists project_memory_access_receipt_idx
+      on project_memory_access_events(receipt_id);
+
+    create table if not exists project_memory_privilege_authorizations (
+      authorization_id text primary key,
+      workspace_session_id text not null,
+      task_sha256 text not null,
+      mode text not null,
+      expires_at text not null,
+      consumed_at text,
+      created_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists project_memory_privilege_workspace_idx
+      on project_memory_privilege_authorizations(workspace_session_id, expires_at);
   `);
 }
 

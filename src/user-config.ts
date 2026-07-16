@@ -13,6 +13,15 @@ export interface DevspaceUserConfig {
   stateDir?: string;
   worktreeRoot?: string;
   agentDir?: string;
+  projectMemory?: {
+    repositories?: Array<{
+      root: string;
+      command: string[];
+      mode: "SHADOW";
+      timeoutMs?: number;
+      maxOutputBytes?: number;
+    }>;
+  };
 }
 
 export interface DevspaceAuthConfig {

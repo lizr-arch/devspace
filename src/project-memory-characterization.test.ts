@@ -1,42 +1,22 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "./config.js";
-import { openDatabase } from "./db/client.js";
 import { runShellTool } from "./pi-tools.js";
-import { WorkspaceRegistry } from "./workspaces.js";
+
+const BASELINE_COMMIT = "ce332740";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-memory-characterization-"));
 
 try {
-  const stateDir = join(root, "state");
-  const config = loadConfig({
-    DEVSPACE_CONFIG_DIR: join(root, "config"),
-    DEVSPACE_ALLOWED_ROOTS: root,
-    DEVSPACE_STATE_DIR: stateDir,
-    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
-    PORT: "1",
-  });
-
-  assert.equal("projectMemory" in config, false);
-
-  const registry = new WorkspaceRegistry(config);
-  const context = await registry.openWorkspace({
-    path: root,
-    task: "This field was not part of the baseline contract.",
-  } as { path: string; task: string });
-  assert.equal("projectMemory" in context.workspace, false);
-
-  const database = openDatabase(stateDir);
-  const tables = (
-    database.sqlite
-      .prepare("select name from sqlite_master where type = 'table' order by name")
-      .all() as Array<{ name: string }>
-  ).map((row) => row.name);
-  assert.equal(tables.some((name) => name.startsWith("project_memory_")), false);
-  database.close();
+  assert.equal(gitShow("src/config.ts").includes("projectMemory"), false);
+  assert.equal(gitShow("src/workspaces.ts").includes("task?: string"), false);
+  assert.equal(
+    gitShow("src/db/migrations.ts").includes("project_memory_"),
+    false,
+  );
 
   const proofPath = join(root, "raw-shell-proof.txt");
   const command = `"${process.execPath}" -e "require('node:fs').writeFileSync('raw-shell-proof.txt','proof')"`;
@@ -48,4 +28,11 @@ try {
   assert.equal(existsSync(proofPath), true);
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+function gitShow(path: string): string {
+  return execFileSync("git", ["show", `${BASELINE_COMMIT}:${path}`], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
 }

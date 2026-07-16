@@ -5,6 +5,12 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
+import type {
+  ProjectMemoryAccessObservation,
+  ProjectMemoryActiveState,
+  ProjectMemoryPreflightView,
+} from "./project-memory.js";
+import { ProjectMemoryController } from "./project-memory.js";
 import {
   assertAllowedPath,
   isPathInsideRoot,
@@ -45,12 +51,14 @@ export interface Workspace {
   skills: LoadedSkills["skills"];
   skillDiagnostics: LoadedSkills["diagnostics"];
   activatedSkillDirs: Set<string>;
+  projectMemory?: ProjectMemoryActiveState;
 }
 
 export interface WorkspaceContext {
   workspace: Workspace;
   agentsFiles: LoadedAgentsFile[];
   availableAgentsFiles: AvailableAgentsFile[];
+  projectMemory?: ProjectMemoryPreflightView;
 }
 
 export interface WorkspaceReadPath {
@@ -63,6 +71,7 @@ export interface OpenWorkspaceInput {
   path: string;
   mode?: WorkspaceMode;
   baseRef?: string;
+  task?: string;
 }
 
 export class WorkspaceRegistry {
@@ -71,6 +80,7 @@ export class WorkspaceRegistry {
   constructor(
     private readonly config: ServerConfig,
     private readonly store?: WorkspaceStore,
+    private readonly projectMemory?: ProjectMemoryController,
   ) {}
 
   async openWorkspace(
@@ -80,10 +90,10 @@ export class WorkspaceRegistry {
     const mode = options.mode ?? "checkout";
 
     if (mode === "worktree") {
-      return this.openWorktreeWorkspace(options.path, options.baseRef);
+      return this.openWorktreeWorkspace(options.path, options.baseRef, options.task);
     }
 
-    return this.openCheckoutWorkspace(options.path);
+    return this.openCheckoutWorkspace(options.path, options.task);
   }
 
   getWorkspace(workspaceId: string): Workspace {
@@ -123,6 +133,7 @@ export class WorkspaceRegistry {
           : undefined,
       ...this.loadSkillsForWorkspace(root),
       activatedSkillDirs: new Set(),
+      projectMemory: this.projectMemory?.getActiveState(session.id),
     };
     this.store?.touchSession(workspaceId);
     this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
@@ -182,7 +193,46 @@ export class WorkspaceRegistry {
     return assertAllowedPath(directory, [workspace.root]);
   }
 
-  private async openCheckoutWorkspace(path: string): Promise<WorkspaceContext> {
+  async preflightProjectMemory(
+    workspaceId: string,
+    task: string,
+  ): Promise<ProjectMemoryPreflightView> {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!this.projectMemory) {
+      return {
+        status: "unconfigured",
+        wouldDeny: false,
+        denialReasons: [],
+      };
+    }
+    const result = await this.projectMemory.preflight({
+      workspaceId,
+      root: workspace.root,
+      task,
+    });
+    workspace.projectMemory = this.projectMemory.getActiveState(workspaceId);
+    return result;
+  }
+
+  observeProjectMemoryAccess(
+    workspaceId: string,
+    toolName: string,
+    receiptId: string | undefined,
+  ): ProjectMemoryAccessObservation {
+    this.getWorkspace(workspaceId);
+    return this.projectMemory
+      ? this.projectMemory.observeAccess(workspaceId, toolName, receiptId)
+      : {
+          mode: "SHADOW",
+          outcome: "preflight_missing",
+          wouldDeny: false,
+        };
+  }
+
+  private async openCheckoutWorkspace(
+    path: string,
+    task: string | undefined,
+  ): Promise<WorkspaceContext> {
     const root = assertAllowedPath(path, this.config.allowedRoots);
     await mkdir(root, { recursive: true });
 
@@ -191,12 +241,13 @@ export class WorkspaceRegistry {
       throw new Error(`Workspace root must be a directory: ${path}`);
     }
 
-    return this.createWorkspaceContext({ root, mode: "checkout" });
+    return this.createWorkspaceContext({ root, mode: "checkout", task });
   }
 
   private async openWorktreeWorkspace(
     path: string,
     baseRef: string | undefined,
+    task: string | undefined,
   ): Promise<WorkspaceContext> {
     const worktree = await createManagedWorktree({
       sourcePath: path,
@@ -209,6 +260,7 @@ export class WorkspaceRegistry {
       mode: "worktree",
       sourceRoot: worktree.sourceRoot,
       worktree,
+      task,
     });
   }
 
@@ -217,6 +269,7 @@ export class WorkspaceRegistry {
     mode: WorkspaceMode;
     sourceRoot?: string;
     worktree?: WorkspaceWorktree;
+    task?: string;
   }): Promise<WorkspaceContext> {
     const workspace: Workspace = {
       id: `ws_${randomUUID()}`,
@@ -243,8 +296,11 @@ export class WorkspaceRegistry {
       workspace.root,
       agentsFiles,
     );
+    const projectMemory = input.task
+      ? await this.preflightProjectMemory(workspace.id, input.task)
+      : undefined;
 
-    return { workspace, agentsFiles, availableAgentsFiles };
+    return { workspace, agentsFiles, availableAgentsFiles, projectMemory };
   }
 
   private loadSkillsForWorkspace(

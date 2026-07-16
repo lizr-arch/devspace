@@ -56,6 +56,12 @@ export interface PublicExternalClientProbe {
   toolNames?: string[];
   workspaceId?: string;
   workspaceRoot?: string;
+  projectMemoryReceiptId?: string;
+  projectMemoryDecision?: string;
+  projectMemoryReceiptReadOutcome?: string;
+  projectMemoryMissingReadOutcome?: string;
+  projectMemoryMissingShellOutcome?: string;
+  projectMemoryShellSucceeded?: boolean;
   ready: boolean;
 }
 
@@ -148,7 +154,11 @@ export async function probePublicChatGptFlow(
 
 export async function probePublicExternalClientFlow(
   config: ServerConfig,
-  input: { workspacePath: string },
+  input: {
+    workspacePath: string;
+    task?: string;
+    verifyProjectMemoryShadowTools?: boolean;
+  },
 ): Promise<PublicExternalClientProbe> {
   const info = deriveChatGptWebInfo(config);
   const requestInit = publicProbeRequestInitForBaseUrl(info.publicBaseUrl);
@@ -181,6 +191,12 @@ export async function probePublicExternalClientFlow(
   let toolNames: string[] | undefined;
   let workspaceId: string | undefined;
   let workspaceRoot: string | undefined;
+  let projectMemoryReceiptId: string | undefined;
+  let projectMemoryDecision: string | undefined;
+  let projectMemoryReceiptReadOutcome: string | undefined;
+  let projectMemoryMissingReadOutcome: string | undefined;
+  let projectMemoryMissingShellOutcome: string | undefined;
+  let projectMemoryShellSucceeded: boolean | undefined;
 
   const registration = await fetchJson(
     info.registrationEndpoint,
@@ -373,6 +389,7 @@ export async function probePublicExternalClientFlow(
               arguments: {
                 path: input.workspacePath,
                 mode: "checkout",
+                ...(input.task ? { task: input.task } : {}),
               },
             },
           },
@@ -385,6 +402,9 @@ export async function probePublicExternalClientFlow(
         const structuredContent = asRecord(openWorkspaceResult?.structuredContent);
         workspaceId = stringField(structuredContent, "workspaceId");
         workspaceRoot = stringField(structuredContent, "root");
+        const projectMemory = asRecord(structuredContent?.projectMemory);
+        projectMemoryReceiptId = stringField(projectMemory, "receiptId");
+        projectMemoryDecision = stringField(projectMemory, "decision");
 
         openWorkspaceCheck =
           openWorkspace.ok && workspaceId && workspaceRoot === input.workspacePath
@@ -403,6 +423,81 @@ export async function probePublicExternalClientFlow(
                   openWorkspace,
                   "MCP open_workspace did not succeed.",
                 );
+
+        const readToolName = config.toolNaming === "legacy" ? "read_file" : "read";
+        const shellToolName = config.toolNaming === "legacy" ? "run_shell" : "bash";
+        if (
+          input.verifyProjectMemoryShadowTools &&
+          workspaceId &&
+          projectMemoryReceiptId &&
+          toolNames.includes(readToolName) &&
+          toolNames.includes(shellToolName)
+        ) {
+          const receiptRead = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 4,
+              method: "tools/call",
+              params: {
+                name: readToolName,
+                arguments: {
+                  workspaceId,
+                  path: "project-memory-probe.txt",
+                  projectMemoryReceiptId,
+                },
+              },
+            },
+            sessionId,
+          );
+          projectMemoryReceiptReadOutcome = projectMemoryOutcome(
+            receiptRead.text,
+          );
+
+          const missingRead = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 5,
+              method: "tools/call",
+              params: {
+                name: readToolName,
+                arguments: {
+                  workspaceId,
+                  path: "project-memory-probe.txt",
+                },
+              },
+            },
+            sessionId,
+          );
+          projectMemoryMissingReadOutcome = projectMemoryOutcome(
+            missingRead.text,
+          );
+
+          const missingShell = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 6,
+              method: "tools/call",
+              params: {
+                name: shellToolName,
+                arguments: {
+                  workspaceId,
+                  command: "git --version",
+                },
+              },
+            },
+            sessionId,
+          );
+          projectMemoryMissingShellOutcome = projectMemoryOutcome(
+            missingShell.text,
+          );
+          projectMemoryShellSucceeded = mcpToolCallSucceeded(missingShell);
+        }
       }
     }
   }
@@ -418,6 +513,12 @@ export async function probePublicExternalClientFlow(
     toolNames,
     workspaceId,
     workspaceRoot,
+    projectMemoryReceiptId,
+    projectMemoryDecision,
+    projectMemoryReceiptReadOutcome,
+    projectMemoryMissingReadOutcome,
+    projectMemoryMissingShellOutcome,
+    projectMemoryShellSucceeded,
     ready:
       clientRegistrationCheck.ok &&
       authorizationCheck.ok &&
@@ -512,6 +613,20 @@ function stringField(
 ): string | undefined {
   const candidate = value?.[field];
   return typeof candidate === "string" ? candidate : undefined;
+}
+
+function projectMemoryOutcome(text: string | undefined): string | undefined {
+  const response = asRecord(parseMcpResponseJson(text));
+  const result = asRecord(response?.result);
+  const metadata = asRecord(result?._meta);
+  return stringField(asRecord(metadata?.projectMemory), "outcome");
+}
+
+function mcpToolCallSucceeded(result: JsonFetchResult): boolean {
+  if (!result.ok) return false;
+  const response = asRecord(parseMcpResponseJson(result.text));
+  const toolResult = asRecord(response?.result);
+  return Boolean(toolResult) && toolResult?.isError !== true;
 }
 
 function extractInvalidHostMessage(result: JsonFetchResult): string | undefined {

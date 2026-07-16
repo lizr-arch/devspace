@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "./server.js";
 import { loadConfig } from "./config.js";
+import { canonicalJson } from "./project-memory.js";
 import {
   deriveChatGptWebInfo,
   probeLocalChatGptFlow,
@@ -21,6 +23,7 @@ try {
   await testPublicChatGptProbe();
   await testPublicExternalClientProbe();
   await testPublicExternalClientProbeReadOnly();
+  await testProjectMemoryHttpMcpFlow();
   await testPublicProbeExplainsInvalidHost();
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
@@ -230,13 +233,91 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       workspacePath: process.cwd(),
     });
     assert.equal(probe.ready, true);
-    assert.deepEqual((probe as any).toolNames, [
+    assert.deepEqual(probe.toolNames, [
       "open_workspace",
+      "project_memory_preflight",
       "read",
       "grep",
       "glob",
       "ls",
     ]);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((error) => (error ? reject(error) : resolve()));
+    });
+    close();
+  }
+}
+
+async function testProjectMemoryHttpMcpFlow(): Promise<void> {
+  const configDir = mkdtempSync(join(tempRoot, "config-project-memory-"));
+  const stateDir = mkdtempSync(join(tempRoot, "state-project-memory-"));
+  const workspaceRoot = mkdtempSync(join(tempRoot, "workspace-project-memory-"));
+  const worktreeRoot = mkdtempSync(join(tempRoot, "worktree-project-memory-"));
+  const port = await freePort();
+  const publicBaseUrl = `http://127.0.0.1:${port}`;
+  writeFileSync(
+    join(workspaceRoot, "project-memory-probe.txt"),
+    "Project Memory SHADOW HTTP probe\n",
+  );
+  writeFileSync(
+    join(configDir, "config.json"),
+    JSON.stringify({
+      allowedRoots: [workspaceRoot],
+      projectMemory: {
+        repositories: [
+          {
+            root: workspaceRoot,
+            command: [
+              "rtk",
+              "proxy",
+              "py",
+              "-3.11",
+              "scripts/manage_project_memory.py",
+            ],
+            mode: "SHADOW",
+          },
+        ],
+      },
+    }),
+  );
+  const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    DEVSPACE_PUBLIC_BASE_URL: publicBaseUrl,
+    DEVSPACE_STATE_DIR: stateDir,
+    DEVSPACE_WORKTREE_ROOT: worktreeRoot,
+    DEVSPACE_LOG_LEVEL: "silent",
+    DEVSPACE_LOG_REQUESTS: "0",
+    DEVSPACE_LOG_TOOL_CALLS: "0",
+    HOST: "127.0.0.1",
+    PORT: String(port),
+  });
+  const task = "HTTP Project Memory SHADOW task";
+  const { app, close } = createServer(config, {
+    projectMemoryRunner: async (_repository, receivedTask) => {
+      assert.equal(receivedTask, task);
+      return fakeProjectMemoryPreflight(receivedTask);
+    },
+  });
+  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
+    const server = app.listen(config.port, config.host, () => resolve(server));
+  });
+
+  try {
+    const probe = await probePublicExternalClientFlow(config, {
+      workspacePath: workspaceRoot,
+      task,
+      verifyProjectMemoryShadowTools: true,
+    });
+    assert.equal(probe.ready, true);
+    assert.equal(probe.toolNames?.includes("project_memory_preflight"), true);
+    assert.match(probe.projectMemoryReceiptId ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(probe.projectMemoryDecision, "observe_would_deny");
+    assert.equal(probe.projectMemoryReceiptReadOutcome, "receipt_match");
+    assert.equal(probe.projectMemoryMissingReadOutcome, "receipt_missing");
+    assert.equal(probe.projectMemoryMissingShellOutcome, "receipt_missing");
+    assert.equal(probe.projectMemoryShellSucceeded, true);
   } finally {
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => (error ? reject(error) : resolve()));
@@ -312,6 +393,60 @@ async function testPublicProbeExplainsInvalidHost(): Promise<void> {
     });
     close();
   }
+}
+
+function fakeProjectMemoryPreflight(task: string): Record<string, unknown> {
+  const bundle = {
+    schema_version: 1,
+    selectors: { terms: [task] },
+    records: ["feature:project-memory-coding-gateway"],
+  };
+  const unsigned = {
+    schema_version: 1,
+    mode: "SHADOW",
+    issued_at: "2026-07-16T10:00:00Z",
+    expires_at: "2099-07-16T10:15:00Z",
+    task_sha256: sha256(task.trim()),
+    repository_head: "0".repeat(40),
+    catalog_sha256: "1".repeat(64),
+    policy_sha256: "2".repeat(64),
+    selected_owners: [
+      {
+        kind: "feature",
+        id: "project-memory-coding-gateway",
+        source: ".project-memory/features/project-memory-coding-gateway.yaml",
+        source_sha256: "3".repeat(64),
+        owner_schema_version: 2,
+        safety_tier: "critical",
+      },
+    ],
+    query_iterations: [
+      {
+        iteration: 1,
+        engine: "v2",
+        selector_sha256: "4".repeat(64),
+        max_tokens: 4000,
+      },
+    ],
+    bundle_sha256: sha256(canonicalJson(bundle)),
+  };
+  return {
+    schema_version: 1,
+    mode: "SHADOW",
+    policy_mode: "SHADOW",
+    decision: "observe_would_deny",
+    would_deny: true,
+    denial_reasons: ["legacy_owner:feature:legacy"],
+    bundle,
+    receipt: {
+      ...unsigned,
+      receipt_id: sha256(canonicalJson(unsigned)),
+    },
+  };
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 async function freePort(): Promise<number> {

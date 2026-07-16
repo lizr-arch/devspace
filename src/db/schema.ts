@@ -70,6 +70,90 @@ export const oauthRefreshTokens = sqliteTable("oauth_refresh_tokens", {
   resource: text("resource"),
 });
 
+export const projectMemoryReceipts = sqliteTable(
+  "project_memory_receipts",
+  {
+    receiptId: text("receipt_id").primaryKey(),
+    workspaceSessionId: text("workspace_session_id")
+      .notNull()
+      .references(() => workspaceSessions.id, { onDelete: "cascade" }),
+    mode: text("mode").notNull(),
+    taskSha256: text("task_sha256").notNull(),
+    receiptJson: text("receipt_json").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("project_memory_receipts_workspace_idx").on(
+      table.workspaceSessionId,
+      table.createdAt,
+    ),
+    index("project_memory_receipts_expiry_idx").on(table.expiresAt),
+  ],
+);
+
+export const projectMemoryActiveState = sqliteTable(
+  "project_memory_active_state",
+  {
+    workspaceSessionId: text("workspace_session_id")
+      .primaryKey()
+      .references(() => workspaceSessions.id, { onDelete: "cascade" }),
+    receiptId: text("receipt_id").references(
+      () => projectMemoryReceipts.receiptId,
+    ),
+    decision: text("decision").notNull(),
+    wouldDeny: integer("would_deny").notNull(),
+    denialReasonsJson: text("denial_reasons_json").notNull(),
+    bundleDeliveredAt: text("bundle_delivered_at"),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [index("project_memory_active_receipt_idx").on(table.receiptId)],
+);
+
+export const projectMemoryAccessEvents = sqliteTable(
+  "project_memory_access_events",
+  {
+    id: text("id").primaryKey(),
+    workspaceSessionId: text("workspace_session_id")
+      .notNull()
+      .references(() => workspaceSessions.id, { onDelete: "cascade" }),
+    receiptId: text("receipt_id"),
+    eventType: text("event_type").notNull(),
+    toolName: text("tool_name"),
+    outcome: text("outcome").notNull(),
+    detailsJson: text("details_json").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("project_memory_access_workspace_idx").on(
+      table.workspaceSessionId,
+      table.createdAt,
+    ),
+    index("project_memory_access_receipt_idx").on(table.receiptId),
+  ],
+);
+
+export const projectMemoryPrivilegeAuthorizations = sqliteTable(
+  "project_memory_privilege_authorizations",
+  {
+    authorizationId: text("authorization_id").primaryKey(),
+    workspaceSessionId: text("workspace_session_id")
+      .notNull()
+      .references(() => workspaceSessions.id, { onDelete: "cascade" }),
+    taskSha256: text("task_sha256").notNull(),
+    mode: text("mode").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    consumedAt: text("consumed_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("project_memory_privilege_workspace_idx").on(
+      table.workspaceSessionId,
+      table.expiresAt,
+    ),
+  ],
+);
+
 export type WorkspaceSessionRow = typeof workspaceSessions.$inferSelect;
 export type NewWorkspaceSessionRow = typeof workspaceSessions.$inferInsert;
 export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;

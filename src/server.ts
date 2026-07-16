@@ -42,6 +42,10 @@ import {
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
+import {
+  ProjectMemoryController,
+  type ProjectMemoryCommandRunner,
+} from "./project-memory.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
@@ -93,6 +97,7 @@ interface DiffStats {
 
 type ToolWidgetKind =
   | "workspace"
+  | "project_memory"
   | "read"
   | "write"
   | "edit"
@@ -121,7 +126,11 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
     case "off":
       return false;
     case "changes":
-      return kind === "workspace" || kind === "show_changes";
+      return (
+        kind === "workspace" ||
+        kind === "project_memory" ||
+        kind === "show_changes"
+      );
     case "full":
       return true;
   }
@@ -213,11 +222,20 @@ function serverInstructions(
       ? " After creating, editing, or overwriting files, call show_changes once after the related file changes are complete so the user can see the aggregate diff."
       : "";
 
+  const projectMemory =
+    config.projectMemory.repositories.length > 0
+      ? " For each new task in a configured repository, pass the task to open_workspace or call project_memory_preflight before other tools. Pass the returned projectMemoryReceiptId on later workspace tool calls. Project Memory is SHADOW-only: missing or would-deny receipts are observed but do not block existing tools."
+      : " Project Memory preflight is available only for operator-configured repository roots.";
+
   if (config.readOnly) {
-    return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.`;
+    return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.${projectMemory}`;
   }
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}`;
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}${projectMemory}`;
+}
+
+export interface CreateServerOptions {
+  projectMemoryRunner?: ProjectMemoryCommandRunner;
 }
 function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
   return {
@@ -244,6 +262,26 @@ const workspaceAgentsFileOutputSchema = z.object({
 const workspaceAvailableAgentsFileOutputSchema = z.object({
   path: z.string(),
 });
+
+const projectMemoryPreflightOutputSchema = z.object({
+  status: z.enum(["ready", "unconfigured", "error"]),
+  receiptId: z.string().optional(),
+  decision: z.enum(["allow", "observe_would_deny", "deny"]).optional(),
+  wouldDeny: z.boolean(),
+  denialReasons: z.array(z.string()),
+  bundle: z.unknown().optional(),
+  error: z.string().optional(),
+});
+
+function projectMemoryReceiptInputSchema(): z.ZodOptional<z.ZodString> {
+  return z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional()
+    .describe(
+      "Receipt ID returned by the latest Project Memory preflight for this task. SHADOW records missing or stale IDs but does not block the tool.",
+    );
+}
 
 const reviewFileOutputSchema = z.object({
   path: z.string(),
@@ -553,6 +591,12 @@ function createMcpServer(
           .describe(
             'Git ref to base a worktree on. Only used with mode="worktree". Defaults to HEAD.',
           ),
+        task: z
+          .string()
+          .optional()
+          .describe(
+            "Current coding task. For an operator-configured repository, DevSpace runs SHADOW Project Memory preflight and returns the bounded bundle once. Task text is not persisted.",
+          ),
       },
       outputSchema: {
         workspaceId: z.string(),
@@ -573,15 +617,16 @@ function createMcpServer(
         availableAgentsFiles: z.array(workspaceAvailableAgentsFileOutputSchema),
         skills: z.array(workspaceSkillOutputSchema),
         skillDiagnostics: z.array(z.unknown()),
+        projectMemory: projectMemoryPreflightOutputSchema.optional(),
         instruction: z.string(),
       },
       ...toolWidgetDescriptorMeta(config, "workspace"),
       annotations: { readOnlyHint: true },
     },
-    async ({ path, mode, baseRef }) => {
+    async ({ path, mode, baseRef, task }) => {
       const startedAt = performance.now();
-      const { workspace, agentsFiles, availableAgentsFiles } =
-        await workspaces.openWorkspace({ path, mode, baseRef });
+      const { workspace, agentsFiles, availableAgentsFiles, projectMemory } =
+        await workspaces.openWorkspace({ path, mode, baseRef, task });
       if (config.widgets === "changes") {
         void reviewCheckpoints.initializeWorkspace({
           workspaceId: workspace.id,
@@ -613,7 +658,12 @@ function createMcpServer(
       const instructionReadOnly = config.readOnly
         ? ` ${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are unavailable in this server mode.`
         : "";
-      const instruction = `${instructionPrefix}${instructionCore}${instructionSkills}${instructionReadOnly}`;
+      const instructionProjectMemory = projectMemory?.receiptId
+        ? ` For this task, pass projectMemoryReceiptId ${projectMemory.receiptId} on later workspace tool calls. Call project_memory_preflight again when the task changes.`
+        : task
+          ? " Project Memory did not issue a receipt. SHADOW does not block existing tools; call project_memory_preflight again when the task changes."
+          : " For a new task in a configured repository, call project_memory_preflight before later workspace tools.";
+      const instruction = `${instructionPrefix}${instructionCore}${instructionSkills}${instructionReadOnly}${instructionProjectMemory}`;
       const resultContent: ToolContent[] = [
         {
           type: "text" as const,
@@ -629,6 +679,12 @@ function createMcpServer(
               : undefined,
             visibleSkills.length > 0
               ? `Available skills: ${visibleSkills.map((skill) => skill.name).join(", ")}`
+              : undefined,
+            projectMemory
+              ? `Project Memory SHADOW: ${projectMemory.status}; decision=${projectMemory.decision ?? "none"}; receipt=${projectMemory.receiptId ?? "none"}`
+              : undefined,
+            projectMemory?.bundle
+              ? `Project Memory bundle (first delivery only):\n${JSON.stringify(projectMemory.bundle, null, 2)}`
               : undefined,
             instruction,
           ]
@@ -670,8 +726,71 @@ function createMcpServer(
           availableAgentsFiles: availableAgentsFileOutputs,
           skills: visibleSkills,
           skillDiagnostics: workspace.skillDiagnostics,
+          projectMemory,
           instruction,
         },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "project_memory_preflight",
+    {
+      title: "Project Memory preflight",
+      description:
+        "Refresh SHADOW Project Memory context for a new task in an open workspace. The task is sent only to the operator-configured repository command and is not persisted. Returns the bounded bundle once and a receipt ID for later tool calls. SHADOW observations never block existing tools.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier returned by open_workspace."),
+        task: z.string().min(1).describe("The current coding task."),
+      },
+      outputSchema: {
+        result: z.string(),
+        projectMemory: projectMemoryPreflightOutputSchema,
+      },
+      ...toolWidgetDescriptorMeta(config, "project_memory"),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ workspaceId, task }) => {
+      const startedAt = performance.now();
+      const projectMemory = await workspaces.preflightProjectMemory(
+        workspaceId,
+        task,
+      );
+      const lines = [
+        `Project Memory SHADOW status: ${projectMemory.status}`,
+        `Decision: ${projectMemory.decision ?? "none"}`,
+        `Would deny: ${String(projectMemory.wouldDeny)}`,
+        `Receipt: ${projectMemory.receiptId ?? "none"}`,
+        projectMemory.denialReasons.length > 0
+          ? `Reasons: ${projectMemory.denialReasons.join(", ")}`
+          : undefined,
+        projectMemory.bundle
+          ? `Project Memory bundle (first delivery only):\n${JSON.stringify(projectMemory.bundle, null, 2)}`
+          : undefined,
+        projectMemory.error,
+      ].filter((line): line is string => Boolean(line));
+      const result = lines.join("\n");
+      logToolCall(config, {
+        tool: "project_memory_preflight",
+        workspaceId,
+        success: projectMemory.status !== "error",
+        durationMs: Math.round(performance.now() - startedAt),
+        error: projectMemory.error,
+      });
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: "project_memory_preflight",
+          projectMemory: {
+            receiptId: projectMemory.receiptId,
+            decision: projectMemory.decision,
+            wouldDeny: projectMemory.wouldDeny,
+          },
+        },
+        structuredContent: { result, projectMemory },
       };
     },
   );
@@ -713,14 +832,20 @@ function createMcpServer(
           .positive()
           .optional()
           .describe("Maximum number of lines to read."),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema(),
       ...toolWidgetDescriptorMeta(config, "read"),
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, ...input }) => {
+    async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
+      const projectMemory = workspaces.observeProjectMemoryAccess(
+        workspaceId,
+        toolNames.read,
+        projectMemoryReceiptId,
+      );
       const readPath = workspaces.resolveReadPath(workspace, input.path);
       const response = await readFileTool(
         { ...input, path: readPath.absolutePath },
@@ -763,6 +888,7 @@ function createMcpServer(
         ...response,
         _meta: {
           tool: toolNames.read,
+          projectMemory,
           card: {
             workspaceId,
             path: input.path,
@@ -792,14 +918,20 @@ function createMcpServer(
             .string()
             .describe("File path to write, relative to the workspace root."),
           content: z.string().describe("Complete new file content."),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "write"),
         annotations: WRITE_TOOL_ANNOTATIONS,
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          toolNames.write,
+          projectMemoryReceiptId,
+        );
         workspaces.resolvePath(workspace, input.path);
         const response = await writeFileTool(input, {
           cwd: workspace.root,
@@ -839,6 +971,7 @@ function createMcpServer(
           ...response,
           _meta: {
             tool: toolNames.write,
+            projectMemory,
             card: {
               workspaceId,
               path: input.path,
@@ -881,6 +1014,7 @@ function createMcpServer(
               }),
             )
             .min(1),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({
           status: z.literal("applied"),
@@ -888,9 +1022,14 @@ function createMcpServer(
         ...toolWidgetDescriptorMeta(config, "edit"),
         annotations: EDIT_TOOL_ANNOTATIONS,
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          toolNames.edit,
+          projectMemoryReceiptId,
+        );
         workspaces.resolvePath(workspace, input.path);
         const response = await editFileTool(input, {
           cwd: workspace.root,
@@ -932,6 +1071,7 @@ function createMcpServer(
           content: editContent,
           _meta: {
             tool: toolNames.edit,
+            projectMemory,
             card: {
               workspaceId,
               path: input.path,
@@ -975,14 +1115,25 @@ function createMcpServer(
             .describe(
               "Defaults to true. When true, advances the last shown checkpoint to the current workspace state.",
             ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "show_changes"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, since, markReviewed }) => {
+      async ({
+        workspaceId,
+        since,
+        markReviewed,
+        projectMemoryReceiptId,
+      }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "show_changes",
+          projectMemoryReceiptId,
+        );
         const review = await reviewCheckpoints.reviewChanges({
           workspaceId,
           root: workspace.root,
@@ -1002,6 +1153,7 @@ function createMcpServer(
           content,
           _meta: {
             tool: "show_changes",
+            projectMemory,
             card: {
               workspaceId,
               summary: review.summary,
@@ -1039,14 +1191,20 @@ function createMcpServer(
               "Optional path or glob scope relative to the workspace root.",
             ),
           include: z.string().optional().describe("Optional include glob."),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          toolNames.grep,
+          projectMemoryReceiptId,
+        );
         if (input.path) workspaces.resolvePath(workspace, input.path);
         const response = await grepFilesTool(input, {
           cwd: workspace.root,
@@ -1084,6 +1242,7 @@ function createMcpServer(
           ...response,
           _meta: {
             tool: toolNames.grep,
+            projectMemory,
             card: {
               workspaceId,
               path: input.path,
@@ -1114,14 +1273,20 @@ function createMcpServer(
             .string()
             .optional()
             .describe("Optional path scope relative to the workspace root."),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          toolNames.glob,
+          projectMemoryReceiptId,
+        );
         if (input.path) workspaces.resolvePath(workspace, input.path);
         const response = await findFilesTool(input, {
           cwd: workspace.root,
@@ -1159,6 +1324,7 @@ function createMcpServer(
           ...response,
           _meta: {
             tool: toolNames.glob,
+            projectMemory,
             card: {
               workspaceId,
               path: input.path,
@@ -1189,14 +1355,20 @@ function createMcpServer(
             .describe(
               "Directory path to list, relative to the workspace root.",
             ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "directory"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          toolNames.ls,
+          projectMemoryReceiptId,
+        );
         workspaces.resolvePath(workspace, input.path);
         const response = await listDirectoryTool(input, {
           cwd: workspace.root,
@@ -1230,6 +1402,7 @@ function createMcpServer(
           ...response,
           _meta: {
             tool: toolNames.ls,
+            projectMemory,
             card: {
               workspaceId,
               path: input.path,
@@ -1275,14 +1448,25 @@ function createMcpServer(
             .max(300)
             .optional()
             .describe("Timeout in seconds. Defaults to 30, max 300."),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "shell"),
         annotations: SHELL_TOOL_ANNOTATIONS,
       },
-      async ({ workspaceId, workingDirectory, ...input }) => {
+      async ({
+        workspaceId,
+        workingDirectory,
+        projectMemoryReceiptId,
+        ...input
+      }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          toolNames.shell,
+          projectMemoryReceiptId,
+        );
         const cwd = workspaces.resolveWorkingDirectory(
           workspace,
           workingDirectory,
@@ -1327,6 +1511,7 @@ function createMcpServer(
           ...response,
           _meta: {
             tool: toolNames.shell,
+            projectMemory,
             card: {
               workspaceId,
               path: workingDirectory,
@@ -1345,7 +1530,10 @@ function createMcpServer(
   return server;
 }
 
-export function createServer(config = loadConfig()): RunningServer {
+export function createServer(
+  config = loadConfig(),
+  options: CreateServerOptions = {},
+): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
@@ -1368,7 +1556,16 @@ export function createServer(config = loadConfig()): RunningServer {
       getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
   });
   const workspaceStore = createWorkspaceStore(config.stateDir);
-  const workspaces = new WorkspaceRegistry(config, workspaceStore);
+  const projectMemory = new ProjectMemoryController(
+    config.projectMemory,
+    config.stateDir,
+    options.projectMemoryRunner,
+  );
+  const workspaces = new WorkspaceRegistry(
+    config,
+    workspaceStore,
+    projectMemory,
+  );
   const reviewCheckpoints = createReviewCheckpointManager();
 
   if (config.logging.trustProxy) {
@@ -1527,6 +1724,7 @@ export function createServer(config = loadConfig()): RunningServer {
       if (closed) return;
       closed = true;
       oauthProvider.close();
+      projectMemory.close();
       workspaceStore.close?.();
     },
   };

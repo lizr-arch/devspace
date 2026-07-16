@@ -111,6 +111,45 @@ DEVSPACE_SKILL_PATHS="$HOME/.codex/skills,$HOME/.claude/skills" \
 npx @waishnav/devspace serve
 ```
 
+## Project Memory SHADOW Preflight
+
+Project Memory integration is opt-in and operator configured in
+`~/.devspace/config.json`. Each repository mapping must name an exact trusted
+root and the fixed Worldwright Project Memory command:
+
+```json
+{
+  "allowedRoots": ["F:\\Code\\GIT\\worldwright-project-memory-m2"],
+  "projectMemory": {
+    "repositories": [
+      {
+        "root": "F:\\Code\\GIT\\worldwright-project-memory-m2",
+        "command": [
+          "rtk",
+          "proxy",
+          "py",
+          "-3.11",
+          "scripts/manage_project_memory.py"
+        ],
+        "mode": "SHADOW",
+        "timeoutMs": 30000,
+        "maxOutputBytes": 1048576
+      }
+    ]
+  }
+}
+```
+
+Repository-owned configuration cannot declare or replace this command. DevSpace
+rejects roots outside `allowedRoots`, commands other than the fixed command,
+duplicate roots, non-SHADOW modes, and limits outside the supported ranges.
+
+Pass the current task to `open_workspace`, or call
+`project_memory_preflight` when the task changes. The first response returns the
+bounded bundle and a `projectMemoryReceiptId`; pass that receipt ID on later
+workspace tool calls. In SHADOW, missing, stale, or would-deny receipts are
+recorded but never block existing read, edit, write, or shell tools.
+
 ## Logging
 
 | Variable | Default |

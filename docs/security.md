@@ -86,6 +86,26 @@ Filesystem path containment applies to DevSpace file tools. Shell commands run
 as local commands and can do what your user account can do. This is why the MCP
 client must be trusted and the Owner password must stay private.
 
+## Project Memory SHADOW Boundary
+
+Project Memory commands come only from the operator's DevSpace configuration.
+DevSpace does not execute a command declared by the opened repository. A mapping
+must use an exact trusted repository root and the fixed command
+`rtk proxy py -3.11 scripts/manage_project_memory.py`.
+
+The current task is sent to that command over stdin and may appear in the
+one-time bounded bundle returned to the MCP client. DevSpace does not store the
+raw task or bundle. SQLite stores the task SHA-256, validated receipt, active
+decision, sanitized denial codes, bundle-delivery timestamp, access events, and
+one-time privilege authorization state. Receipt validation rejects malformed
+bindings, unsafe owner paths, task-hash mismatches, and bundle-hash mismatches.
+
+This release is SHADOW-only. Missing, expired, mismatched, or would-deny receipts
+produce audit observations but do not block existing tools, including raw shell
+access. NORMAL, AUDIT, and UPDATE enforcement are not enabled by this
+configuration. Project Memory constrains only DevSpace's MCP tool layer; it is
+not a sandbox for other local processes or direct filesystem access.
+
 ## Worktrees
 
 Managed worktrees reduce accidental edits to your active checkout, but they are

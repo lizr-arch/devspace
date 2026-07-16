@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
@@ -58,6 +58,7 @@ assert.equal(
   true,
 );
 assert.equal(loadConfig(baseEnv).skillsEnabled, true);
+assert.deepEqual(loadConfig(baseEnv).projectMemory, { repositories: [] });
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled,
   false,
@@ -266,3 +267,123 @@ assert.deepEqual(fileConfig.allowedHosts, [
   "::1",
   "devspace.example.com",
 ]);
+
+const projectMemoryRoot = mkdtempSync(
+  join(tmpdir(), "devspace-project-memory-config-root-"),
+);
+const projectMemoryConfig = loadProjectMemoryConfig(projectMemoryRoot, {
+  repositories: [
+    {
+      root: projectMemoryRoot,
+      command: [
+        "rtk",
+        "proxy",
+        "py",
+        "-3.11",
+        "scripts/manage_project_memory.py",
+      ],
+      mode: "SHADOW",
+      timeoutMs: 45000,
+      maxOutputBytes: 262144,
+    },
+  ],
+});
+assert.deepEqual(projectMemoryConfig.projectMemory.repositories, [
+  {
+    root: projectMemoryRoot,
+    command: [
+      "rtk",
+      "proxy",
+      "py",
+      "-3.11",
+      "scripts/manage_project_memory.py",
+    ],
+    mode: "SHADOW",
+    timeoutMs: 45000,
+    maxOutputBytes: 262144,
+  },
+]);
+
+assert.throws(
+  () =>
+    loadProjectMemoryConfig(projectMemoryRoot, {
+      repositories: [
+        {
+          root: projectMemoryRoot,
+          command: ["node", "repository-owned-script.js"],
+          mode: "SHADOW",
+        },
+      ],
+    }),
+  /command must be rtk proxy py -3.11 scripts\/manage_project_memory.py/,
+);
+assert.throws(
+  () =>
+    loadProjectMemoryConfig(projectMemoryRoot, {
+      repositories: [
+        {
+          root: projectMemoryRoot,
+          command: [
+            "rtk",
+            "proxy",
+            "py",
+            "-3.11",
+            "scripts/manage_project_memory.py",
+          ],
+          mode: "NORMAL",
+        },
+      ],
+    }),
+  /mode must be SHADOW/,
+);
+assert.throws(
+  () =>
+    loadProjectMemoryConfig(projectMemoryRoot, {
+      repositories: [
+        {
+          root: process.cwd(),
+          command: [
+            "rtk",
+            "proxy",
+            "py",
+            "-3.11",
+            "scripts/manage_project_memory.py",
+          ],
+          mode: "SHADOW",
+        },
+      ],
+    }),
+  /outside allowed roots/,
+);
+
+const repositoryDeclaredRoot = mkdtempSync(
+  join(tmpdir(), "devspace-project-memory-repo-declaration-"),
+);
+mkdirSync(join(repositoryDeclaredRoot, ".devspace"));
+writeFileSync(
+  join(repositoryDeclaredRoot, ".devspace", "project-memory.json"),
+  JSON.stringify({ command: ["node", "malicious.js"] }),
+);
+const repositoryDeclarationConfig = loadProjectMemoryConfig(
+  repositoryDeclaredRoot,
+  undefined,
+);
+assert.deepEqual(repositoryDeclarationConfig.projectMemory, {
+  repositories: [],
+});
+
+function loadProjectMemoryConfig(
+  allowedRoot: string,
+  projectMemory: unknown,
+) {
+  const directory = mkdtempSync(join(tmpdir(), "devspace-pm-config-"));
+  writeFileSync(
+    join(directory, "config.json"),
+    JSON.stringify({ allowedRoots: [allowedRoot], projectMemory }),
+  );
+  return loadConfig({
+    DEVSPACE_CONFIG_DIR: directory,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    PORT: "1",
+  });
+}

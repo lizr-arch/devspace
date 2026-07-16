@@ -1,12 +1,23 @@
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { expandHomePath } from "./roots.js";
+import { basename, join, resolve } from "node:path";
+import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { loadDevspaceFiles } from "./user-config.js";
 
 export type ToolNamingMode = "legacy" | "short";
 export type WidgetMode = "off" | "changes" | "full";
+export interface ProjectMemoryRepositoryConfig {
+  root: string;
+  command: [string, ...string[]];
+  mode: "SHADOW";
+  timeoutMs: number;
+  maxOutputBytes: number;
+}
+
+export interface ProjectMemoryConfig {
+  repositories: ProjectMemoryRepositoryConfig[];
+}
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
@@ -27,6 +38,7 @@ export interface ServerConfig {
   skillPaths: string[];
   agentDir: string;
   logging: LoggingConfig;
+  projectMemory: ProjectMemoryConfig;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -180,6 +192,101 @@ function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
   };
 }
 
+function parseProjectMemoryConfig(
+  value: DevspaceUserConfigProjectMemory | undefined,
+  allowedRoots: string[],
+): ProjectMemoryConfig {
+  const repositories = value?.repositories ?? [];
+  if (!Array.isArray(repositories)) {
+    throw new Error("Invalid projectMemory.repositories: expected an array");
+  }
+
+  const seenRoots = new Set<string>();
+  return {
+    repositories: repositories.map((entry, index) => {
+      if (!entry || typeof entry !== "object") {
+        throw new Error(`Invalid projectMemory repository at index ${index}`);
+      }
+      const root = resolve(expandHomePath(entry.root));
+      if (!allowedRoots.some((allowedRoot) => isPathInsideRoot(root, allowedRoot))) {
+        throw new Error(`Project Memory root is outside allowed roots: ${root}`);
+      }
+      const rootKey = process.platform === "win32" ? root.toLowerCase() : root;
+      if (seenRoots.has(rootKey)) {
+        throw new Error(`Duplicate Project Memory root: ${root}`);
+      }
+      seenRoots.add(rootKey);
+
+      if (!Array.isArray(entry.command) || entry.command.length === 0) {
+        throw new Error(`Project Memory command is required for ${root}`);
+      }
+      const command = entry.command.map((part) => {
+        if (typeof part !== "string" || !part.trim() || part.includes("\0")) {
+          throw new Error(`Invalid Project Memory command for ${root}`);
+        }
+        return part;
+      }) as [string, ...string[]];
+      const executable = basename(command[0]).toLowerCase();
+      const expectedArgs = [
+        "proxy",
+        "py",
+        "-3.11",
+        "scripts/manage_project_memory.py",
+      ];
+      if (
+        !["rtk", "rtk.exe"].includes(executable) ||
+        command.length !== expectedArgs.length + 1 ||
+        expectedArgs.some((part, partIndex) => command[partIndex + 1] !== part)
+      ) {
+        throw new Error(
+          `Project Memory command must be rtk proxy py -3.11 scripts/manage_project_memory.py for ${root}`,
+        );
+      }
+      if (entry.mode !== "SHADOW") {
+        throw new Error(`Project Memory mode must be SHADOW for ${root}`);
+      }
+
+      return {
+        root,
+        command,
+        mode: "SHADOW",
+        timeoutMs: parseBoundedInteger(
+          entry.timeoutMs,
+          30_000,
+          1_000,
+          120_000,
+          `projectMemory.repositories[${index}].timeoutMs`,
+        ),
+        maxOutputBytes: parseBoundedInteger(
+          entry.maxOutputBytes,
+          1_048_576,
+          16_384,
+          4_194_304,
+          `projectMemory.repositories[${index}].maxOutputBytes`,
+        ),
+      };
+    }),
+  };
+}
+
+type DevspaceUserConfigProjectMemory = NonNullable<
+  ReturnType<typeof loadDevspaceFiles>["config"]["projectMemory"]
+>;
+
+function parseBoundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const parsed = value ?? fallback;
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`Invalid ${name}: ${String(value)}`);
+  }
+  return parsed;
+}
+
 function parseWidgetMode(value: string | undefined): WidgetMode {
   if (!value || value === "full") return "full";
   if (value === "off" || value === "changes") return value;
@@ -256,14 +363,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     new URL(publicBaseUrl).hostname,
     ...(files.config.allowedHosts ?? []),
   ];
+  const allowedRoots = parseAllowedRoots(
+    env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots,
+  );
 
   return {
     host,
     port,
     oauth: parseOAuthConfig(env, files.auth.ownerToken),
-    allowedRoots: parseAllowedRoots(
-      env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots,
-    ),
+    allowedRoots,
     allowedHosts: parseAllowedHosts(
       env.DEVSPACE_ALLOWED_HOSTS,
       derivedAllowedHosts,
@@ -296,6 +404,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       ),
     ),
     logging: parseLoggingConfig(env),
+    projectMemory: parseProjectMemoryConfig(
+      files.config.projectMemory,
+      allowedRoots,
+    ),
   };
 }
 
