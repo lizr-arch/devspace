@@ -3,7 +3,9 @@ import {
   setupWorkspace,
   teardownWorkspace,
   DEVSPACE_CLI,
+  TSX_CLI,
   treeKill,
+  waitForProcessOutput,
 } from "./test_utils.js";
 
 let nextId = 1;
@@ -14,12 +16,14 @@ const pending = new Map<
 let stdoutBuffer = "";
 
 function startServer(): ChildProcess {
-  const isWin = process.platform === "win32";
-  const proc = spawn("npx", ["tsx", DEVSPACE_CLI, "mcp", "serve"], {
-    cwd: process.cwd(),
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: isWin,
-  });
+  const proc = spawn(
+    process.execPath,
+    [TSX_CLI, DEVSPACE_CLI, "mcp", "serve"],
+    {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
 
   proc.stdout!.on("data", (chunk: Buffer) => {
     stdoutBuffer += chunk.toString("utf-8");
@@ -103,7 +107,7 @@ async function run(): Promise<void> {
   setupWorkspace();
 
   const proc = startServer();
-  await sleep(4000);
+  await waitForProcessOutput(proc, "Starting MCP server on stdin/stdout...");
 
   const timeout = setTimeout(() => {
     console.error("\nGlobal timeout (30s) reached. Forcing exit.\n");

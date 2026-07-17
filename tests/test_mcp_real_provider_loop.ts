@@ -13,7 +13,9 @@ import {
   teardownWorkspace,
   PROJECT_ROOT,
   DEVSPACE_CLI,
+  TSX_CLI,
   treeKill,
+  waitForProcessOutput,
 } from "./test_utils.js";
 
 let nextId = 1;
@@ -22,8 +24,6 @@ const pending = new Map<
   { resolve: (v: unknown) => void; reject: (e: Error) => void }
 >();
 let stdoutBuffer = "";
-
-const isWin = process.platform === "win32";
 
 const results: { name: string; passed: boolean }[] = [];
 
@@ -48,7 +48,6 @@ function startMockServer(): ChildProcess {
     {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
-      shell: isWin,
     },
   );
   proc.stderr!.on("data", (chunk: Buffer) => {
@@ -59,17 +58,20 @@ function startMockServer(): ChildProcess {
 }
 
 function startMcpServer(): ChildProcess {
-  const proc = spawn("npx", ["tsx", DEVSPACE_CLI, "mcp", "serve"], {
-    cwd: process.cwd(),
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: isWin,
-    env: {
-      ...process.env,
-      OPENAI_API_URL: "http://localhost:8082/v1",
-      OPENAI_API_KEY: "mock-key",
-      OPENAI_MODEL: "gpt-mock",
+  const proc = spawn(
+    process.execPath,
+    [TSX_CLI, DEVSPACE_CLI, "mcp", "serve"],
+    {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        OPENAI_API_URL: "http://localhost:8082/v1",
+        OPENAI_API_KEY: "mock-key",
+        OPENAI_MODEL: "gpt-mock",
+      },
     },
-  });
+  );
 
   proc.stdout!.on("data", (chunk: Buffer) => {
     stdoutBuffer += chunk.toString("utf-8");
@@ -146,7 +148,7 @@ async function run(): Promise<void> {
 
   console.log("  Starting MCP server...");
   const mcpProc = startMcpServer();
-  await sleep(2000);
+  await waitForProcessOutput(mcpProc, "Starting MCP server on stdin/stdout...");
 
   let runId: string | null = null;
   let runToken: string | null = null;
@@ -244,9 +246,9 @@ async function run(): Promise<void> {
 
     console.log("  Spawning orchestrator...");
     const orchProc = spawn(
-      "npx",
+      process.execPath,
       [
-        "tsx",
+        TSX_CLI,
         DEVSPACE_CLI,
         "delegate",
         "run",
@@ -262,7 +264,6 @@ async function run(): Promise<void> {
       {
         cwd: process.cwd(),
         stdio: ["pipe", "pipe", "pipe"],
-        shell: isWin,
         env: {
           ...process.env,
           OPENAI_API_URL: "http://localhost:8082/v1",
