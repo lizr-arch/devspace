@@ -4,7 +4,7 @@ import {
   setupWorkspace,
   teardownWorkspace,
   DEVSPACE_CLI,
-  TSX_CLI,
+  TSX_IMPORT,
   treeKill,
   waitForProcessOutput,
 } from "./test_utils.js";
@@ -19,7 +19,7 @@ let stdoutBuffer = "";
 function startServer(): ChildProcess {
   const proc = spawn(
     process.execPath,
-    [TSX_CLI, DEVSPACE_CLI, "mcp", "serve"],
+    ["--import", TSX_IMPORT, DEVSPACE_CLI, "mcp", "serve"],
     {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],

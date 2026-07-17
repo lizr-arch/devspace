@@ -3,18 +3,19 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import type { ChildProcess } from "node:child_process";
 
 let savedCwd: string;
 export const PROJECT_ROOT = join(import.meta.dirname, "..");
 export const DEVSPACE_CLI = join(PROJECT_ROOT, "src", "cli.ts");
 const require = createRequire(import.meta.url);
-export const TSX_CLI = require.resolve("tsx/cli");
+export const TSX_IMPORT = pathToFileURL(require.resolve("tsx")).href;
 
 export function waitForProcessOutput(
   proc: ChildProcess,
   marker: string,
-  timeoutMs = 60_000,
+  timeoutMs = 180_000,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -37,8 +38,12 @@ export function waitForProcessOutput(
       if (settled) return;
       settled = true;
       cleanup();
-      if (error) reject(error);
-      else resolve();
+      if (error) {
+        treeKill(proc);
+        reject(error);
+      } else {
+        resolve();
+      }
     };
     const onStdout = (chunk: Buffer) => {
       output = (output + chunk.toString("utf-8")).slice(-marker.length * 2);

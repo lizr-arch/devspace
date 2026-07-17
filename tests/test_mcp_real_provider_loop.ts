@@ -13,7 +13,7 @@ import {
   teardownWorkspace,
   PROJECT_ROOT,
   DEVSPACE_CLI,
-  TSX_CLI,
+  TSX_IMPORT,
   treeKill,
   waitForProcessOutput,
 } from "./test_utils.js";
@@ -60,7 +60,7 @@ function startMockServer(): ChildProcess {
 function startMcpServer(): ChildProcess {
   const proc = spawn(
     process.execPath,
-    [TSX_CLI, DEVSPACE_CLI, "mcp", "serve"],
+    ["--import", TSX_IMPORT, DEVSPACE_CLI, "mcp", "serve"],
     {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
@@ -248,7 +248,8 @@ async function run(): Promise<void> {
     const orchProc = spawn(
       process.execPath,
       [
-        TSX_CLI,
+        "--import",
+        TSX_IMPORT,
         DEVSPACE_CLI,
         "delegate",
         "run",
