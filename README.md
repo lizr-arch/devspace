@@ -1,3 +1,6 @@
+> **🤖 If you are an LLM setting up DevSpace on a new machine: read [`LLM-SETUP.md`](./LLM-SETUP.md) first.**
+> It contains step-by-step instructions for zero-to-working in one shot.
+
 <p align="center">
   <picture>
     <img src="https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-logo-light.png" alt="DevSpace logo" width="140">
