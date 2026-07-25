@@ -22,7 +22,8 @@ ChatGPT web
   -> DevSpace on localhost
   -> OAuth approval page on the same public base URL
   -> approved access token
-  -> open_workspace / read / edit / bash
+  -> devspace_info / list_workspaces / resume_workspace
+  -> open_workspace / read / edit / bash / background jobs
 ```
 
 The important detail is that DevSpace uses the same public origin for both the

@@ -65,6 +65,10 @@ Do not include `/mcp` in `DEVSPACE_PUBLIC_BASE_URL`.
 By default, DevSpace derives allowed Host headers from the local host and public
 URL. Use `DEVSPACE_ALLOWED_HOSTS=*` only for intentional local debugging.
 
+When a tunnel or reverse proxy runs locally and forwards to the loopback-bound
+server, enable `trustProxy`. DevSpace then trusts exactly one proxy hop. Do not
+enable it when the server is directly reachable from untrusted networks.
+
 ## Tunnels
 
 DevSpace does not manage tunnels. Your tunnel or reverse proxy should point to:
@@ -85,6 +89,18 @@ package scripts.
 Filesystem path containment applies to DevSpace file tools. Shell commands run
 as local commands and can do what your user account can do. This is why the MCP
 client must be trusted and the Owner password must stay private.
+
+## Background Validation Jobs
+
+Background jobs do not accept a shell command string. They select a fixed
+build/test/check runner, validate its action and path-like arguments, resolve a
+fixed executable, spawn without a shell, remain inside the opened workspace,
+and cap concurrency, runtime, and captured output. Job state and logs are stored
+under the private DevSpace state directory.
+
+Repository-owned build or test scripts can still execute code as the local
+user. Only run jobs in trusted approved repositories, and use `cancel_job` when
+a process behaves unexpectedly.
 
 ## Project Memory SHADOW Boundary
 

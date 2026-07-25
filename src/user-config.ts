@@ -10,6 +10,8 @@ export interface DevspaceUserConfig {
   allowedRoots?: string[];
   publicBaseUrl?: string | null;
   allowedHosts?: string[];
+  toolMode?: "minimal" | "full";
+  trustProxy?: boolean;
   stateDir?: string;
   worktreeRoot?: string;
   agentDir?: string;

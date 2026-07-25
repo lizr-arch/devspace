@@ -140,8 +140,9 @@ read-only mode:
 DEVSPACE_READ_ONLY=1 devspace serve
 ```
 
-This exposes `open_workspace`, `read`, `grep`, `glob`, and `ls`, while hiding
-`write`, `edit`, and `bash`.
+This exposes diagnostics, workspace discovery/recovery, `open_workspace`,
+`read`, `grep`, `glob`, and `ls`, while hiding `write`, `import_png`, `edit`,
+`bash`, and background-job tools.
 
 ## Local Coach Bridge
 
@@ -218,9 +219,17 @@ inspect directories, but it cannot modify files or execute shell commands.
 
 DevSpace gives ChatGPT tools to:
 
+- inspect the running build/tool fingerprint and recover persisted checkout or
+  managed-worktree workspace IDs after reconnecting
 - read, write, and edit files inside the opened workspace
+- import original PNG bytes from a public HTTPS result URL or Base64 data with
+  workspace path checks, a 25 MiB limit, overwrite protection, and a returned
+  SHA-256 digest
 - search code and inspect directories
 - run shell commands for tests, builds, git, and package scripts
+- start, poll, and cancel bounded background validation jobs through approved
+  npm, .NET, Godot, Cargo, pytest, and related runners without an arbitrary
+  background shell string
 - use isolated Git worktrees for parallel coding sessions
 - follow project instructions from `AGENTS.md` and `CLAUDE.md`
 - discover local agent skills from your skill folders

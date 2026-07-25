@@ -52,6 +52,49 @@ assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "1" }).minimalTools,
   true,
 );
+
+const fullToolConfigDir = mkdtempSync(
+  join(tmpdir(), "devspace-full-tool-config-test-"),
+);
+writeFileSync(
+  join(fullToolConfigDir, "config.json"),
+  JSON.stringify({ toolMode: "full" }),
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+  }).minimalTools,
+  false,
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+    DEVSPACE_TOOL_MODE: "minimal",
+  }).minimalTools,
+  true,
+);
+
+writeFileSync(
+  join(fullToolConfigDir, "config.json"),
+  JSON.stringify({ toolMode: "full", trustProxy: true }),
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+  }).logging.trustProxy,
+  true,
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+    DEVSPACE_TRUST_PROXY: "0",
+  }).logging.trustProxy,
+  false,
+);
 assert.equal(loadConfig(baseEnv).readOnly, false);
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_READ_ONLY: "1" }).readOnly,
@@ -372,10 +415,7 @@ assert.deepEqual(repositoryDeclarationConfig.projectMemory, {
   repositories: [],
 });
 
-function loadProjectMemoryConfig(
-  allowedRoot: string,
-  projectMemory: unknown,
-) {
+function loadProjectMemoryConfig(allowedRoot: string, projectMemory: unknown) {
   const directory = mkdtempSync(join(tmpdir(), "devspace-pm-config-"));
   writeFileSync(
     join(directory, "config.json"),

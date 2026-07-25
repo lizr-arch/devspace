@@ -124,6 +124,37 @@ try {
   assert.equal(restoredWorktree.sourceRoot, gitRoot);
   assert.equal(restoredWorktree.root, persistentWorktree.workspace.root);
   assert.equal(restoredWorktree.worktree?.managed, true);
+
+  const listedWorkspaces = await restoredRegistry.listWorkspaces();
+  assert.equal(
+    listedWorkspaces.some(
+      (session) =>
+        session.workspaceId === persistentWorkspace.workspace.id &&
+        session.resumable,
+    ),
+    true,
+  );
+  assert.equal(
+    listedWorkspaces.some(
+      (session) =>
+        session.workspaceId === persistentWorktree.workspace.id &&
+        session.mode === "worktree" &&
+        session.resumable,
+    ),
+    true,
+  );
+
+  const resumedWorktree = await restoredRegistry.resumeWorkspace(
+    persistentWorktree.workspace.id,
+  );
+  assert.equal(
+    resumedWorktree.workspace.root,
+    persistentWorktree.workspace.root,
+  );
+  assert.match(
+    resumedWorktree.agentsFiles.map((file) => file.content).join("\n"),
+    /git root instructions/,
+  );
   secondStore.close();
 
   if (platform() !== "win32") {

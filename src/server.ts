@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,16 @@ import {
   sessionIdPrefix,
 } from "./logger.js";
 import {
+  BackgroundJobManager,
+  DEFAULT_JOB_TIMEOUT_SECONDS,
+  JOB_RUNNERS,
+  MAX_CONCURRENT_JOBS,
+  MAX_JOB_OUTPUT_BYTES,
+  MAX_JOB_TIMEOUT_SECONDS,
+  MAX_POLL_BYTES,
+  type JobSnapshot,
+} from "./background-jobs.js";
+import {
   editFileTool,
   findFilesTool,
   grepFilesTool,
@@ -41,6 +51,7 @@ import {
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import { importPng, MAX_PNG_IMPORT_BYTES } from "./png-import.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import {
   ProjectMemoryController,
@@ -48,9 +59,19 @@ import {
 } from "./project-memory.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
-import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import {
+  formatAgentsPath,
+  WorkspaceRegistry,
+  type WorkspaceContext,
+} from "./workspaces.js";
 
 type Transport = StreamableHTTPServerTransport;
+const PACKAGE_VERSION = (
+  JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  ) as { version: string }
+).version;
+const TOOL_SCHEMA_REVISION = "web-gpt-v2.2026-07-24";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -71,11 +92,24 @@ const SHELL_TOOL_ANNOTATIONS = {
   idempotentHint: false,
   openWorldHint: true,
 };
+const IMPORT_PNG_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
 
 interface RunningServer {
   app: ReturnType<typeof createMcpExpressApp>;
   config: ServerConfig;
   close(): void;
+}
+
+interface ServiceRuntime {
+  bootId: string;
+  startedAt: string;
+  tools: string[];
+  schemaFingerprint: string;
 }
 
 type ToolContent =
@@ -104,6 +138,7 @@ type ToolWidgetKind =
   | "search"
   | "directory"
   | "shell"
+  | "job"
   | "show_changes";
 
 interface ToolDefinitionMeta extends Record<string, unknown> {
@@ -203,6 +238,54 @@ function exposeDedicatedReadTools(config: ServerConfig): boolean {
   return config.readOnly || !config.minimalTools;
 }
 
+function exposedToolNames(
+  config: ServerConfig,
+  toolNames: ToolNames,
+): string[] {
+  const tools = [
+    "devspace_info",
+    "list_workspaces",
+    "resume_workspace",
+    "open_workspace",
+    "project_memory_preflight",
+    toolNames.read,
+  ];
+  if (!config.readOnly) {
+    tools.push(toolNames.write, "import_png", toolNames.edit);
+  }
+  if (config.widgets === "changes") tools.push("show_changes");
+  if (exposeDedicatedReadTools(config)) {
+    tools.push(toolNames.grep, toolNames.glob, toolNames.ls);
+  }
+  if (!config.readOnly) {
+    tools.push(toolNames.shell, "start_job", "poll_job", "cancel_job");
+  }
+  return tools;
+}
+
+function createServiceRuntime(config: ServerConfig): ServiceRuntime {
+  const tools = exposedToolNames(config, toolNamesFor(config));
+  const schemaFingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        packageVersion: PACKAGE_VERSION,
+        schemaRevision: TOOL_SCHEMA_REVISION,
+        tools,
+        readOnly: config.readOnly,
+        minimalTools: config.minimalTools,
+        widgets: config.widgets,
+        toolNaming: config.toolNaming,
+      }),
+    )
+    .digest("hex");
+  return {
+    bootId: randomUUID(),
+    startedAt: new Date().toISOString(),
+    tools,
+    schemaFingerprint,
+  };
+}
+
 function serverInstructions(
   config: ServerConfig,
   toolNames: ToolNames,
@@ -231,7 +314,7 @@ function serverInstructions(
     return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.${projectMemory}`;
   }
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}${projectMemory}`;
+  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, and job tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or complete text rewrites, import_png for original PNG bytes from an HTTPS result URL or Base64 data, ${toolNames.shell} for bounded foreground commands, and start_job/poll_job/cancel_job for long-running validation commands. Do not create, download, or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}${projectMemory}`;
 }
 
 export interface CreateServerOptions {
@@ -271,6 +354,74 @@ const projectMemoryPreflightOutputSchema = z.object({
   denialReasons: z.array(z.string()),
   bundle: z.unknown().optional(),
   error: z.string().optional(),
+});
+
+const workspaceContextOutputSchema: z.ZodRawShape = {
+  workspaceId: z.string(),
+  root: z.string(),
+  mode: z.enum(["checkout", "worktree"]),
+  sourceRoot: z.string().optional(),
+  worktree: z
+    .object({
+      path: z.string(),
+      baseRef: z.string(),
+      baseSha: z.string(),
+      dirtySource: z.boolean(),
+      detached: z.boolean(),
+      managed: z.boolean(),
+    })
+    .optional(),
+  agentsFiles: z.array(workspaceAgentsFileOutputSchema),
+  availableAgentsFiles: z.array(workspaceAvailableAgentsFileOutputSchema),
+  skills: z.array(workspaceSkillOutputSchema),
+  skillDiagnostics: z.array(z.unknown()),
+  projectMemory: projectMemoryPreflightOutputSchema.optional(),
+  instruction: z.string(),
+};
+
+const workspaceSessionOutputSchema = z.object({
+  workspaceId: z.string(),
+  root: z.string(),
+  mode: z.enum(["checkout", "worktree"]),
+  sourceRoot: z.string().optional(),
+  managed: z.boolean(),
+  status: z.string(),
+  createdAt: z.string(),
+  lastUsedAt: z.string(),
+  resumable: z.boolean(),
+  unavailableReason: z.string().optional(),
+});
+
+const jobStatusSchema = z.enum([
+  "running",
+  "cancelling",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "interrupted",
+]);
+
+const jobSnapshotOutputSchema = z.object({
+  jobId: z.string(),
+  workspaceId: z.string(),
+  workspaceRoot: z.string(),
+  workingDirectory: z.string(),
+  runner: z.enum(JOB_RUNNERS),
+  args: z.array(z.string()),
+  label: z.string().optional(),
+  status: jobStatusSchema,
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+  timeoutSeconds: z.number().int(),
+  exitCode: z.number().int().optional(),
+  signal: z.string().optional(),
+  outputBytes: z.number().int(),
+  outputTruncated: z.boolean(),
+  error: z.string().optional(),
+  output: z.string().optional(),
+  outputOffsetBytes: z.number().int().optional(),
+  nextOutputOffsetBytes: z.number().int().optional(),
 });
 
 function projectMemoryReceiptInputSchema(): z.ZodOptional<z.ZodString> {
@@ -368,6 +519,12 @@ function logFailedToolResponse(
 
 function textBlock(text: string): ToolContent {
   return { type: "text", text };
+}
+
+function assertJobWorkspace(job: JobSnapshot, workspaceId: string): void {
+  if (job.workspaceId !== workspaceId) {
+    throw new Error("Job does not belong to this workspaceId.");
+  }
 }
 
 function textSummary(content: ToolContent[]): {
@@ -515,17 +672,136 @@ async function assertWorkspaceAppAssets(): Promise<void> {
   }
 }
 
+function workspaceContextToolResponse(input: {
+  action: "open_workspace" | "resume_workspace";
+  actionLabel: "Opened" | "Resumed";
+  config: ServerConfig;
+  toolNames: ToolNames;
+  reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>;
+  context: WorkspaceContext;
+  task?: string;
+  startedAt: number;
+}) {
+  const { workspace, agentsFiles, availableAgentsFiles, projectMemory } =
+    input.context;
+  if (input.config.widgets === "changes") {
+    void input.reviewCheckpoints.initializeWorkspace({
+      workspaceId: workspace.id,
+      root: workspace.root,
+    });
+  }
+  const visibleSkills = workspace.skills
+    .filter((skill) => !skill.disableModelInvocation)
+    .map((skill) => ({
+      name: skill.name,
+      description: skill.description,
+      path: formatPathForPrompt(skill.filePath),
+    }));
+  const loadedAgentsFiles = agentsFiles.map((file) => ({
+    path: formatAgentsPath(file.path, workspace.root),
+    content: file.content,
+  }));
+  const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
+    path: formatAgentsPath(file.path, workspace.root),
+  }));
+  const instructionPrefix = input.config.readOnly
+    ? "Use this workspaceId in all subsequent read-only tool calls for this project."
+    : "Use this workspaceId in all subsequent tool calls for this project.";
+  const instructionCore =
+    " Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+  const instructionSkills = input.config.skillsEnabled
+    ? " When a task matches an available skill in skills, read its path before proceeding."
+    : "";
+  const instructionReadOnly = input.config.readOnly
+    ? ` ${input.toolNames.write}, ${input.toolNames.edit}, and ${input.toolNames.shell} are unavailable in this server mode.`
+    : "";
+  const instructionProjectMemory = projectMemory?.receiptId
+    ? ` For this task, pass projectMemoryReceiptId ${projectMemory.receiptId} on later workspace tool calls. Call project_memory_preflight again when the task changes.`
+    : input.task
+      ? " Project Memory did not issue a receipt. SHADOW does not block existing tools; call project_memory_preflight again when the task changes."
+      : " For a new task in a configured repository, call project_memory_preflight before later workspace tools.";
+  const instruction = `${instructionPrefix}${instructionCore}${instructionSkills}${instructionReadOnly}${instructionProjectMemory}`;
+  const resultContent: ToolContent[] = [
+    {
+      type: "text",
+      text: [
+        `${input.actionLabel} workspace ${workspace.id}`,
+        `Root: ${workspace.root}`,
+        `Mode: ${workspace.mode}`,
+        loadedAgentsFiles.length > 0
+          ? `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
+          : undefined,
+        availableAgentsFileOutputs.length > 0
+          ? `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
+          : undefined,
+        visibleSkills.length > 0
+          ? `Available skills: ${visibleSkills.map((skill) => skill.name).join(", ")}`
+          : undefined,
+        projectMemory
+          ? `Project Memory SHADOW: ${projectMemory.status}; decision=${projectMemory.decision ?? "none"}; receipt=${projectMemory.receiptId ?? "none"}`
+          : undefined,
+        projectMemory?.bundle
+          ? `Project Memory bundle (first delivery only):\n${JSON.stringify(projectMemory.bundle, null, 2)}`
+          : undefined,
+        instruction,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    },
+  ];
+  logToolCall(input.config, {
+    tool: input.action,
+    workspaceId: workspace.id,
+    path: workspace.root,
+    success: true,
+    durationMs: Math.round(performance.now() - input.startedAt),
+  });
+
+  return {
+    content: resultContent,
+    _meta: {
+      tool: input.action,
+      card: {
+        workspaceId: workspace.id,
+        root: workspace.root,
+        path: workspace.root,
+        summary: {
+          agentsFiles: loadedAgentsFiles.length,
+          availableAgentsFiles: availableAgentsFileOutputs.length,
+          skills: visibleSkills.length,
+          skillDiagnostics: workspace.skillDiagnostics.length,
+        },
+      },
+    },
+    structuredContent: {
+      workspaceId: workspace.id,
+      root: workspace.root,
+      mode: workspace.mode,
+      sourceRoot: workspace.sourceRoot,
+      worktree: workspace.worktree,
+      agentsFiles: loadedAgentsFiles,
+      availableAgentsFiles: availableAgentsFileOutputs,
+      skills: visibleSkills,
+      skillDiagnostics: workspace.skillDiagnostics,
+      projectMemory,
+      instruction,
+    },
+  };
+}
+
 function createMcpServer(
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
+  jobs: BackgroundJobManager,
+  runtime: ServiceRuntime,
 ): McpServer {
   const toolNames = toolNamesFor(config);
   const server = new McpServer(
     {
       name: "devspace",
       title: "DevSpace",
-      version: "0.1.0",
+      version: PACKAGE_VERSION,
       description:
         "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, and shell tools.",
     },
@@ -567,6 +843,181 @@ function createMcpServer(
 
   registerAppTool(
     server,
+    "devspace_info",
+    {
+      title: "DevSpace info",
+      description:
+        "Inspect the running DevSpace build, boot identity, tool schema fingerprint, enabled tools, approved roots, and bounded background-job capabilities. Use this to diagnose stale ChatGPT action discovery or verify that a restart loaded the expected build. Does not return credentials or environment variables.",
+      inputSchema: {},
+      outputSchema: resultOutputSchema({
+        name: z.literal("devspace"),
+        version: z.string(),
+        bootId: z.string(),
+        startedAt: z.string(),
+        uptimeSeconds: z.number(),
+        schemaRevision: z.string(),
+        schemaFingerprint: z.string(),
+        tools: z.array(z.string()),
+        readOnly: z.boolean(),
+        toolMode: z.enum(["minimal", "full"]),
+        toolNaming: z.enum(["legacy", "short"]),
+        widgets: z.enum(["off", "changes", "full"]),
+        allowedRoots: z.array(z.string()),
+        worktreeRoot: z.string(),
+        jobs: z.object({
+          runners: z.array(z.enum(JOB_RUNNERS)),
+          maxConcurrent: z.number().int(),
+          maxTimeoutSeconds: z.number().int(),
+          maxOutputBytes: z.number().int(),
+        }),
+      }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const uptimeSeconds = Math.max(
+        0,
+        (Date.now() - Date.parse(runtime.startedAt)) / 1000,
+      );
+      const details = {
+        name: "devspace" as const,
+        version: PACKAGE_VERSION,
+        bootId: runtime.bootId,
+        startedAt: runtime.startedAt,
+        uptimeSeconds,
+        schemaRevision: TOOL_SCHEMA_REVISION,
+        schemaFingerprint: runtime.schemaFingerprint,
+        tools: runtime.tools,
+        readOnly: config.readOnly,
+        toolMode: config.minimalTools
+          ? ("minimal" as const)
+          : ("full" as const),
+        toolNaming: config.toolNaming,
+        widgets: config.widgets,
+        allowedRoots: config.allowedRoots,
+        worktreeRoot: config.worktreeRoot,
+        jobs: {
+          runners: [...JOB_RUNNERS],
+          maxConcurrent: MAX_CONCURRENT_JOBS,
+          maxTimeoutSeconds: MAX_JOB_TIMEOUT_SECONDS,
+          maxOutputBytes: MAX_JOB_OUTPUT_BYTES,
+        },
+      };
+      const result = [
+        `DevSpace ${PACKAGE_VERSION}`,
+        `Boot ID: ${runtime.bootId}`,
+        `Schema: ${TOOL_SCHEMA_REVISION} (${runtime.schemaFingerprint})`,
+        `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
+        `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
+        `Allowed roots: ${config.allowedRoots.join(", ")}`,
+      ].join("\n");
+      return {
+        content: [textBlock(result)],
+        _meta: { tool: "devspace_info" },
+        structuredContent: { result, ...details },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "list_workspaces",
+    {
+      title: "List workspaces",
+      description:
+        "List recent persisted workspace sessions that remain inside the current filesystem policy. Use this after reconnecting or restarting, then pass a resumable workspaceId to resume_workspace. Missing managed worktrees are reported but never recreated.",
+      inputSchema: {
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe("Maximum recent sessions to return. Defaults to 20."),
+      },
+      outputSchema: resultOutputSchema({
+        workspaces: z.array(workspaceSessionOutputSchema),
+      }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ limit }) => {
+      const startedAt = performance.now();
+      const sessions = await workspaces.listWorkspaces(limit ?? 20);
+      const result =
+        sessions.length === 0
+          ? "No resumable workspace sessions are available."
+          : sessions
+              .map(
+                (session) =>
+                  `${session.workspaceId} | ${session.mode} | ${session.resumable ? "resumable" : "unavailable"} | ${session.root}`,
+              )
+              .join("\n");
+      logToolCall(config, {
+        tool: "list_workspaces",
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        _meta: { tool: "list_workspaces" },
+        structuredContent: { result, workspaces: sessions },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "resume_workspace",
+    {
+      title: "Resume workspace",
+      description:
+        "Resume a persisted checkout or managed worktree using a workspaceId returned by list_workspaces. Revalidates current path policy and directory existence, reloads project instructions and skills, and optionally runs Project Memory preflight for the current task. This is the supported way to recover a managed worktree whose generated path is outside allowedRoots.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Persisted workspace identifier from list_workspaces."),
+        task: z
+          .string()
+          .optional()
+          .describe(
+            "Optional current task for Project Memory SHADOW preflight.",
+          ),
+      },
+      outputSchema: workspaceContextOutputSchema,
+      ...toolWidgetDescriptorMeta(config, "workspace"),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ workspaceId, task }) => {
+      const startedAt = performance.now();
+      const context = await workspaces.resumeWorkspace(workspaceId, task);
+      return workspaceContextToolResponse({
+        action: "resume_workspace",
+        actionLabel: "Resumed",
+        config,
+        toolNames,
+        reviewCheckpoints,
+        context,
+        task,
+        startedAt,
+      });
+    },
+  );
+
+  registerAppTool(
+    server,
     "open_workspace",
     {
       title: "Open workspace",
@@ -598,138 +1049,28 @@ function createMcpServer(
             "Current coding task. For an operator-configured repository, DevSpace runs SHADOW Project Memory preflight and returns the bounded bundle once. Task text is not persisted.",
           ),
       },
-      outputSchema: {
-        workspaceId: z.string(),
-        root: z.string(),
-        mode: z.enum(["checkout", "worktree"]),
-        sourceRoot: z.string().optional(),
-        worktree: z
-          .object({
-            path: z.string(),
-            baseRef: z.string(),
-            baseSha: z.string(),
-            dirtySource: z.boolean(),
-            detached: z.boolean(),
-            managed: z.boolean(),
-          })
-          .optional(),
-        agentsFiles: z.array(workspaceAgentsFileOutputSchema),
-        availableAgentsFiles: z.array(workspaceAvailableAgentsFileOutputSchema),
-        skills: z.array(workspaceSkillOutputSchema),
-        skillDiagnostics: z.array(z.unknown()),
-        projectMemory: projectMemoryPreflightOutputSchema.optional(),
-        instruction: z.string(),
-      },
+      outputSchema: workspaceContextOutputSchema,
       ...toolWidgetDescriptorMeta(config, "workspace"),
       annotations: { readOnlyHint: true },
     },
     async ({ path, mode, baseRef, task }) => {
       const startedAt = performance.now();
-      const { workspace, agentsFiles, availableAgentsFiles, projectMemory } =
-        await workspaces.openWorkspace({ path, mode, baseRef, task });
-      if (config.widgets === "changes") {
-        void reviewCheckpoints.initializeWorkspace({
-          workspaceId: workspace.id,
-          root: workspace.root,
-        });
-      }
-      const visibleSkills = workspace.skills
-        .filter((skill) => !skill.disableModelInvocation)
-        .map((skill) => ({
-          name: skill.name,
-          description: skill.description,
-          path: formatPathForPrompt(skill.filePath),
-        }));
-      const loadedAgentsFiles = agentsFiles.map((file) => ({
-        path: formatAgentsPath(file.path, workspace.root),
-        content: file.content,
-      }));
-      const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
-        path: formatAgentsPath(file.path, workspace.root),
-      }));
-      const instructionPrefix = config.readOnly
-        ? "Use this workspaceId in all subsequent read-only tool calls for this project."
-        : "Use this workspaceId in all subsequent tool calls for this project.";
-      const instructionCore =
-        " Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
-      const instructionSkills = config.skillsEnabled
-        ? " When a task matches an available skill in skills, read its path before proceeding."
-        : "";
-      const instructionReadOnly = config.readOnly
-        ? ` ${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are unavailable in this server mode.`
-        : "";
-      const instructionProjectMemory = projectMemory?.receiptId
-        ? ` For this task, pass projectMemoryReceiptId ${projectMemory.receiptId} on later workspace tool calls. Call project_memory_preflight again when the task changes.`
-        : task
-          ? " Project Memory did not issue a receipt. SHADOW does not block existing tools; call project_memory_preflight again when the task changes."
-          : " For a new task in a configured repository, call project_memory_preflight before later workspace tools.";
-      const instruction = `${instructionPrefix}${instructionCore}${instructionSkills}${instructionReadOnly}${instructionProjectMemory}`;
-      const resultContent: ToolContent[] = [
-        {
-          type: "text" as const,
-          text: [
-            `Opened workspace ${workspace.id}`,
-            `Root: ${workspace.root}`,
-            `Mode: ${workspace.mode}`,
-            loadedAgentsFiles.length > 0
-              ? `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
-              : undefined,
-            availableAgentsFileOutputs.length > 0
-              ? `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
-              : undefined,
-            visibleSkills.length > 0
-              ? `Available skills: ${visibleSkills.map((skill) => skill.name).join(", ")}`
-              : undefined,
-            projectMemory
-              ? `Project Memory SHADOW: ${projectMemory.status}; decision=${projectMemory.decision ?? "none"}; receipt=${projectMemory.receiptId ?? "none"}`
-              : undefined,
-            projectMemory?.bundle
-              ? `Project Memory bundle (first delivery only):\n${JSON.stringify(projectMemory.bundle, null, 2)}`
-              : undefined,
-            instruction,
-          ]
-            .filter(Boolean)
-            .join("\n"),
-        },
-      ];
-      logToolCall(config, {
-        tool: "open_workspace",
-        workspaceId: workspace.id,
-        path: workspace.root,
-        success: true,
-        durationMs: Math.round(performance.now() - startedAt),
+      const context = await workspaces.openWorkspace({
+        path,
+        mode,
+        baseRef,
+        task,
       });
-
-      return {
-        content: resultContent,
-        _meta: {
-          tool: "open_workspace",
-          card: {
-            workspaceId: workspace.id,
-            root: workspace.root,
-            path: workspace.root,
-            summary: {
-              agentsFiles: loadedAgentsFiles.length,
-              availableAgentsFiles: availableAgentsFileOutputs.length,
-              skills: visibleSkills.length,
-              skillDiagnostics: workspace.skillDiagnostics.length,
-            },
-          },
-        },
-        structuredContent: {
-          workspaceId: workspace.id,
-          root: workspace.root,
-          mode: workspace.mode,
-          sourceRoot: workspace.sourceRoot,
-          worktree: workspace.worktree,
-          agentsFiles: loadedAgentsFiles,
-          availableAgentsFiles: availableAgentsFileOutputs,
-          skills: visibleSkills,
-          skillDiagnostics: workspace.skillDiagnostics,
-          projectMemory,
-          instruction,
-        },
-      };
+      return workspaceContextToolResponse({
+        action: "open_workspace",
+        actionLabel: "Opened",
+        config,
+        toolNames,
+        reviewCheckpoints,
+        context,
+        task,
+        startedAt,
+      });
     },
   );
 
@@ -991,6 +1332,129 @@ function createMcpServer(
 
     registerAppTool(
       server,
+      "import_png",
+      {
+        title: "Import PNG",
+        description: `Import original PNG bytes into an open workspace from exactly one source: a public HTTPS result URL or standard Base64 data. Use this for generated-image or attachment intake instead of ${toolNames.shell} or the text-only ${toolNames.write} tool. The destination must end in .png, stay inside the workspace, and is not overwritten unless overwrite=true. Imports are limited to ${MAX_PNG_IMPORT_BYTES} bytes and return a SHA-256 digest for provenance registration.`,
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          path: z
+            .string()
+            .describe(
+              "Destination .png path relative to the workspace root, for example managed_worktree/raw/candidate.png.",
+            ),
+          sourceUrl: z
+            .string()
+            .url()
+            .optional()
+            .describe(
+              "Public HTTPS URL containing the PNG bytes. Provide exactly one of sourceUrl or base64Data.",
+            ),
+          base64Data: z
+            .string()
+            .optional()
+            .describe(
+              "Standard Base64-encoded PNG bytes. Provide exactly one of base64Data or sourceUrl.",
+            ),
+          expectedSha256: z
+            .string()
+            .regex(/^[0-9a-fA-F]{64}$/)
+            .optional()
+            .describe(
+              "Optional expected SHA-256 digest; the import fails without writing if it does not match.",
+            ),
+          overwrite: z
+            .boolean()
+            .optional()
+            .describe(
+              "Defaults to false. Set true only when intentionally replacing an existing PNG.",
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          path: z.string(),
+          bytes: z.number().int().nonnegative(),
+          sha256: z.string(),
+          source: z.enum(["https", "base64"]),
+          sourceHost: z.string().optional(),
+        }),
+        _meta: {},
+        annotations: IMPORT_PNG_TOOL_ANNOTATIONS,
+      },
+      async ({
+        workspaceId,
+        path,
+        sourceUrl,
+        base64Data,
+        expectedSha256,
+        overwrite,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "import_png",
+          projectMemoryReceiptId,
+        );
+        const destination = workspaces.resolvePath(workspace, path);
+        try {
+          const imported = await importPng({
+            destination,
+            workspaceRoot: workspace.root,
+            sourceUrl,
+            base64Data,
+            expectedSha256,
+            overwrite,
+          });
+          const result = `Imported ${path} (${imported.bytes} bytes, sha256 ${imported.sha256}).`;
+          logToolCall(config, {
+            tool: "import_png",
+            workspaceId,
+            path,
+            success: true,
+            durationMs: Math.round(performance.now() - startedAt),
+          });
+          return {
+            content: [textBlock(result)],
+            _meta: {
+              tool: "import_png",
+              projectMemory,
+              card: {
+                workspaceId,
+                path,
+                summary: imported,
+              },
+            },
+            structuredContent: {
+              result,
+              path,
+              ...imported,
+            },
+          };
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          logToolCall(config, {
+            tool: "import_png",
+            workspaceId,
+            path,
+            success: false,
+            durationMs: Math.round(performance.now() - startedAt),
+            error: message,
+          });
+          return {
+            content: [textBlock(message)],
+            isError: true,
+          };
+        }
+      },
+    );
+
+    registerAppTool(
+      server,
       toolNames.edit,
       {
         title: "Edit file",
@@ -1121,12 +1585,7 @@ function createMcpServer(
         ...toolWidgetDescriptorMeta(config, "show_changes"),
         annotations: { readOnlyHint: true },
       },
-      async ({
-        workspaceId,
-        since,
-        markReviewed,
-        projectMemoryReceiptId,
-      }) => {
+      async ({ workspaceId, since, markReviewed, projectMemoryReceiptId }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         const projectMemory = workspaces.observeProjectMemoryAccess(
@@ -1525,6 +1984,251 @@ function createMcpServer(
         };
       },
     );
+
+    registerAppTool(
+      server,
+      "start_job",
+      {
+        title: "Start background job",
+        description:
+          "Start a bounded background validation job inside an open workspace. Select an approved build/test/check runner and pass an argument array; arbitrary executables and shell command strings are not accepted. The process is spawned without a shell, its working directory is workspace-scoped, and runtime/output/concurrency are capped. Use poll_job to read progress and cancel_job to stop it.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          runner: z
+            .enum(JOB_RUNNERS)
+            .describe("Approved validation runner to execute."),
+          args: z
+            .array(z.string())
+            .min(1)
+            .max(128)
+            .describe(
+              'Argument array, for example ["test"] for npm or ["--headless", "--path", ".", "res://scene.tscn"] for godot-mono.',
+            ),
+          workingDirectory: z
+            .string()
+            .optional()
+            .describe(
+              "Optional working directory relative to the workspace root. Defaults to the workspace root.",
+            ),
+          label: z
+            .string()
+            .max(200)
+            .optional()
+            .describe("Optional short human-readable purpose."),
+          timeoutSeconds: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_JOB_TIMEOUT_SECONDS)
+            .optional()
+            .describe(
+              `Defaults to ${DEFAULT_JOB_TIMEOUT_SECONDS}; maximum ${MAX_JOB_TIMEOUT_SECONDS}.`,
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          job: jobSnapshotOutputSchema,
+        }),
+        ...toolWidgetDescriptorMeta(config, "job"),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+      },
+      async ({
+        workspaceId,
+        runner,
+        args,
+        workingDirectory,
+        label,
+        timeoutSeconds,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "start_job",
+          projectMemoryReceiptId,
+        );
+        const cwd = workspaces.resolveWorkingDirectory(
+          workspace,
+          workingDirectory,
+        );
+        const job = await jobs.start({
+          workspaceId,
+          workspaceRoot: workspace.root,
+          workingDirectory: cwd,
+          runner,
+          args,
+          label,
+          timeoutSeconds,
+        });
+        const result = `Started ${job.jobId}: ${runner} ${args.join(" ")}. Poll with poll_job.`;
+        logToolCall(config, {
+          tool: "start_job",
+          workspaceId,
+          workingDirectory: workingDirectory ?? ".",
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "start_job",
+            projectMemory,
+            card: {
+              workspaceId,
+              path: workingDirectory,
+              summary: job,
+            },
+          },
+          structuredContent: { result, job },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "poll_job",
+      {
+        title: "Poll background job",
+        description:
+          "Read the current status and a bounded byte range of output from a background validation job. Reuse nextOutputOffsetBytes to fetch only new output.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier that owns the job."),
+          jobId: z.string().describe("Job identifier returned by start_job."),
+          offsetBytes: z
+            .number()
+            .int()
+            .nonnegative()
+            .optional()
+            .describe("Output byte offset. Defaults to 0."),
+          maxBytes: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_POLL_BYTES)
+            .optional()
+            .describe(
+              `Maximum output bytes to return, up to ${MAX_POLL_BYTES}.`,
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          job: jobSnapshotOutputSchema,
+        }),
+        ...toolWidgetDescriptorMeta(config, "job"),
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        jobId,
+        offsetBytes,
+        maxBytes,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "poll_job",
+          projectMemoryReceiptId,
+        );
+        const job = jobs.poll(jobId, offsetBytes, maxBytes);
+        assertJobWorkspace(job, workspaceId);
+        const result = [
+          `${job.jobId}: ${job.status}`,
+          `Output bytes: ${job.outputBytes}${job.outputTruncated ? " (truncated)" : ""}`,
+          job.exitCode !== undefined ? `Exit code: ${job.exitCode}` : undefined,
+          job.signal ? `Signal: ${job.signal}` : undefined,
+          job.error ? `Error: ${job.error}` : undefined,
+          job.output ? `Output:\n${job.output}` : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        logToolCall(config, {
+          tool: "poll_job",
+          workspaceId,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "poll_job",
+            projectMemory,
+            card: { workspaceId, summary: job },
+          },
+          structuredContent: { result, job },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "cancel_job",
+      {
+        title: "Cancel background job",
+        description:
+          "Request termination of a running background validation job owned by the given workspace. A graceful termination is followed by forced termination if needed. Completed jobs are returned unchanged.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier that owns the job."),
+          jobId: z.string().describe("Job identifier returned by start_job."),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          job: jobSnapshotOutputSchema,
+        }),
+        ...toolWidgetDescriptorMeta(config, "job"),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({ workspaceId, jobId, projectMemoryReceiptId }) => {
+        const startedAt = performance.now();
+        workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "cancel_job",
+          projectMemoryReceiptId,
+        );
+        const existing = jobs.poll(jobId, 0, 1);
+        assertJobWorkspace(existing, workspaceId);
+        const job = jobs.cancel(jobId);
+        const result = `${job.jobId}: ${job.status}`;
+        logToolCall(config, {
+          tool: "cancel_job",
+          workspaceId,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "cancel_job",
+            projectMemory,
+            card: { workspaceId, summary: job },
+          },
+          structuredContent: { result, job },
+        };
+      },
+    );
   }
 
   return server;
@@ -1534,6 +2238,7 @@ export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
 ): RunningServer {
+  const runtime = createServiceRuntime(config);
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
@@ -1567,9 +2272,10 @@ export function createServer(
     projectMemory,
   );
   const reviewCheckpoints = createReviewCheckpointManager();
+  const jobs = new BackgroundJobManager(config.stateDir);
 
   if (config.logging.trustProxy) {
-    app.set("trust proxy", true);
+    app.set("trust proxy", 1);
   }
 
   app.use((req, res, next) => {
@@ -1622,7 +2328,15 @@ export function createServer(
   );
 
   app.get("/healthz", (_req, res) => {
-    res.json({ ok: true, name: "devspace" });
+    res.json({
+      ok: true,
+      name: "devspace",
+      version: PACKAGE_VERSION,
+      bootId: runtime.bootId,
+      schemaRevision: TOOL_SCHEMA_REVISION,
+      schemaFingerprint: runtime.schemaFingerprint,
+      tools: runtime.tools.length,
+    });
   });
 
   app.all("/mcp", async (req, res) => {
@@ -1697,7 +2411,13 @@ export function createServer(
           }
         };
 
-        const server = createMcpServer(config, workspaces, reviewCheckpoints);
+        const server = createMcpServer(
+          config,
+          workspaces,
+          reviewCheckpoints,
+          jobs,
+          runtime,
+        );
         await server.connect(transport);
       } else {
         sendJsonRpcError(res, 400, -32000, "No valid MCP session");
@@ -1723,6 +2443,7 @@ export function createServer(
     close: () => {
       if (closed) return;
       closed = true;
+      jobs.close();
       oauthProvider.close();
       projectMemory.close();
       workspaceStore.close?.();
