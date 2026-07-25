@@ -121,4 +121,3 @@ V1 classifies project-code runners as `trusted_local`. DevSpace applies
 best-effort path, argument, workspace, process, timeout, output, artifact, and
 publication controls, but does not claim an OS-level sandbox or strict write
 containment.
-

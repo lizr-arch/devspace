@@ -75,13 +75,19 @@ After restart:
 - `poll_job` and `list_artifacts` recover finished records and relationships;
 - a Job persisted as running/cancelling becomes `interrupted`, never
   `succeeded`;
+- private PID/PGID and random process-identity metadata lets a restarted POSIX
+  server verify and terminate the surviving recorded process group with TERM
+  followed by forced KILL;
 - valid partial artifacts are scanned and marked incomplete;
 - publication tokens are gone and the reviewer must request a new URL.
 
 V1 does not reconnect to a running external process after a DevSpace restart.
 It terminates attached children on orderly shutdown and records
-`JOB_INTERRUPTED`; after an unclean restart it preserves the prior evidence and
-requires a new validation run.
+`JOB_INTERRUPTED`; after an unclean restart it validates private persisted
+PID/PGID and random identity metadata, terminates the verified surviving POSIX
+process group, preserves the prior evidence, and requires a new validation run.
+Older state written before process identity persistence can still be marked
+interrupted but cannot be retroactively killed.
 
 ## Error contract
 

@@ -84,7 +84,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "game-art-v1.preview-c.2026-07-25";
+const TOOL_SCHEMA_REVISION = "game-art-v1.review-fixes.2026-07-25";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -259,13 +259,13 @@ function exposedToolNames(
     "devspace_info",
     "list_workspaces",
     "list_artifacts",
-    "publish_artifact",
     "resume_workspace",
     "open_workspace",
     "project_memory_preflight",
     toolNames.read,
   ];
   if (!config.readOnly) {
+    tools.splice(3, 0, "publish_artifact");
     tools.push(toolNames.write, "import_png", toolNames.edit);
   }
   if (config.widgets === "changes") tools.push("show_changes");
@@ -1247,119 +1247,121 @@ function createMcpServer(
     },
   );
 
-  registerAppTool(
-    server,
-    "publish_artifact",
-    {
-      title: "Publish artifact",
-      description:
-        "Create a high-entropy, short-lived URL for one registered artifact version after revalidating its current workspace path, type, size, and SHA-256. Provide exactly one of artifactId or path. Image URLs are inline previews; JSON, text, GLB, and BLEND use safe downloads. Grants live only in memory and become invalid when DevSpace restarts.",
-      inputSchema: {
-        workspaceId: z
-          .string()
-          .describe("Workspace identifier that owns the artifact."),
-        artifactId: z
-          .string()
-          .regex(/^artifact_[0-9a-f-]{36}$/)
-          .optional()
-          .describe("Opaque artifact ID returned by list_artifacts."),
-        path: z
-          .string()
-          .max(512)
-          .optional()
-          .describe(
-            "Exact workspace-relative path of the latest registered artifact version.",
-          ),
-        purpose: z
-          .enum(["review", "download", "inspection"])
-          .optional()
-          .describe("Defaults to review and is retained in the audit event."),
-        ttlSeconds: z
-          .number()
-          .int()
-          .min(MIN_ARTIFACT_TTL_SECONDS)
-          .max(MAX_ARTIFACT_TTL_SECONDS)
-          .optional()
-          .describe(
-            `Defaults to ${DEFAULT_ARTIFACT_TTL_SECONDS}; valid range ${MIN_ARTIFACT_TTL_SECONDS}-${MAX_ARTIFACT_TTL_SECONDS}.`,
-          ),
-        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+  if (!config.readOnly) {
+    registerAppTool(
+      server,
+      "publish_artifact",
+      {
+        title: "Publish artifact",
+        description:
+          "Create a high-entropy, short-lived URL for one registered artifact version after revalidating its current workspace path, type, size, and SHA-256. Provide exactly one of artifactId or path. Image URLs are inline previews; JSON, text, GLB, and BLEND use safe downloads. Grants live only in memory and become invalid when DevSpace restarts.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier that owns the artifact."),
+          artifactId: z
+            .string()
+            .regex(/^artifact_[0-9a-f-]{36}$/)
+            .optional()
+            .describe("Opaque artifact ID returned by list_artifacts."),
+          path: z
+            .string()
+            .max(512)
+            .optional()
+            .describe(
+              "Exact workspace-relative path of the latest registered artifact version.",
+            ),
+          purpose: z
+            .enum(["review", "download", "inspection"])
+            .optional()
+            .describe("Defaults to review and is retained in the audit event."),
+          ttlSeconds: z
+            .number()
+            .int()
+            .min(MIN_ARTIFACT_TTL_SECONDS)
+            .max(MAX_ARTIFACT_TTL_SECONDS)
+            .optional()
+            .describe(
+              `Defaults to ${DEFAULT_ARTIFACT_TTL_SECONDS}; valid range ${MIN_ARTIFACT_TTL_SECONDS}-${MAX_ARTIFACT_TTL_SECONDS}.`,
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          artifact: artifactOutputSchema,
+          url: z.string().url(),
+          expiresAt: z.string(),
+          contentType: z.string(),
+          size: z.number().int().nonnegative(),
+          sha256: z.string(),
+          previewType: z.enum(["image", "text", "json", "download"]),
+        }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
       },
-      outputSchema: resultOutputSchema({
-        artifact: artifactOutputSchema,
-        url: z.string().url(),
-        expiresAt: z.string(),
-        contentType: z.string(),
-        size: z.number().int().nonnegative(),
-        sha256: z.string(),
-        previewType: z.enum(["image", "text", "json", "download"]),
-      }),
-      _meta: {},
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    async ({
-      workspaceId,
-      artifactId,
-      path,
-      purpose,
-      ttlSeconds,
-      projectMemoryReceiptId,
-    }) => {
-      const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const projectMemory = workspaces.observeProjectMemoryAccess(
+      async ({
         workspaceId,
-        "publish_artifact",
-        projectMemoryReceiptId,
-      );
-      const publication = await publisher.publish({
-        workspaceId,
-        workspaceRoot: workspace.root,
         artifactId,
         path,
         purpose,
         ttlSeconds,
-      });
-      const result = [
-        `Published ${publication.artifact.relativePath}`,
-        `URL: ${publication.url}`,
-        `Expires: ${publication.expiresAt}`,
-        `Type: ${publication.previewType} (${publication.contentType})`,
-        `Size: ${publication.size}`,
-        `SHA-256: ${publication.sha256}`,
-      ].join("\n");
-      logToolCall(config, {
-        tool: "publish_artifact",
-        workspaceId,
-        path: publication.artifact.relativePath,
-        success: true,
-        durationMs: Math.round(performance.now() - startedAt),
-      });
-      return {
-        content: [textBlock(result)],
-        _meta: {
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "publish_artifact",
+          projectMemoryReceiptId,
+        );
+        const publication = await publisher.publish({
+          workspaceId,
+          workspaceRoot: workspace.root,
+          artifactId,
+          path,
+          purpose,
+          ttlSeconds,
+        });
+        const result = [
+          `Published ${publication.artifact.relativePath}`,
+          `URL: ${publication.url}`,
+          `Expires: ${publication.expiresAt}`,
+          `Type: ${publication.previewType} (${publication.contentType})`,
+          `Size: ${publication.size}`,
+          `SHA-256: ${publication.sha256}`,
+        ].join("\n");
+        logToolCall(config, {
           tool: "publish_artifact",
-          projectMemory,
-          card: {
-            workspaceId,
-            path: publication.artifact.relativePath,
-            summary: {
-              artifactId: publication.artifact.artifactId,
-              previewType: publication.previewType,
-              expiresAt: publication.expiresAt,
-              sha256: publication.sha256,
+          workspaceId,
+          path: publication.artifact.relativePath,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "publish_artifact",
+            projectMemory,
+            card: {
+              workspaceId,
+              path: publication.artifact.relativePath,
+              summary: {
+                artifactId: publication.artifact.artifactId,
+                previewType: publication.previewType,
+                expiresAt: publication.expiresAt,
+                sha256: publication.sha256,
+              },
             },
           },
-        },
-        structuredContent: { result, ...publication },
-      };
-    },
-  );
+          structuredContent: { result, ...publication },
+        };
+      },
+    );
+  }
 
   registerAppTool(
     server,

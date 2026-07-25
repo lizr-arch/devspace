@@ -316,7 +316,6 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "devspace_info",
       "list_workspaces",
       "list_artifacts",
-      "publish_artifact",
       "resume_workspace",
       "open_workspace",
       "project_memory_preflight",

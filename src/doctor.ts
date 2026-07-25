@@ -885,7 +885,9 @@ export async function probePublicExternalClientFlow(
               if (
                 backgroundJobStatus &&
                 !["running", "cancelling"].includes(backgroundJobStatus) &&
-                (!input.backgroundJob?.artifactRoots ||
+                (!(
+                  input.captureProfile || input.backgroundJob?.artifactRoots
+                ) ||
                   artifactStatus !== "pending")
               ) {
                 break;

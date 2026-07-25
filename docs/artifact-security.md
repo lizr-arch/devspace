@@ -133,6 +133,10 @@ The configured public base URL must be HTTPS. Plain HTTP is accepted only for
 loopback integration tests. The URL is a bearer secret: share it only with the
 intended reviewer and use the shortest practical TTL.
 
+`publish_artifact` is not registered when `DEVSPACE_READ_ONLY=1`; read-only
+clients may inspect ledger metadata with `list_artifacts` but cannot create a
+new external bearer URL.
+
 Audit events record publication, access, and rejection with artifact/workspace
 identity, purpose, expiry, and a short token-hash prefix. They never record the
 raw token or local absolute path.

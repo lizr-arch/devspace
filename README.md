@@ -141,8 +141,9 @@ DEVSPACE_READ_ONLY=1 devspace serve
 ```
 
 This exposes diagnostics, workspace discovery/recovery, `open_workspace`,
-`read`, `grep`, `glob`, and `ls`, while hiding `write`, `import_png`, `edit`,
-`bash`, and background-job tools.
+`read`, `grep`, `glob`, `ls`, and registered-artifact metadata, while hiding
+`write`, `import_png`, `edit`, `bash`, `publish_artifact`, and background-job
+tools.
 
 ## Local Coach Bridge
 

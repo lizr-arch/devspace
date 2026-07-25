@@ -106,7 +106,9 @@ Before spawn, DevSpace:
 5. applies the per-runner timeout and concurrency caps;
 6. launches with `shell: false`;
 7. captures bounded output and persists job state;
-8. terminates the POSIX process group on timeout, cancellation, or shutdown.
+8. persists private PID/PGID plus random identity metadata and terminates only
+   the verified POSIX process group on success, failure, timeout, cancellation,
+   shutdown, or crash recovery.
 
 Supported project commands remain trusted code. `networkPolicy: inherited`
 describes the current runtime honestly; it is metadata, not a firewall.

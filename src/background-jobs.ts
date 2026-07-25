@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import {
+  execFileSync,
+  spawn,
+  type ChildProcessByStdio,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -83,6 +87,11 @@ interface PersistedJob {
   artifactErrors?: string[];
   artifactBaseline?: ArtifactBaseline;
   captureProfile?: string;
+  processId?: number;
+  processGroupId?: number;
+  processPlatform?: NodeJS.Platform;
+  processToken?: string;
+  processCleanupPending?: boolean;
 }
 
 interface LiveJob extends PersistedJob {
@@ -190,18 +199,29 @@ export class BackgroundJobManager {
     this.persist(job);
 
     try {
+      const processToken = randomUUID();
       const child = spawn(resolvedRunner.executable, input.args, {
         cwd: input.workingDirectory,
         env: {
           ...process.env,
           ...validatedJobEnvironment(input.environment),
           DEVSPACE_JOB_ID: jobId,
+          DEVSPACE_PROCESS_TOKEN: processToken,
         },
         detached: process.platform !== "win32",
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
       });
       job.child = child;
+      if (child.pid) {
+        job.processId = child.pid;
+        job.processGroupId =
+          process.platform === "win32" ? undefined : child.pid;
+        job.processPlatform = process.platform;
+        job.processToken = processToken;
+        job.processCleanupPending = true;
+        this.persist(job);
+      }
       child.stdout.on("data", (chunk: Buffer | string) =>
         this.appendOutput(job, chunk),
       );
@@ -290,19 +310,16 @@ export class BackgroundJobManager {
   close(): void {
     this.initialize();
     for (const job of this.jobs.values()) {
-      if (isTerminal(job.status)) continue;
+      if (isTerminal(job.status) && !job.processCleanupPending) continue;
       if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
-      if (job.killHandle) clearTimeout(job.killHandle);
-      this.signalProcess(job, "SIGTERM");
-      job.killHandle = setTimeout(() => {
-        this.signalProcess(job, "SIGKILL");
-      }, 3_000);
-      job.killHandle.unref();
-      job.status = "interrupted";
-      job.endedAt = new Date().toISOString();
-      job.errorCode = "JOB_INTERRUPTED";
-      job.error =
-        "JOB_INTERRUPTED: DevSpace stopped while the job was running.";
+      if (!isTerminal(job.status)) {
+        job.status = "interrupted";
+        job.endedAt = new Date().toISOString();
+        job.errorCode = "JOB_INTERRUPTED";
+        job.error =
+          "JOB_INTERRUPTED: DevSpace stopped while the job was running.";
+      }
+      this.beginProcessCleanup(job);
       this.persist(job);
     }
   }
@@ -324,15 +341,20 @@ export class BackgroundJobManager {
           artifactStatus: parsed.artifactStatus ?? "none",
           artifactCount: parsed.artifactCount ?? 0,
         };
-        if (job.status === "running" || job.status === "cancelling") {
+        const wasRunning =
+          job.status === "running" || job.status === "cancelling";
+        if (wasRunning) {
           job.status = "interrupted";
           job.endedAt = new Date().toISOString();
           job.errorCode = "JOB_INTERRUPTED";
           job.error =
             "JOB_INTERRUPTED: DevSpace restarted while the job was running.";
-          this.persist(job);
         }
         this.jobs.set(job.jobId, job);
+        if (wasRunning || job.processCleanupPending) {
+          this.beginProcessCleanup(job);
+        }
+        this.persist(job);
         if (
           job.artifactStatus === "pending" &&
           job.artifactBaseline &&
@@ -378,24 +400,73 @@ export class BackgroundJobManager {
   }
 
   private terminate(job: LiveJob): void {
-    this.signalProcess(job, "SIGTERM");
+    this.beginProcessCleanup(job);
+  }
+
+  private beginProcessCleanup(job: LiveJob): void {
+    if (!job.processCleanupPending) return;
+    if (job.killHandle) clearTimeout(job.killHandle);
+    if (!this.signalPersistedProcess(job, "SIGTERM")) {
+      this.completeProcessCleanup(job);
+      return;
+    }
     job.killHandle = setTimeout(() => {
-      if (!isTerminal(job.status)) this.signalProcess(job, "SIGKILL");
+      job.killHandle = undefined;
+      this.forceProcessCleanup(job, 0);
     }, 3_000);
   }
 
-  private signalProcess(job: LiveJob, signal: NodeJS.Signals): void {
-    const pid = job.child?.pid;
-    if (!pid) return;
-    if (process.platform !== "win32") {
-      try {
-        process.kill(-pid, signal);
-        return;
-      } catch {
-        // Fall back to the direct child if the process group already changed.
-      }
+  private forceProcessCleanup(job: LiveJob, attempt: number): void {
+    this.signalPersistedProcess(job, "SIGKILL");
+    if (!this.persistedProcessAlive(job)) {
+      this.completeProcessCleanup(job);
+      this.persist(job);
+      return;
     }
-    job.child?.kill(signal);
+    if (attempt >= 19) {
+      job.error = `${job.error ?? "JOB_INTERRUPTED:"} Process-group cleanup could not be confirmed.`;
+      this.persist(job);
+      return;
+    }
+    job.killHandle = setTimeout(() => {
+      job.killHandle = undefined;
+      this.forceProcessCleanup(job, attempt + 1);
+    }, 50);
+  }
+
+  private completeProcessCleanup(job: LiveJob): void {
+    if (job.killHandle) clearTimeout(job.killHandle);
+    job.killHandle = undefined;
+    job.processCleanupPending = false;
+    job.processId = undefined;
+    job.processGroupId = undefined;
+    job.processPlatform = undefined;
+    job.processToken = undefined;
+  }
+
+  private signalPersistedProcess(
+    job: LiveJob,
+    signal: NodeJS.Signals,
+  ): boolean {
+    const target = processSignalTarget(job);
+    if (target === undefined) return false;
+    try {
+      process.kill(target, signal);
+      return true;
+    } catch (error) {
+      return isPermissionError(error);
+    }
+  }
+
+  private persistedProcessAlive(job: LiveJob): boolean {
+    const target = processSignalTarget(job);
+    if (target === undefined) return false;
+    try {
+      process.kill(target, 0);
+      return true;
+    } catch (error) {
+      return isPermissionError(error);
+    }
   }
 
   private finalize(
@@ -404,7 +475,6 @@ export class BackgroundJobManager {
     signal: NodeJS.Signals | null,
   ): void {
     if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
-    if (job.killHandle) clearTimeout(job.killHandle);
     job.exitCode = code ?? undefined;
     job.signal = signal ?? undefined;
     job.endedAt = new Date().toISOString();
@@ -430,6 +500,11 @@ export class BackgroundJobManager {
       }
     }
     job.child = undefined;
+    if (this.persistedProcessAlive(job)) {
+      this.beginProcessCleanup(job);
+    } else {
+      this.completeProcessCleanup(job);
+    }
     this.persist(job);
     void this.finalizeArtifacts(job);
   }
@@ -438,6 +513,11 @@ export class BackgroundJobManager {
     const persisted = {
       ...publicSnapshot(job),
       artifactBaseline: job.artifactBaseline,
+      processId: job.processId,
+      processGroupId: job.processGroupId,
+      processPlatform: job.processPlatform,
+      processToken: job.processToken,
+      processCleanupPending: job.processCleanupPending,
     };
     const target = this.metadataPath(job.jobId);
     const temporary = `${target}.${process.pid}.tmp`;
@@ -567,6 +647,71 @@ function isTerminal(status: JobStatus): boolean {
     "timed_out",
     "interrupted",
   ].includes(status);
+}
+
+function processSignalTarget(job: LiveJob): number | undefined {
+  const processId = job.processId;
+  const processGroupId = job.processGroupId;
+  if (
+    job.processPlatform !== process.platform ||
+    !Number.isSafeInteger(processId) ||
+    (processId ?? 0) <= 1
+  ) {
+    return undefined;
+  }
+  if (process.platform === "win32") {
+    return job.child?.pid === processId ? processId : undefined;
+  }
+  if (!Number.isSafeInteger(processGroupId) || processGroupId !== processId) {
+    return undefined;
+  }
+  if (
+    !job.processToken ||
+    !processGroupContainsToken(processGroupId as number, job.processToken)
+  ) {
+    return undefined;
+  }
+  return -(processGroupId as number);
+}
+
+function processGroupContainsToken(
+  processGroupId: number,
+  processToken: string,
+): boolean {
+  try {
+    const processRows = execFileSync("ps", ["-axo", "pid=,pgid="], {
+      encoding: "utf8",
+      timeout: 1_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    for (const row of processRows.split("\n")) {
+      const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(row);
+      if (!match || Number(match[2]) !== processGroupId) continue;
+      const environment = execFileSync(
+        "ps",
+        ["eww", "-p", match[1], "-o", "command="],
+        {
+          encoding: "utf8",
+          timeout: 1_000,
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
+      if (environment.includes(`DEVSPACE_PROCESS_TOKEN=${processToken}`)) {
+        return true;
+      }
+    }
+  } catch {
+    // Refuse to signal when process identity cannot be confirmed.
+  }
+  return false;
+}
+
+function isPermissionError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "EPERM"
+  );
 }
 
 function validateJobId(jobId: string): void {
