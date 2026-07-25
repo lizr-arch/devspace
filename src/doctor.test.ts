@@ -169,11 +169,22 @@ async function testPublicExternalClientProbe(): Promise<void> {
   const configDir = mkdtempSync(join(tempRoot, "config-external-client-"));
   const stateDir = mkdtempSync(join(tempRoot, "state-external-client-"));
   const worktreeRoot = mkdtempSync(join(tempRoot, "worktree-external-client-"));
+  const artifactWorkspace = mkdtempSync(join(tempRoot, "artifact-workspace-"));
+  writeFileSync(
+    join(artifactWorkspace, "package.json"),
+    JSON.stringify({
+      private: true,
+      scripts: {
+        artifact:
+          "node -e \"const fs=require('fs');fs.mkdirSync('artifacts/probe',{recursive:true});fs.writeFileSync('artifacts/probe/result.png',Buffer.from([137,80,78,71,13,10,26,10,100,111,99,116,111,114]))\"",
+      },
+    }),
+  );
   const port = await freePort();
   const publicBaseUrl = `http://127.0.0.1:${port}`;
   const config = loadConfig({
     DEVSPACE_CONFIG_DIR: configDir,
-    DEVSPACE_ALLOWED_ROOTS: process.cwd(),
+    DEVSPACE_ALLOWED_ROOTS: `${process.cwd()},${artifactWorkspace}`,
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     DEVSPACE_PUBLIC_BASE_URL: publicBaseUrl,
     DEVSPACE_STATE_DIR: stateDir,
@@ -226,6 +237,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
       "pytest",
       "godot",
       "godot-mono",
+      "blender",
     ]);
     assert.equal(probe.workspaceRoot, process.cwd());
     assert.match(probe.workspaceId ?? "", /^ws_/);
@@ -241,6 +253,20 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(cancellationProbe.ready, true);
     assert.equal(cancellationProbe.backgroundJob?.ok, true);
     assert.equal(cancellationProbe.backgroundJobStatus, "cancelled");
+
+    const artifactProbe = await probePublicExternalClientFlow(config, {
+      workspacePath: artifactWorkspace,
+      backgroundJob: {
+        runner: "npm",
+        args: ["run", "artifact"],
+        artifactRoots: ["artifacts/probe"],
+      },
+    });
+    assert.equal(artifactProbe.ready, true);
+    assert.equal(artifactProbe.backgroundJob?.ok, true);
+    assert.equal(artifactProbe.artifactList?.ok, true);
+    assert.equal(artifactProbe.artifactCount, 1);
+    assert.match(artifactProbe.artifactSha256s?.[0] ?? "", /^[0-9a-f]{64}$/);
   } finally {
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => (error ? reject(error) : resolve()));
@@ -289,6 +315,7 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
     assert.deepEqual(probe.toolNames, [
       "devspace_info",
       "list_workspaces",
+      "list_artifacts",
       "resume_workspace",
       "open_workspace",
       "project_memory_preflight",

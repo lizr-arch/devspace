@@ -29,6 +29,7 @@ cargo
 pytest
 godot
 godot-mono
+blender
 ```
 
 Each code-owned definition specifies:
@@ -75,8 +76,22 @@ executable that is missing or not executable makes only that runner
 unavailable.
 
 Configuration cannot define a new runner or replace its argument policy. Adding
-a future runner such as Blender, Aseprite, FFmpeg, or ImageMagick requires a
+a future runner such as Aseprite, FFmpeg, or ImageMagick requires a
 reviewed code-owned policy.
+
+## Blender policy
+
+The Blender runner is single-concurrency, background-only, and reports
+`networkPolicy: offline_requested` plus `containment: trusted_local`. The V1
+policy allows factory startup, one workspace-local Python script,
+Python-exit-code handling, bounded render options, a workspace-local `.blend`
+input, and a conservative render-format/engine set.
+
+It rejects `--python-expr`, text-block/console execution, system-Python
+environment access, automatic add-on or extension commands, autoexec enabling,
+unknown switches, external paths, and symlink escape. Recommended jobs include
+`--offline-mode` and `--disable-autoexec` explicitly; these are command-line
+requests to Blender, not an OS firewall or sandbox.
 
 ## Execution checks
 
@@ -109,4 +124,3 @@ WORKSPACE_ESCAPE
 
 Later Game Art Production milestones extend the same registry and Job lifecycle;
 they do not introduce a second Blender-specific process manager.
-

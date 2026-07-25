@@ -228,8 +228,10 @@ DevSpace gives ChatGPT tools to:
 - search code and inspect directories
 - run shell commands for tests, builds, git, and package scripts
 - start, poll, and cancel bounded background validation jobs through approved
-  npm, .NET, Godot, Cargo, pytest, and related runners without an arbitrary
-  background shell string
+  npm, .NET, Godot, Blender, Cargo, pytest, and related runners without an
+  arbitrary background shell string
+- declare narrow job artifact roots and list persistent, versioned BLEND, GLB,
+  image, JSON, and text records with SHA-256 and current presence
 - use isolated Git worktrees for parallel coding sessions
 - follow project instructions from `AGENTS.md` and `CLAUDE.md`
 - discover local agent skills from your skill folders

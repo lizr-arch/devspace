@@ -28,6 +28,7 @@ export const RUNNER_NAMES = [
   "pytest",
   "godot",
   "godot-mono",
+  "blender",
 ] as const;
 
 export type RunnerName = (typeof RUNNER_NAMES)[number];
@@ -124,6 +125,13 @@ const DEFAULT_DEFINITIONS: Record<RunnerName, RunnerDefinition> =
     ]),
   ) as Record<RunnerName, RunnerDefinition>;
 
+DEFAULT_DEFINITIONS.blender.supportedPlatforms = ["darwin", "linux", "win32"];
+DEFAULT_DEFINITIONS.blender.argumentPolicy = "blender_background_v1";
+DEFAULT_DEFINITIONS.blender.defaultTimeoutSeconds = 30 * 60;
+DEFAULT_DEFINITIONS.blender.maxTimeoutSeconds = MAX_JOB_TIMEOUT_SECONDS;
+DEFAULT_DEFINITIONS.blender.maxConcurrent = 1;
+DEFAULT_DEFINITIONS.blender.networkPolicy = "offline_requested";
+
 export class RunnerRegistry {
   private readonly definitions = new Map<RunnerName, RunnerDefinition>();
   private readonly configuredExecutables = new Map<RunnerName, string>();
@@ -195,7 +203,7 @@ export class RunnerRegistry {
       throw new Error(`RUNNER_UNAVAILABLE: Runner ${name} is disabled.`);
     }
     validateArgumentArray(args);
-    validateActionPolicy(definition.name, args);
+    validateActionPolicy(definition.name, args, context);
     if (context) {
       assertWorkspaceContainedArguments(args, context);
     }
@@ -397,7 +405,15 @@ function validateArgumentArray(args: string[]): void {
   }
 }
 
-function validateActionPolicy(runner: RunnerName, args: string[]): void {
+function validateActionPolicy(
+  runner: RunnerName,
+  args: string[],
+  context?: RunnerValidationContext,
+): void {
+  if (runner === "blender") {
+    validateBlenderArguments(args, context);
+    return;
+  }
   const action = args[0];
   const allowedActions: Partial<Record<RunnerName, string[]>> = {
     npm: ["test", "run"],
@@ -436,6 +452,178 @@ function validateActionPolicy(runner: RunnerName, args: string[]): void {
   ) {
     throw new Error(
       `RUNNER_ARGUMENT_REJECTED: ${runner} background jobs cannot open the editor.`,
+    );
+  }
+}
+
+function validateBlenderArguments(
+  args: string[],
+  context?: RunnerValidationContext,
+): void {
+  const flagsWithoutValues = new Set([
+    "--background",
+    "-b",
+    "--factory-startup",
+    "--disable-autoexec",
+    "-Y",
+    "--offline-mode",
+  ]);
+  const flagsWithValues = new Set([
+    "--python",
+    "-P",
+    "--python-exit-code",
+    "--render-output",
+    "-o",
+    "--render-format",
+    "-F",
+    "--render-frame",
+    "-f",
+    "--scene",
+    "-S",
+    "--engine",
+    "-E",
+  ]);
+  const forbidden = new Set([
+    "--python-expr",
+    "--python-text",
+    "--python-console",
+    "--python-use-system-env",
+    "--enable-autoexec",
+    "-y",
+    "--addons",
+    "--command",
+  ]);
+
+  if (!args.includes("--background") && !args.includes("-b")) {
+    throw new Error(
+      "RUNNER_ARGUMENT_REJECTED: Blender jobs must include --background.",
+    );
+  }
+
+  let afterSeparator = false;
+  let pythonScripts = 0;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (afterSeparator) continue;
+    if (argument === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    if (forbidden.has(argument)) {
+      throw new Error(
+        `RUNNER_ARGUMENT_REJECTED: Blender option ${argument} is disabled by the V1 policy.`,
+      );
+    }
+    if (flagsWithoutValues.has(argument)) continue;
+    if (flagsWithValues.has(argument)) {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error(
+          `RUNNER_ARGUMENT_REJECTED: Blender option ${argument} requires a value.`,
+        );
+      }
+      validateBlenderOptionValue(argument, value, context);
+      if (argument === "--python" || argument === "-P") pythonScripts += 1;
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("-")) {
+      throw new Error(
+        `RUNNER_ARGUMENT_REJECTED: Blender option ${argument} is not allowed.`,
+      );
+    }
+    if (!argument.toLowerCase().endsWith(".blend")) {
+      throw new Error(
+        `RUNNER_ARGUMENT_REJECTED: Unexpected Blender positional argument: ${argument}.`,
+      );
+    }
+  }
+
+  if (pythonScripts > 1) {
+    throw new Error(
+      "RUNNER_ARGUMENT_REJECTED: Blender jobs may run at most one --python script.",
+    );
+  }
+  const pythonIndex = Math.max(args.indexOf("--python"), args.indexOf("-P"));
+  const exitCodeIndex = args.indexOf("--python-exit-code");
+  if (pythonIndex >= 0 && (exitCodeIndex < 0 || exitCodeIndex > pythonIndex)) {
+    throw new Error(
+      "RUNNER_ARGUMENT_REJECTED: --python-exit-code must appear before --python so Blender applies it to script failures.",
+    );
+  }
+}
+
+function validateBlenderOptionValue(
+  option: string,
+  value: string,
+  context?: RunnerValidationContext,
+): void {
+  if (option === "--python" || option === "-P") {
+    if (!value.toLowerCase().endsWith(".py")) {
+      throw new Error(
+        "RUNNER_ARGUMENT_REJECTED: Blender --python must reference a .py file.",
+      );
+    }
+    if (context) assertExistingRegularWorkspaceFile(value, context);
+    return;
+  }
+  if (option === "--python-exit-code") {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 255) {
+      throw new Error(
+        "RUNNER_ARGUMENT_REJECTED: --python-exit-code must be from 1 to 255.",
+      );
+    }
+    return;
+  }
+  if (option === "--render-format" || option === "-F") {
+    if (!["PNG", "JPEG", "WEBP", "OPEN_EXR"].includes(value)) {
+      throw new Error(
+        "RUNNER_ARGUMENT_REJECTED: Blender render format is not allowed.",
+      );
+    }
+    return;
+  }
+  if (option === "--render-frame" || option === "-f") {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 1_000_000) {
+      throw new Error(
+        "RUNNER_ARGUMENT_REJECTED: Blender render frame is invalid.",
+      );
+    }
+    return;
+  }
+  if (option === "--engine" || option === "-E") {
+    if (
+      ![
+        "BLENDER_EEVEE",
+        "BLENDER_EEVEE_NEXT",
+        "BLENDER_WORKBENCH",
+        "CYCLES",
+      ].includes(value)
+    ) {
+      throw new Error(
+        "RUNNER_ARGUMENT_REJECTED: Blender render engine is not allowed.",
+      );
+    }
+  }
+}
+
+function assertExistingRegularWorkspaceFile(
+  candidate: string,
+  context: RunnerValidationContext,
+): void {
+  const workspaceRoot = canonicalExistingPath(context.workspaceRoot);
+  const target = resolve(context.workingDirectory, candidate);
+  const canonical = canonicalExistingPath(target);
+  if (!isPathInsideRoot(canonical, workspaceRoot)) {
+    throw new Error(
+      `WORKSPACE_ESCAPE: Blender script is outside the workspace: ${candidate}`,
+    );
+  }
+  if (!statSync(canonical).isFile()) {
+    throw new Error(
+      `RUNNER_ARGUMENT_REJECTED: Blender script is not a regular file: ${candidate}`,
     );
   }
 }
@@ -553,6 +741,11 @@ function executableCandidates(
       "/Applications/Godot Mono.app/Contents/MacOS/Godot",
       "/opt/homebrew/bin/godot-mono",
     ],
+    blender: [
+      "/Applications/Blender.app/Contents/MacOS/Blender",
+      "/opt/homebrew/bin/blender",
+      "/usr/local/bin/blender",
+    ],
   };
   const fromPath = (env.PATH ?? "")
     .split(delimiter)
@@ -645,6 +838,7 @@ function argumentPolicyName(name: RunnerName): string {
   if (name === "dotnet") return "dotnet_validation_v1";
   if (name === "cargo") return "cargo_validation_v1";
   if (name === "pytest") return "pytest_validation_v1";
+  if (name === "blender") return "blender_background_v1";
   return "godot_headless_v1";
 }
 

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,6 +34,7 @@ try {
     "pytest",
     "godot",
     "godot-mono",
+    "blender",
   ]);
 
   for (const [runner, args] of [
@@ -46,6 +53,74 @@ try {
       workingDirectory: workspaceRoot,
     });
   }
+
+  const blenderScript = join(workspaceRoot, "create_asset.py");
+  mkdirSync(join(workspaceRoot, "render"), { recursive: true });
+  writeFileSync(blenderScript, "# fixture");
+  validateRunnerArguments(
+    "blender",
+    [
+      "--background",
+      "--factory-startup",
+      "--offline-mode",
+      "--disable-autoexec",
+      "--python-exit-code",
+      "23",
+      "--python",
+      "create_asset.py",
+      "--render-output",
+      "render/preview.png",
+      "--render-format",
+      "PNG",
+      "--engine",
+      "BLENDER_EEVEE_NEXT",
+    ],
+    {
+      workspaceRoot,
+      workingDirectory: workspaceRoot,
+    },
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments(
+        "blender",
+        ["--background", "--python-expr", "print(1)"],
+        { workspaceRoot, workingDirectory: workspaceRoot },
+      ),
+    /disabled by the V1 policy/,
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments(
+        "blender",
+        ["--background", "--python", "escape/outside.py"],
+        { workspaceRoot, workingDirectory: workspaceRoot },
+      ),
+    /WORKSPACE_ESCAPE/,
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments("blender", ["--python", "create_asset.py"], {
+        workspaceRoot,
+        workingDirectory: workspaceRoot,
+      }),
+    /must include --background/,
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments(
+        "blender",
+        [
+          "--background",
+          "--python",
+          "create_asset.py",
+          "--python-exit-code",
+          "23",
+        ],
+        { workspaceRoot, workingDirectory: workspaceRoot },
+      ),
+    /must appear before --python/,
+  );
 
   assert.throws(
     () => new RunnerRegistry().getDefinition("unregistered"),

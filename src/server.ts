@@ -43,6 +43,11 @@ import {
 } from "./background-jobs.js";
 import { RunnerRegistry, type RunnerInspection } from "./runner-registry.js";
 import {
+  ArtifactLedger,
+  MAX_ARTIFACT_ROOTS,
+  MAX_LIST_ARTIFACTS,
+} from "./artifact-ledger.js";
+import {
   editFileTool,
   findFilesTool,
   grepFilesTool,
@@ -72,7 +77,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "game-art-v1.runners-a.2026-07-25";
+const TOOL_SCHEMA_REVISION = "game-art-v1.artifacts-b.2026-07-25";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -246,6 +251,7 @@ function exposedToolNames(
   const tools = [
     "devspace_info",
     "list_workspaces",
+    "list_artifacts",
     "resume_workspace",
     "open_workspace",
     "project_memory_preflight",
@@ -422,9 +428,46 @@ const jobSnapshotOutputSchema = z.object({
   outputBytes: z.number().int(),
   outputTruncated: z.boolean(),
   error: z.string().optional(),
+  artifactRoots: z.array(z.string()).optional(),
+  artifactStatus: z.enum([
+    "none",
+    "pending",
+    "complete",
+    "incomplete",
+    "error",
+  ]),
+  artifactCount: z.number().int(),
+  artifactErrors: z.array(z.string()).optional(),
   output: z.string().optional(),
   outputOffsetBytes: z.number().int().optional(),
   nextOutputOffsetBytes: z.number().int().optional(),
+});
+
+const artifactTypeSchema = z.enum(["blend", "glb", "image", "json", "text"]);
+
+const artifactOutputSchema = z.object({
+  artifactId: z.string(),
+  relativePath: z.string(),
+  artifactType: artifactTypeSchema,
+  mimeType: z.string(),
+  format: z.string(),
+  size: z.number().int().nonnegative(),
+  sha256: z.string(),
+  change: z.enum(["created", "modified"]),
+  completion: z.enum(["complete", "incomplete"]),
+  jobId: z.string(),
+  runner: z.enum(JOB_RUNNERS),
+  runnerVersion: z.string().optional(),
+  workspaceId: z.string(),
+  createdAt: z.string(),
+  gitStatus: z.enum(["tracked", "untracked", "ignored", "unknown"]),
+  presence: z.enum([
+    "present",
+    "missing",
+    "superseded",
+    "unsafe",
+    "unverified",
+  ]),
 });
 
 function formatRunnerSummary(runners: RunnerInspection[]): string {
@@ -813,6 +856,7 @@ function createMcpServer(
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   jobs: BackgroundJobManager,
   runners: RunnerRegistry,
+  artifacts: ArtifactLedger,
   runtime: ServiceRuntime,
 ): McpServer {
   const toolNames = toolNamesFor(config);
@@ -1026,6 +1070,104 @@ function createMcpServer(
         content: [textBlock(result)],
         _meta: { tool: "list_workspaces" },
         structuredContent: { result, workspaces: sessions },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "list_artifacts",
+    {
+      title: "List artifacts",
+      description:
+        "List bounded, versioned artifacts discovered from declared workspace artifact roots after background jobs. Filter by job, relative path prefix, or artifact type. Every record includes SHA-256, producer, completion state, Git status, and current presence; deleted files remain visible as missing.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier that owns the artifacts."),
+        jobId: z
+          .string()
+          .regex(/^job_[0-9a-f-]{36}$/)
+          .optional()
+          .describe("Optional producing job identifier."),
+        pathPrefix: z
+          .string()
+          .max(512)
+          .optional()
+          .describe("Optional workspace-relative artifact path prefix."),
+        type: artifactTypeSchema
+          .optional()
+          .describe("Optional artifact type filter."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_LIST_ARTIFACTS)
+          .optional()
+          .describe("Maximum records to return. Defaults to 50."),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+      },
+      outputSchema: resultOutputSchema({
+        artifacts: z.array(artifactOutputSchema),
+      }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({
+      workspaceId,
+      jobId,
+      pathPrefix,
+      type,
+      limit,
+      projectMemoryReceiptId,
+    }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const projectMemory = workspaces.observeProjectMemoryAccess(
+        workspaceId,
+        "list_artifacts",
+        projectMemoryReceiptId,
+      );
+      const listed = await artifacts.listArtifacts({
+        workspaceId,
+        workspaceRoot: workspace.root,
+        jobId,
+        pathPrefix,
+        type,
+        limit,
+      });
+      const result =
+        listed.length === 0
+          ? "No matching artifacts are registered."
+          : listed
+              .map(
+                (artifact) =>
+                  `${artifact.artifactId} | ${artifact.presence} | ${artifact.format} | ${artifact.size} bytes | sha256 ${artifact.sha256} | ${artifact.relativePath}`,
+              )
+              .join("\n");
+      logToolCall(config, {
+        tool: "list_artifacts",
+        workspaceId,
+        path: pathPrefix,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: "list_artifacts",
+          projectMemory,
+          card: {
+            workspaceId,
+            path: pathPrefix,
+            summary: { count: listed.length, jobId, type },
+          },
+        },
+        structuredContent: { result, artifacts: listed },
       };
     },
   );
@@ -2082,6 +2224,14 @@ function createMcpServer(
             .describe(
               `Defaults to ${DEFAULT_JOB_TIMEOUT_SECONDS}; maximum ${MAX_JOB_TIMEOUT_SECONDS}.`,
             ),
+          artifactRoots: z
+            .array(z.string().min(1).max(512))
+            .min(1)
+            .max(MAX_ARTIFACT_ROOTS)
+            .optional()
+            .describe(
+              "Optional workspace-relative output directories to snapshot before the job and discover afterward. Prefer narrow roots such as artifacts/blender; whole-workspace scans are not accepted.",
+            ),
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({
@@ -2102,6 +2252,7 @@ function createMcpServer(
         workingDirectory,
         label,
         timeoutSeconds,
+        artifactRoots,
         projectMemoryReceiptId,
       }) => {
         const startedAt = performance.now();
@@ -2123,8 +2274,9 @@ function createMcpServer(
           args,
           label,
           timeoutSeconds,
+          artifactRoots,
         });
-        const result = `Started ${job.jobId}: ${runner} ${args.join(" ")}. Poll with poll_job.`;
+        const result = `Started ${job.jobId}: ${runner} ${job.args.join(" ")}. Poll with poll_job.`;
         logToolCall(config, {
           tool: "start_job",
           workspaceId,
@@ -2209,6 +2361,12 @@ function createMcpServer(
           job.exitCode !== undefined ? `Exit code: ${job.exitCode}` : undefined,
           job.signal ? `Signal: ${job.signal}` : undefined,
           job.error ? `Error: ${job.error}` : undefined,
+          job.artifactStatus !== "none"
+            ? `Artifacts: ${job.artifactStatus} (${job.artifactCount})`
+            : undefined,
+          job.artifactErrors?.length
+            ? `Artifact errors: ${job.artifactErrors.join(" | ")}`
+            : undefined,
           job.output ? `Output:\n${job.output}` : undefined,
         ]
           .filter(Boolean)
@@ -2329,7 +2487,8 @@ export function createServer(
     projectMemory,
   );
   const reviewCheckpoints = createReviewCheckpointManager();
-  const jobs = new BackgroundJobManager(config.stateDir, runners);
+  const artifacts = new ArtifactLedger(config.stateDir);
+  const jobs = new BackgroundJobManager(config.stateDir, runners, artifacts);
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", 1);
@@ -2474,6 +2633,7 @@ export function createServer(
           reviewCheckpoints,
           jobs,
           runners,
+          artifacts,
           runtime,
         );
         await server.connect(transport);

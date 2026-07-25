@@ -22,6 +22,7 @@ import {
   validateRunnerArguments,
   type RunnerName,
 } from "./runner-registry.js";
+import { ArtifactLedger, type ArtifactBaseline } from "./artifact-ledger.js";
 
 export const JOB_RUNNERS = RUNNER_NAMES;
 export type JobRunner = RunnerName;
@@ -40,6 +41,9 @@ export type JobStatus =
   | "cancelled"
   | "timed_out"
   | "interrupted";
+
+export type JobArtifactStatus =
+  "none" | "pending" | "complete" | "incomplete" | "error";
 
 export const DEFAULT_POLL_BYTES = 64 * 1024;
 export const MAX_POLL_BYTES = 256 * 1024;
@@ -63,6 +67,11 @@ interface PersistedJob {
   outputBytes: number;
   outputTruncated: boolean;
   error?: string;
+  artifactRoots?: string[];
+  artifactStatus: JobArtifactStatus;
+  artifactCount: number;
+  artifactErrors?: string[];
+  artifactBaseline?: ArtifactBaseline;
 }
 
 interface LiveJob extends PersistedJob {
@@ -71,6 +80,7 @@ interface LiveJob extends PersistedJob {
   timeoutRequested?: boolean;
   timeoutHandle?: NodeJS.Timeout;
   killHandle?: NodeJS.Timeout;
+  artifactFinalizationStarted?: boolean;
 }
 
 export interface StartJobInput {
@@ -81,6 +91,7 @@ export interface StartJobInput {
   args: string[];
   label?: string;
   timeoutSeconds?: number;
+  artifactRoots?: string[];
 }
 
 export interface JobSnapshot extends PersistedJob {
@@ -97,6 +108,7 @@ export class BackgroundJobManager {
   constructor(
     private readonly stateDir: string,
     private readonly runners = new RunnerRegistry(),
+    private readonly artifacts = new ArtifactLedger(stateDir),
   ) {
     this.jobsDir = join(stateDir, "jobs");
   }
@@ -134,6 +146,9 @@ export class BackgroundJobManager {
     }
 
     const resolvedRunner = await this.runners.resolve(input.runner);
+    const artifactBaseline = input.artifactRoots
+      ? this.artifacts.captureBaseline(input.workspaceRoot, input.artifactRoots)
+      : undefined;
     const jobId = `job_${randomUUID()}`;
     const job: LiveJob = {
       jobId,
@@ -150,6 +165,10 @@ export class BackgroundJobManager {
       maxOutputBytes: definition.maxOutputBytes,
       outputBytes: 0,
       outputTruncated: false,
+      artifactRoots: artifactBaseline?.roots,
+      artifactStatus: artifactBaseline ? "pending" : "none",
+      artifactCount: 0,
+      artifactBaseline,
     };
 
     writeFileSync(this.logPath(jobId), "", { mode: 0o600 });
@@ -189,6 +208,7 @@ export class BackgroundJobManager {
       job.endedAt = new Date().toISOString();
       job.error = error instanceof Error ? error.message : String(error);
       this.persist(job);
+      void this.finalizeArtifacts(job);
       throw error;
     }
 
@@ -272,7 +292,11 @@ export class BackgroundJobManager {
           readFileSync(join(this.jobsDir, entry), "utf8"),
         ) as PersistedJob;
         validateJobId(parsed.jobId);
-        const job: LiveJob = { ...parsed };
+        const job: LiveJob = {
+          ...parsed,
+          artifactStatus: parsed.artifactStatus ?? "none",
+          artifactCount: parsed.artifactCount ?? 0,
+        };
         if (job.status === "running" || job.status === "cancelling") {
           job.status = "interrupted";
           job.endedAt = new Date().toISOString();
@@ -280,6 +304,15 @@ export class BackgroundJobManager {
           this.persist(job);
         }
         this.jobs.set(job.jobId, job);
+        if (
+          job.artifactStatus === "pending" &&
+          job.artifactBaseline &&
+          job.artifactRoots
+        ) {
+          queueMicrotask(() => {
+            void this.finalizeArtifacts(job);
+          });
+        }
       } catch {
         // Ignore malformed state files rather than trusting unvalidated data.
       }
@@ -360,10 +393,14 @@ export class BackgroundJobManager {
     }
     job.child = undefined;
     this.persist(job);
+    void this.finalizeArtifacts(job);
   }
 
   private persist(job: LiveJob): void {
-    const persisted = publicSnapshot(job);
+    const persisted = {
+      ...publicSnapshot(job),
+      artifactBaseline: job.artifactBaseline,
+    };
     const target = this.metadataPath(job.jobId);
     const temporary = `${target}.${process.pid}.tmp`;
     writeFileSync(temporary, JSON.stringify(persisted, null, 2) + "\n", {
@@ -378,6 +415,49 @@ export class BackgroundJobManager {
 
   private logPath(jobId: string): string {
     return join(this.jobsDir, `${jobId}.log`);
+  }
+
+  private async finalizeArtifacts(job: LiveJob): Promise<void> {
+    if (
+      job.artifactFinalizationStarted ||
+      job.artifactStatus !== "pending" ||
+      !job.artifactBaseline ||
+      !job.artifactRoots
+    ) {
+      return;
+    }
+    job.artifactFinalizationStarted = true;
+    try {
+      const discovered = await this.artifacts.discoverArtifacts({
+        workspaceId: job.workspaceId,
+        workspaceRoot: job.workspaceRoot,
+        jobId: job.jobId,
+        runner: job.runner,
+        runnerVersion: job.runnerVersion,
+        status: job.status,
+        artifactRoots: job.artifactRoots,
+        baseline: job.artifactBaseline,
+      });
+      job.artifactCount = discovered.artifacts.length;
+      job.artifactErrors =
+        discovered.errors.length > 0
+          ? discovered.errors.slice(0, 20)
+          : undefined;
+      job.artifactStatus =
+        discovered.errors.length > 0
+          ? "error"
+          : discovered.completion === "complete"
+            ? "complete"
+            : "incomplete";
+    } catch (error) {
+      job.artifactStatus = "error";
+      job.artifactErrors = [
+        error instanceof Error ? error.message : String(error),
+      ];
+    } finally {
+      job.artifactBaseline = undefined;
+      this.persist(job);
+    }
   }
 }
 
@@ -405,6 +485,10 @@ function publicSnapshot(job: LiveJob): PersistedJob {
     outputBytes: job.outputBytes,
     outputTruncated: job.outputTruncated,
     error: job.error,
+    artifactRoots: job.artifactRoots ? [...job.artifactRoots] : undefined,
+    artifactStatus: job.artifactStatus ?? "none",
+    artifactCount: job.artifactCount ?? 0,
+    artifactErrors: job.artifactErrors ? [...job.artifactErrors] : undefined,
   };
 }
 

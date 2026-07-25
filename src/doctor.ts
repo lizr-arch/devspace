@@ -58,6 +58,7 @@ export interface PublicExternalClientProbe {
   listWorkspaces: DoctorProbeCheck;
   resumeWorkspace: DoctorProbeCheck;
   backgroundJob?: DoctorProbeCheck;
+  artifactList?: DoctorProbeCheck;
   toolNames?: string[];
   runnerNames?: string[];
   schemaFingerprint?: string;
@@ -70,7 +71,14 @@ export interface PublicExternalClientProbe {
   projectMemoryMissingShellOutcome?: string;
   projectMemoryShellSucceeded?: boolean;
   backgroundJobStatus?: string;
+  backgroundJobId?: string;
+  backgroundArtifactStatus?: string;
+  backgroundArtifactErrors?: string[];
   backgroundJobOutput?: string;
+  artifactCount?: number;
+  artifactSha256s?: string[];
+  artifactPaths?: string[];
+  artifactSizes?: number[];
   ready: boolean;
 }
 
@@ -173,6 +181,8 @@ export async function probePublicExternalClientFlow(
       runner: JobRunner;
       args: string[];
       cancel?: boolean;
+      artifactRoots?: string[];
+      timeoutSeconds?: number;
     };
   },
 ): Promise<PublicExternalClientProbe> {
@@ -217,6 +227,7 @@ export async function probePublicExternalClientFlow(
     detail: "MCP resume_workspace did not run.",
   };
   let backgroundJobCheck: DoctorProbeCheck | undefined;
+  let artifactListCheck: DoctorProbeCheck | undefined;
   let toolNames: string[] | undefined;
   let runnerNames: string[] | undefined;
   let schemaFingerprint: string | undefined;
@@ -229,7 +240,14 @@ export async function probePublicExternalClientFlow(
   let projectMemoryMissingShellOutcome: string | undefined;
   let projectMemoryShellSucceeded: boolean | undefined;
   let backgroundJobStatus: string | undefined;
+  let backgroundJobId: string | undefined;
+  let backgroundArtifactStatus: string | undefined;
+  let backgroundArtifactErrors: string[] | undefined;
   let backgroundJobOutput: string | undefined;
+  let artifactCount: number | undefined;
+  let artifactSha256s: string[] | undefined;
+  let artifactPaths: string[] | undefined;
+  let artifactSizes: number[] | undefined;
 
   const registration = await fetchJson(
     info.registrationEndpoint,
@@ -631,7 +649,8 @@ export async function probePublicExternalClientFlow(
                   workspaceId,
                   runner: input.backgroundJob.runner,
                   args: input.backgroundJob.args,
-                  timeoutSeconds: 30,
+                  timeoutSeconds: input.backgroundJob.timeoutSeconds ?? 30,
+                  artifactRoots: input.backgroundJob.artifactRoots,
                 },
               },
             },
@@ -645,6 +664,7 @@ export async function probePublicExternalClientFlow(
           );
           const startedJobSnapshot = asRecord(startedJobStructured?.job);
           const jobId = stringField(startedJobSnapshot, "jobId");
+          backgroundJobId = jobId;
 
           if (startedJob.ok && jobId) {
             if (input.backgroundJob.cancel) {
@@ -663,7 +683,9 @@ export async function probePublicExternalClientFlow(
                 sessionId,
               );
             }
-            for (let attempt = 0; attempt < 100; attempt += 1) {
+            const pollAttempts =
+              ((input.backgroundJob.timeoutSeconds ?? 30) + 10) * 20;
+            for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
               const polledJob = await postMcpJsonRpc(
                 info.publicMcpUrl,
                 accessToken,
@@ -687,9 +709,23 @@ export async function probePublicExternalClientFlow(
               const polledSnapshot = asRecord(polledStructured?.job);
               backgroundJobStatus = stringField(polledSnapshot, "status");
               backgroundJobOutput = stringField(polledSnapshot, "output");
+              const artifactStatus = stringField(
+                polledSnapshot,
+                "artifactStatus",
+              );
+              backgroundArtifactStatus = artifactStatus;
+              backgroundArtifactErrors = Array.isArray(
+                polledSnapshot?.artifactErrors,
+              )
+                ? polledSnapshot.artifactErrors.filter(
+                    (value): value is string => typeof value === "string",
+                  )
+                : undefined;
               if (
                 backgroundJobStatus &&
-                !["running", "cancelling"].includes(backgroundJobStatus)
+                !["running", "cancelling"].includes(backgroundJobStatus) &&
+                (!input.backgroundJob.artifactRoots ||
+                  artifactStatus !== "pending")
               ) {
                 break;
               }
@@ -700,8 +736,13 @@ export async function probePublicExternalClientFlow(
           const expectedStatus = input.backgroundJob.cancel
             ? "cancelled"
             : "succeeded";
+          const expectedArtifactStatus = input.backgroundJob.cancel
+            ? "incomplete"
+            : "complete";
           backgroundJobCheck =
-            backgroundJobStatus === expectedStatus
+            backgroundJobStatus === expectedStatus &&
+            (!input.backgroundJob.artifactRoots ||
+              backgroundArtifactStatus === expectedArtifactStatus)
               ? okCheck(
                   startedJob.status,
                   input.backgroundJob.cancel
@@ -712,9 +753,75 @@ export async function probePublicExternalClientFlow(
                 ? {
                     ok: false,
                     status: startedJob.status,
-                    detail: `MCP background job did not reach ${expectedStatus}; final status was ${backgroundJobStatus ?? "unknown"}.`,
+                    detail: `MCP background job did not reach ${expectedStatus} with artifact state ${input.backgroundJob.artifactRoots ? expectedArtifactStatus : "not required"}; final status was ${backgroundJobStatus ?? "unknown"} with artifacts ${backgroundArtifactStatus ?? "unknown"}.`,
                   }
                 : failedCheck(startedJob, "MCP start_job did not succeed.");
+
+          if (
+            backgroundJobCheck.ok &&
+            jobId &&
+            input.backgroundJob.artifactRoots &&
+            toolNames.includes("list_artifacts")
+          ) {
+            const listedArtifacts = await postMcpJsonRpc(
+              info.publicMcpUrl,
+              accessToken,
+              {
+                jsonrpc: "2.0",
+                id: 130,
+                method: "tools/call",
+                params: {
+                  name: "list_artifacts",
+                  arguments: { workspaceId, jobId, limit: 100 },
+                },
+              },
+              sessionId,
+            );
+            const listedResult = asRecord(
+              asRecord(parseMcpResponseJson(listedArtifacts.text))?.result,
+            );
+            const listedStructured = asRecord(listedResult?.structuredContent);
+            const listed = Array.isArray(listedStructured?.artifacts)
+              ? listedStructured.artifacts
+              : [];
+            artifactSha256s = listed
+              .map((artifact) => stringField(asRecord(artifact), "sha256"))
+              .filter((value): value is string => Boolean(value));
+            artifactPaths = listed
+              .map((artifact) =>
+                stringField(asRecord(artifact), "relativePath"),
+              )
+              .filter((value): value is string => Boolean(value));
+            artifactSizes = listed
+              .map((artifact) => asRecord(artifact)?.size)
+              .filter(
+                (value): value is number =>
+                  typeof value === "number" && Number.isFinite(value),
+              );
+            artifactCount = listed.length;
+            artifactListCheck =
+              listedArtifacts.ok &&
+              listed.length > 0 &&
+              artifactSha256s.length === listed.length &&
+              artifactPaths.length === listed.length &&
+              artifactSizes.length === listed.length &&
+              artifactSha256s.every((value) => /^[0-9a-f]{64}$/.test(value))
+                ? okCheck(
+                    listedArtifacts.status,
+                    "MCP list_artifacts returned the produced artifacts and SHA-256 digests.",
+                  )
+                : listedArtifacts.ok
+                  ? {
+                      ok: false,
+                      status: listedArtifacts.status,
+                      detail:
+                        "MCP list_artifacts responded, but produced artifacts or SHA-256 digests were missing.",
+                    }
+                  : failedCheck(
+                      listedArtifacts,
+                      "MCP list_artifacts did not succeed.",
+                    );
+          }
         }
 
         const readToolName =
@@ -809,6 +916,7 @@ export async function probePublicExternalClientFlow(
     listWorkspaces: listWorkspacesCheck,
     resumeWorkspace: resumeWorkspaceCheck,
     backgroundJob: backgroundJobCheck,
+    artifactList: artifactListCheck,
     toolNames,
     runnerNames,
     schemaFingerprint,
@@ -821,7 +929,14 @@ export async function probePublicExternalClientFlow(
     projectMemoryMissingShellOutcome,
     projectMemoryShellSucceeded,
     backgroundJobStatus,
+    backgroundJobId,
+    backgroundArtifactStatus,
+    backgroundArtifactErrors,
     backgroundJobOutput,
+    artifactCount,
+    artifactSha256s,
+    artifactPaths,
+    artifactSizes,
     ready:
       clientRegistrationCheck.ok &&
       authorizationCheck.ok &&
@@ -832,7 +947,8 @@ export async function probePublicExternalClientFlow(
       openWorkspaceCheck.ok &&
       listWorkspacesCheck.ok &&
       resumeWorkspaceCheck.ok &&
-      (!input.backgroundJob || backgroundJobCheck?.ok === true),
+      (!input.backgroundJob || backgroundJobCheck?.ok === true) &&
+      (!input.backgroundJob?.artifactRoots || artifactListCheck?.ok === true),
   };
 }
 
