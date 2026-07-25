@@ -10,9 +10,20 @@ export interface DevspaceUserConfig {
   allowedRoots?: string[];
   publicBaseUrl?: string | null;
   allowedHosts?: string[];
+  toolMode?: "minimal" | "full";
+  trustProxy?: boolean;
   stateDir?: string;
   worktreeRoot?: string;
   agentDir?: string;
+  runners?: Record<
+    string,
+    {
+      executable?: string;
+      enabled?: boolean;
+      maxTimeoutSeconds?: number;
+      maxConcurrent?: number;
+    }
+  >;
   projectMemory?: {
     repositories?: Array<{
       root: string;

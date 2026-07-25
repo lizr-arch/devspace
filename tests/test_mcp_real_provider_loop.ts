@@ -42,8 +42,11 @@ function sleep(ms: number): Promise<void> {
 }
 
 function startMockServer(): ChildProcess {
+  const python =
+    process.env.DEVSPACE_TEST_PYTHON ??
+    (process.platform === "win32" ? "python" : "python3");
   const proc = spawn(
-    "python",
+    python,
     [join(PROJECT_ROOT, "tests", "mock_openai_server.py"), "8082"],
     {
       cwd: process.cwd(),

@@ -210,6 +210,7 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
     );
 
     const config: DevspaceUserConfig = {
+      ...files.config,
       host: files.config.host ?? "127.0.0.1",
       port,
       allowedRoots,
@@ -332,9 +333,7 @@ async function runDoctor(args: string[] = []): Promise<void> {
     console.log(
       `  OAuth authorization-server metadata: ${chatgpt.authorizationServerMetadataUrl}`,
     );
-    console.log(
-      `  OAuth authorize endpoint: ${chatgpt.authorizationEndpoint}`,
-    );
+    console.log(`  OAuth authorize endpoint: ${chatgpt.authorizationEndpoint}`);
     console.log(`  OAuth token endpoint: ${chatgpt.tokenEndpoint}`);
     console.log(
       `  ChatGPT redirect allowed: ${chatgpt.chatgptRedirectAllowed ? "yes" : "no"}`,
@@ -343,7 +342,9 @@ async function runDoctor(args: string[] = []): Promise<void> {
     console.log(`  Plan requirement: ${chatgpt.planRequirementNote}`);
     if (live) {
       const probe = await probeLocalChatGptFlow(config);
-      console.log(`  Local live probe: ${probe.ready ? "ready" : "attention needed"}`);
+      console.log(
+        `  Local live probe: ${probe.ready ? "ready" : "attention needed"}`,
+      );
       console.log(`    Local base URL: ${probe.localBaseUrl}`);
       console.log(
         `    /healthz: ${probe.healthz.ok ? "OK" : "FAIL"}${probe.healthz.status ? ` (${probe.healthz.status})` : ""} - ${probe.healthz.detail}`,
@@ -367,7 +368,9 @@ async function runDoctor(args: string[] = []): Promise<void> {
     }
     if (publicProbe) {
       const probe = await probePublicChatGptFlow(config);
-      console.log(`  Public probe: ${probe.ready ? "ready" : "attention needed"}`);
+      console.log(
+        `  Public probe: ${probe.ready ? "ready" : "attention needed"}`,
+      );
       if (probe.transportNote) {
         console.log(`    Transport note: ${probe.transportNote}`);
       }
@@ -410,7 +413,16 @@ async function runDoctor(args: string[] = []): Promise<void> {
           `    MCP tools/list: ${external.toolsList.ok ? "OK" : "FAIL"}${external.toolsList.status ? ` (${external.toolsList.status})` : ""} - ${external.toolsList.detail}`,
         );
         console.log(
+          `    MCP devspace_info: ${external.devspaceInfo.ok ? "OK" : "FAIL"}${external.devspaceInfo.status ? ` (${external.devspaceInfo.status})` : ""} - ${external.devspaceInfo.detail}`,
+        );
+        console.log(
           `    MCP open_workspace: ${external.openWorkspace.ok ? "OK" : "FAIL"}${external.openWorkspace.status ? ` (${external.openWorkspace.status})` : ""} - ${external.openWorkspace.detail}`,
+        );
+        console.log(
+          `    MCP list_workspaces: ${external.listWorkspaces.ok ? "OK" : "FAIL"}${external.listWorkspaces.status ? ` (${external.listWorkspaces.status})` : ""} - ${external.listWorkspaces.detail}`,
+        );
+        console.log(
+          `    MCP resume_workspace: ${external.resumeWorkspace.ok ? "OK" : "FAIL"}${external.resumeWorkspace.status ? ` (${external.resumeWorkspace.status})` : ""} - ${external.resumeWorkspace.detail}`,
         );
         if (external.workspaceId) {
           console.log(`    workspaceId: ${external.workspaceId}`);
@@ -447,22 +459,34 @@ function runConfigCommand(args: string[]): void {
   if (subcommand !== "set") {
     throw new Error(`Unknown config command: ${subcommand}`);
   }
-  if (key !== "publicBaseUrl") {
-    throw new Error(
-      "Only `devspace config set publicBaseUrl <url|null>` is supported right now.",
-    );
-  }
-
   const value = rest.join(" ").trim();
   if (!value) {
-    throw new Error("Missing publicBaseUrl value.");
+    throw new Error(`Missing ${key ?? "configuration"} value.`);
   }
 
-  writeDevspaceConfig({
-    ...files.config,
-    publicBaseUrl: normalizeOptionalPublicBaseUrl(value),
-  });
-  console.log(`Updated ${files.configPath}`);
+  if (key === "publicBaseUrl") {
+    writeDevspaceConfig({
+      ...files.config,
+      publicBaseUrl: normalizeOptionalPublicBaseUrl(value),
+    });
+    console.log(`Updated ${files.configPath}`);
+    return;
+  }
+  if (key === "toolMode") {
+    if (value !== "minimal" && value !== "full") {
+      throw new Error("toolMode must be `minimal` or `full`.");
+    }
+    writeDevspaceConfig({
+      ...files.config,
+      toolMode: value,
+    });
+    console.log(`Updated ${files.configPath}`);
+    return;
+  }
+
+  throw new Error(
+    "Supported configuration keys are `publicBaseUrl` and `toolMode`.",
+  );
 }
 
 async function runCollabCommand(args: string[]): Promise<void> {
@@ -1406,15 +1430,16 @@ function printHelp(): void {
       "                           Verify the full public OAuth flow and a real open_workspace MCP call",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
-      "  devspace coach-pack --path <repo> --task \"...\" --out coach_pack.md",
+      "  devspace config set toolMode <minimal|full>",
+      '  devspace coach-pack --path <repo> --task "..." --out coach_pack.md',
       "                           Build a bounded read-only context pack and manifest",
       "  devspace coach-ingest <reply.md> [--out summary.json]",
       "                           Parse a coach reply into structured local next steps",
-      "  devspace coach-session start --path <repo> --task \"...\" [--budget n] [--out coach_pack.md]",
+      '  devspace coach-session start --path <repo> --task "..." [--budget n] [--out coach_pack.md]',
       "                           Start a local read-only multi-turn coach session",
       "  devspace coach-session ingest --session <id> <reply.md> [--out summary.json]",
       "                           Attach a coach reply to an existing session",
-      "  devspace coach-session next-pack --session <id> [--task \"...\"] [--budget n] [--out coach_pack.md]",
+      '  devspace coach-session next-pack --session <id> [--task "..."] [--budget n] [--out coach_pack.md]',
       "                           Build the next follow-up pack from session state",
       "  devspace coach-session status --session <id>",
       "                           Show session metadata, usage, and pending follow-up reads",

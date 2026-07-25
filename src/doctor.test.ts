@@ -47,14 +47,17 @@ async function testDerivedChatGptUrls(): Promise<void> {
     info.authorizationServerMetadataUrl,
     "https://devspace.example.com/.well-known/oauth-authorization-server",
   );
-  assert.equal(info.authorizationEndpoint, "https://devspace.example.com/authorize");
-  assert.equal(info.tokenEndpoint, "https://devspace.example.com/token");
-  assert.equal(info.registrationEndpoint, "https://devspace.example.com/register");
-  assert.equal(info.chatgptRedirectAllowed, true);
-  assert.match(
-    info.planRequirementNote,
-    /Verify your current ChatGPT plan/i,
+  assert.equal(
+    info.authorizationEndpoint,
+    "https://devspace.example.com/authorize",
   );
+  assert.equal(info.tokenEndpoint, "https://devspace.example.com/token");
+  assert.equal(
+    info.registrationEndpoint,
+    "https://devspace.example.com/register",
+  );
+  assert.equal(info.chatgptRedirectAllowed, true);
+  assert.match(info.planRequirementNote, /Verify your current ChatGPT plan/i);
 }
 
 async function testPublicProbeHeaders(): Promise<void> {
@@ -93,9 +96,13 @@ async function testLiveChatGptProbe(): Promise<void> {
   });
 
   const { app, close } = createServer(config);
-  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
-    const server = app.listen(config.port, config.host, () => resolve(server));
-  });
+  const httpServer = await new Promise<import("node:http").Server>(
+    (resolve) => {
+      const server = app.listen(config.port, config.host, () =>
+        resolve(server),
+      );
+    },
+  );
 
   try {
     const probe = await probeLocalChatGptFlow(config);
@@ -134,9 +141,13 @@ async function testPublicChatGptProbe(): Promise<void> {
   });
 
   const { app, close } = createServer(config);
-  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
-    const server = app.listen(config.port, config.host, () => resolve(server));
-  });
+  const httpServer = await new Promise<import("node:http").Server>(
+    (resolve) => {
+      const server = app.listen(config.port, config.host, () =>
+        resolve(server),
+      );
+    },
+  );
 
   try {
     const probe = await probePublicChatGptFlow(config);
@@ -158,11 +169,22 @@ async function testPublicExternalClientProbe(): Promise<void> {
   const configDir = mkdtempSync(join(tempRoot, "config-external-client-"));
   const stateDir = mkdtempSync(join(tempRoot, "state-external-client-"));
   const worktreeRoot = mkdtempSync(join(tempRoot, "worktree-external-client-"));
+  const artifactWorkspace = mkdtempSync(join(tempRoot, "artifact-workspace-"));
+  writeFileSync(
+    join(artifactWorkspace, "package.json"),
+    JSON.stringify({
+      private: true,
+      scripts: {
+        artifact:
+          "node -e \"const fs=require('fs');fs.mkdirSync('artifacts/probe',{recursive:true});fs.writeFileSync('artifacts/probe/result.png',Buffer.from([137,80,78,71,13,10,26,10,100,111,99,116,111,114]))\"",
+      },
+    }),
+  );
   const port = await freePort();
   const publicBaseUrl = `http://127.0.0.1:${port}`;
   const config = loadConfig({
     DEVSPACE_CONFIG_DIR: configDir,
-    DEVSPACE_ALLOWED_ROOTS: process.cwd(),
+    DEVSPACE_ALLOWED_ROOTS: `${process.cwd()},${artifactWorkspace}`,
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     DEVSPACE_PUBLIC_BASE_URL: publicBaseUrl,
     DEVSPACE_STATE_DIR: stateDir,
@@ -175,13 +197,21 @@ async function testPublicExternalClientProbe(): Promise<void> {
   });
 
   const { app, close } = createServer(config);
-  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
-    const server = app.listen(config.port, config.host, () => resolve(server));
-  });
+  const httpServer = await new Promise<import("node:http").Server>(
+    (resolve) => {
+      const server = app.listen(config.port, config.host, () =>
+        resolve(server),
+      );
+    },
+  );
 
   try {
     const probe = await probePublicExternalClientFlow(config, {
       workspacePath: process.cwd(),
+      backgroundJob: {
+        runner: "npm",
+        args: ["run", "typecheck"],
+      },
     });
     assert.equal(probe.ready, true);
     assert.equal(probe.clientRegistration.ok, true);
@@ -189,9 +219,54 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.tokenExchange.ok, true);
     assert.equal(probe.initialize.ok, true);
     assert.equal(probe.toolsList.ok, true);
+    assert.equal(probe.devspaceInfo.ok, true);
     assert.equal(probe.openWorkspace.ok, true);
+    assert.equal(probe.listWorkspaces.ok, true);
+    assert.equal(probe.resumeWorkspace.ok, true);
+    assert.equal(probe.backgroundJob?.ok, true);
+    assert.equal(probe.backgroundJobStatus, "succeeded");
+    assert.match(probe.backgroundJobOutput ?? "", /typecheck/);
+    assert.match(probe.schemaFingerprint ?? "", /^[0-9a-f]{64}$/);
+    assert.deepEqual(probe.runnerNames, [
+      "npm",
+      "pnpm",
+      "yarn",
+      "bun",
+      "dotnet",
+      "cargo",
+      "pytest",
+      "godot",
+      "godot-mono",
+      "blender",
+    ]);
     assert.equal(probe.workspaceRoot, process.cwd());
     assert.match(probe.workspaceId ?? "", /^ws_/);
+
+    const cancellationProbe = await probePublicExternalClientFlow(config, {
+      workspacePath: process.cwd(),
+      backgroundJob: {
+        runner: "npm",
+        args: ["run", "test:unit"],
+        cancel: true,
+      },
+    });
+    assert.equal(cancellationProbe.ready, true);
+    assert.equal(cancellationProbe.backgroundJob?.ok, true);
+    assert.equal(cancellationProbe.backgroundJobStatus, "cancelled");
+
+    const artifactProbe = await probePublicExternalClientFlow(config, {
+      workspacePath: artifactWorkspace,
+      backgroundJob: {
+        runner: "npm",
+        args: ["run", "artifact"],
+        artifactRoots: ["artifacts/probe"],
+      },
+    });
+    assert.equal(artifactProbe.ready, true);
+    assert.equal(artifactProbe.backgroundJob?.ok, true);
+    assert.equal(artifactProbe.artifactList?.ok, true);
+    assert.equal(artifactProbe.artifactCount, 1);
+    assert.match(artifactProbe.artifactSha256s?.[0] ?? "", /^[0-9a-f]{64}$/);
   } finally {
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => (error ? reject(error) : resolve()));
@@ -224,9 +299,13 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
   });
 
   const { app, close } = createServer(config);
-  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
-    const server = app.listen(config.port, config.host, () => resolve(server));
-  });
+  const httpServer = await new Promise<import("node:http").Server>(
+    (resolve) => {
+      const server = app.listen(config.port, config.host, () =>
+        resolve(server),
+      );
+    },
+  );
 
   try {
     const probe = await probePublicExternalClientFlow(config, {
@@ -234,6 +313,10 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
     });
     assert.equal(probe.ready, true);
     assert.deepEqual(probe.toolNames, [
+      "devspace_info",
+      "list_workspaces",
+      "list_artifacts",
+      "resume_workspace",
       "open_workspace",
       "project_memory_preflight",
       "read",
@@ -252,7 +335,9 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
 async function testProjectMemoryHttpMcpFlow(): Promise<void> {
   const configDir = mkdtempSync(join(tempRoot, "config-project-memory-"));
   const stateDir = mkdtempSync(join(tempRoot, "state-project-memory-"));
-  const workspaceRoot = mkdtempSync(join(tempRoot, "workspace-project-memory-"));
+  const workspaceRoot = mkdtempSync(
+    join(tempRoot, "workspace-project-memory-"),
+  );
   const worktreeRoot = mkdtempSync(join(tempRoot, "worktree-project-memory-"));
   const port = await freePort();
   const publicBaseUrl = `http://127.0.0.1:${port}`;
@@ -300,9 +385,13 @@ async function testProjectMemoryHttpMcpFlow(): Promise<void> {
       return fakeProjectMemoryPreflight(receivedTask);
     },
   });
-  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
-    const server = app.listen(config.port, config.host, () => resolve(server));
-  });
+  const httpServer = await new Promise<import("node:http").Server>(
+    (resolve) => {
+      const server = app.listen(config.port, config.host, () =>
+        resolve(server),
+      );
+    },
+  );
 
   try {
     const probe = await probePublicExternalClientFlow(config, {
@@ -347,9 +436,13 @@ async function testPublicProbeExplainsInvalidHost(): Promise<void> {
   });
 
   const { app, close } = createServer(config);
-  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
-    const server = app.listen(config.port, config.host, () => resolve(server));
-  });
+  const httpServer = await new Promise<import("node:http").Server>(
+    (resolve) => {
+      const server = app.listen(config.port, config.host, () =>
+        resolve(server),
+      );
+    },
+  );
 
   const http = await import("node:http");
   const proxyServer = http.createServer((request, response) => {

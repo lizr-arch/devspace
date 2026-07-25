@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "runner": "godot-mono",
+  "workingDirectory": ".",
+  "args": [
+    "--headless",
+    "--display-driver",
+    "macos",
+    "--audio-driver",
+    "Dummy",
+    "--path",
+    ".",
+    "res://capture.tscn"
+  ],
+  "artifactRoots": ["artifacts/captures"],
+  "timeoutSeconds": 120,
+  "capture": {
+    "project": "DevSpace Godot Capture Fixture",
+    "scene": "res://capture.tscn",
+    "viewportWidth": 640,
+    "viewportHeight": 360,
+    "randomSeed": 42,
+    "warmupFrames": 4,
+    "captureFrame": 4,
+    "outputPath": "artifacts/captures/game_capture.png",
+    "manifestPath": "artifacts/captures/capture_manifest.json"
+  }
+}

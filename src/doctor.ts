@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { JOB_RUNNERS, type JobRunner } from "./background-jobs.js";
 import type { ServerConfig } from "./config.js";
 
 export const CHATGPT_REDIRECT_URI =
@@ -52,8 +53,16 @@ export interface PublicExternalClientProbe {
   tokenExchange: DoctorProbeCheck;
   initialize: DoctorProbeCheck;
   toolsList: DoctorProbeCheck;
+  devspaceInfo: DoctorProbeCheck;
   openWorkspace: DoctorProbeCheck;
+  listWorkspaces: DoctorProbeCheck;
+  resumeWorkspace: DoctorProbeCheck;
+  backgroundJob?: DoctorProbeCheck;
+  artifactList?: DoctorProbeCheck;
+  artifactPublication?: DoctorProbeCheck;
   toolNames?: string[];
+  runnerNames?: string[];
+  schemaFingerprint?: string;
   workspaceId?: string;
   workspaceRoot?: string;
   projectMemoryReceiptId?: string;
@@ -62,6 +71,18 @@ export interface PublicExternalClientProbe {
   projectMemoryMissingReadOutcome?: string;
   projectMemoryMissingShellOutcome?: string;
   projectMemoryShellSucceeded?: boolean;
+  backgroundJobStatus?: string;
+  backgroundJobId?: string;
+  backgroundArtifactStatus?: string;
+  backgroundArtifactErrors?: string[];
+  backgroundJobOutput?: string;
+  artifactCount?: number;
+  artifactSha256s?: string[];
+  artifactPaths?: string[];
+  artifactSizes?: number[];
+  publishedArtifactUrl?: string;
+  publishedArtifactSha256?: string;
+  publishedArtifactBytes?: number;
   ready: boolean;
 }
 
@@ -91,9 +112,8 @@ export function deriveChatGptWebInfo(config: ServerConfig): ChatGptWebInfo {
       publicBaseUrl,
       "/.well-known/oauth-authorization-server",
     ),
-    chatgptRedirectAllowed: config.oauth.allowedRedirectHosts.includes(
-      "chatgpt.com",
-    ),
+    chatgptRedirectAllowed:
+      config.oauth.allowedRedirectHosts.includes("chatgpt.com"),
     reasoningNote:
       "Choose the highest reasoning option in ChatGPT itself. DevSpace cannot force the model or reasoning tier from the MCP server.",
     planRequirementNote:
@@ -134,7 +154,8 @@ export async function probePublicChatGptFlow(
   const probe = await probeChatGptFlowAtBaseUrl({
     baseUrl: info.publicBaseUrl,
     info,
-    healthzLabel: "Public /healthz responded through the configured tunnel or reverse proxy.",
+    healthzLabel:
+      "Public /healthz responded through the configured tunnel or reverse proxy.",
     requestInit: publicProbeRequestInitForBaseUrl(info.publicBaseUrl),
     transportNote,
     rewriteAbsoluteEndpoint: (endpoint) => endpoint,
@@ -156,8 +177,20 @@ export async function probePublicExternalClientFlow(
   config: ServerConfig,
   input: {
     workspacePath: string;
+    resumeWorkspaceId?: string;
+    resumeWorkspaceRoot?: string;
     task?: string;
     verifyProjectMemoryShadowTools?: boolean;
+    backgroundJob?: {
+      runner: JobRunner;
+      args: string[];
+      cancel?: boolean;
+      artifactRoots?: string[];
+      timeoutSeconds?: number;
+    };
+    captureProfile?: string;
+    inspectArtifactJobId?: string;
+    publishArtifactPath?: string;
   },
 ): Promise<PublicExternalClientProbe> {
   const info = deriveChatGptWebInfo(config);
@@ -188,7 +221,24 @@ export async function probePublicExternalClientFlow(
     ok: false,
     detail: "MCP open_workspace did not run.",
   };
+  let devspaceInfoCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP devspace_info did not run.",
+  };
+  let listWorkspacesCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP list_workspaces did not run.",
+  };
+  let resumeWorkspaceCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP resume_workspace did not run.",
+  };
+  let backgroundJobCheck: DoctorProbeCheck | undefined;
+  let artifactListCheck: DoctorProbeCheck | undefined;
+  let artifactPublicationCheck: DoctorProbeCheck | undefined;
   let toolNames: string[] | undefined;
+  let runnerNames: string[] | undefined;
+  let schemaFingerprint: string | undefined;
   let workspaceId: string | undefined;
   let workspaceRoot: string | undefined;
   let projectMemoryReceiptId: string | undefined;
@@ -197,6 +247,18 @@ export async function probePublicExternalClientFlow(
   let projectMemoryMissingReadOutcome: string | undefined;
   let projectMemoryMissingShellOutcome: string | undefined;
   let projectMemoryShellSucceeded: boolean | undefined;
+  let backgroundJobStatus: string | undefined;
+  let backgroundJobId: string | undefined;
+  let backgroundArtifactStatus: string | undefined;
+  let backgroundArtifactErrors: string[] | undefined;
+  let backgroundJobOutput: string | undefined;
+  let artifactCount: number | undefined;
+  let artifactSha256s: string[] | undefined;
+  let artifactPaths: string[] | undefined;
+  let artifactSizes: number[] | undefined;
+  let publishedArtifactUrl: string | undefined;
+  let publishedArtifactSha256: string | undefined;
+  let publishedArtifactBytes: number | undefined;
 
   const registration = await fetchJson(
     info.registrationEndpoint,
@@ -244,7 +306,9 @@ export async function probePublicExternalClientFlow(
       withFormBody(requestInit, authorizeForm),
     );
     const location = authorization.headers?.get("location") ?? undefined;
-    code = location ? new URL(location).searchParams.get("code") ?? undefined : undefined;
+    code = location
+      ? (new URL(location).searchParams.get("code") ?? undefined)
+      : undefined;
 
     authorizationCheck =
       authorization.status === 302 && code
@@ -301,20 +365,16 @@ export async function probePublicExternalClientFlow(
 
   let sessionId: string | undefined;
   if (accessToken) {
-    const initialize = await postMcpJsonRpc(
-      info.publicMcpUrl,
-      accessToken,
-      {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "public-doctor", version: "1.0.0" },
-        },
+    const initialize = await postMcpJsonRpc(info.publicMcpUrl, accessToken, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "public-doctor", version: "1.0.0" },
       },
-    );
+    });
     const initializeJson = parseMcpResponseJson(initialize.text);
     sessionId = initialize.headers?.get("mcp-session-id") ?? undefined;
     const initializeResult = asRecord(asRecord(initializeJson)?.result);
@@ -376,6 +436,70 @@ export async function probePublicExternalClientFlow(
               }
             : failedCheck(toolsList, "MCP tools/list did not succeed.");
 
+      if (toolNames.includes("devspace_info")) {
+        const devspaceInfo = await postMcpJsonRpc(
+          info.publicMcpUrl,
+          accessToken,
+          {
+            jsonrpc: "2.0",
+            id: 10,
+            method: "tools/call",
+            params: { name: "devspace_info", arguments: {} },
+          },
+          sessionId,
+        );
+        const devspaceInfoResult = asRecord(
+          asRecord(parseMcpResponseJson(devspaceInfo.text))?.result,
+        );
+        const devspaceInfoStructured = asRecord(
+          devspaceInfoResult?.structuredContent,
+        );
+        schemaFingerprint = stringField(
+          devspaceInfoStructured,
+          "schemaFingerprint",
+        );
+        const reportedTools = Array.isArray(devspaceInfoStructured?.tools)
+          ? devspaceInfoStructured.tools
+          : [];
+        const runnerRegistry = asRecord(devspaceInfoStructured?.runnerRegistry);
+        const runnerEntries = Array.isArray(runnerRegistry?.runners)
+          ? runnerRegistry.runners
+          : [];
+        runnerNames = runnerEntries
+          .map((runner) => stringField(asRecord(runner), "name"))
+          .filter((name): name is string => Boolean(name));
+        const runnerRegistryValid =
+          runnerNames.length === JOB_RUNNERS.length &&
+          runnerEntries.every((runner) => {
+            const record = asRecord(runner);
+            return (
+              typeof record?.enabled === "boolean" &&
+              typeof record?.available === "boolean" &&
+              typeof record?.executableExists === "boolean" &&
+              typeof record?.maxTimeoutSeconds === "number" &&
+              typeof record?.maxConcurrent === "number" &&
+              typeof record?.containment === "string"
+            );
+          });
+        devspaceInfoCheck =
+          devspaceInfo.ok &&
+          schemaFingerprint &&
+          reportedTools.length === toolNames.length &&
+          runnerRegistryValid
+            ? okCheck(
+                devspaceInfo.status,
+                "MCP devspace_info returned the running tool schema fingerprint.",
+              )
+            : devspaceInfo.ok
+              ? {
+                  ok: false,
+                  status: devspaceInfo.status,
+                  detail:
+                    "MCP devspace_info responded, but its fingerprint, tool catalog, or runner registry was incomplete.",
+                }
+              : failedCheck(devspaceInfo, "MCP devspace_info did not succeed.");
+      }
+
       if (hasOpenWorkspace) {
         const openWorkspace = await postMcpJsonRpc(
           info.publicMcpUrl,
@@ -399,7 +523,9 @@ export async function probePublicExternalClientFlow(
         const openWorkspaceResult = asRecord(
           asRecord(openWorkspaceJson)?.result,
         );
-        const structuredContent = asRecord(openWorkspaceResult?.structuredContent);
+        const structuredContent = asRecord(
+          openWorkspaceResult?.structuredContent,
+        );
         workspaceId = stringField(structuredContent, "workspaceId");
         workspaceRoot = stringField(structuredContent, "root");
         const projectMemory = asRecord(structuredContent?.projectMemory);
@@ -407,7 +533,9 @@ export async function probePublicExternalClientFlow(
         projectMemoryDecision = stringField(projectMemory, "decision");
 
         openWorkspaceCheck =
-          openWorkspace.ok && workspaceId && workspaceRoot === input.workspacePath
+          openWorkspace.ok &&
+          workspaceId &&
+          workspaceRoot === input.workspacePath
             ? okCheck(
                 openWorkspace.status,
                 "External MCP open_workspace succeeded through the public tunnel.",
@@ -424,8 +552,390 @@ export async function probePublicExternalClientFlow(
                   "MCP open_workspace did not succeed.",
                 );
 
-        const readToolName = config.toolNaming === "legacy" ? "read_file" : "read";
-        const shellToolName = config.toolNaming === "legacy" ? "run_shell" : "bash";
+        if (workspaceId && toolNames.includes("list_workspaces")) {
+          const listWorkspaces = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 11,
+              method: "tools/call",
+              params: {
+                name: "list_workspaces",
+                arguments: { limit: 100 },
+              },
+            },
+            sessionId,
+          );
+          const listResult = asRecord(
+            asRecord(parseMcpResponseJson(listWorkspaces.text))?.result,
+          );
+          const listStructured = asRecord(listResult?.structuredContent);
+          const listed = Array.isArray(listStructured?.workspaces)
+            ? listStructured.workspaces
+            : [];
+          const expectedListedWorkspaceId =
+            input.resumeWorkspaceId ?? workspaceId;
+          const containsWorkspace = listed.some(
+            (entry) =>
+              stringField(asRecord(entry), "workspaceId") ===
+              expectedListedWorkspaceId,
+          );
+          listWorkspacesCheck =
+            listWorkspaces.ok && containsWorkspace
+              ? okCheck(
+                  listWorkspaces.status,
+                  "MCP list_workspaces returned the newly opened session.",
+                )
+              : listWorkspaces.ok
+                ? {
+                    ok: false,
+                    status: listWorkspaces.status,
+                    detail:
+                      "MCP list_workspaces responded, but the opened workspaceId was missing.",
+                  }
+                : failedCheck(
+                    listWorkspaces,
+                    "MCP list_workspaces did not succeed.",
+                  );
+        }
+
+        const resumeTargetWorkspaceId = input.resumeWorkspaceId ?? workspaceId;
+        const resumeTargetRoot =
+          input.resumeWorkspaceRoot ?? input.workspacePath;
+        if (resumeTargetWorkspaceId && toolNames.includes("resume_workspace")) {
+          const resumeWorkspace = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 12,
+              method: "tools/call",
+              params: {
+                name: "resume_workspace",
+                arguments: { workspaceId: resumeTargetWorkspaceId },
+              },
+            },
+            sessionId,
+          );
+          const resumeResult = asRecord(
+            asRecord(parseMcpResponseJson(resumeWorkspace.text))?.result,
+          );
+          const resumeStructured = asRecord(resumeResult?.structuredContent);
+          resumeWorkspaceCheck =
+            resumeWorkspace.ok &&
+            stringField(resumeStructured, "workspaceId") ===
+              resumeTargetWorkspaceId &&
+            stringField(resumeStructured, "root") === resumeTargetRoot
+              ? okCheck(
+                  resumeWorkspace.status,
+                  "MCP resume_workspace restored the persisted session.",
+                )
+              : resumeWorkspace.ok
+                ? {
+                    ok: false,
+                    status: resumeWorkspace.status,
+                    detail:
+                      "MCP resume_workspace responded, but the workspace identity or root changed.",
+                  }
+                : failedCheck(
+                    resumeWorkspace,
+                    "MCP resume_workspace did not succeed.",
+                  );
+        }
+
+        const operationWorkspaceId = input.resumeWorkspaceId ?? workspaceId;
+        const inspectArtifacts = async (jobId: string): Promise<void> => {
+          if (!operationWorkspaceId || !toolNames?.includes("list_artifacts")) {
+            return;
+          }
+          const listedArtifacts = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 130,
+              method: "tools/call",
+              params: {
+                name: "list_artifacts",
+                arguments: {
+                  workspaceId: operationWorkspaceId,
+                  jobId,
+                  limit: 100,
+                },
+              },
+            },
+            sessionId,
+          );
+          const listedResult = asRecord(
+            asRecord(parseMcpResponseJson(listedArtifacts.text))?.result,
+          );
+          const listedStructured = asRecord(listedResult?.structuredContent);
+          const listed = Array.isArray(listedStructured?.artifacts)
+            ? listedStructured.artifacts
+            : [];
+          artifactSha256s = listed
+            .map((artifact) => stringField(asRecord(artifact), "sha256"))
+            .filter((value): value is string => Boolean(value));
+          artifactPaths = listed
+            .map((artifact) => stringField(asRecord(artifact), "relativePath"))
+            .filter((value): value is string => Boolean(value));
+          artifactSizes = listed
+            .map((artifact) => asRecord(artifact)?.size)
+            .filter(
+              (value): value is number =>
+                typeof value === "number" && Number.isFinite(value),
+            );
+          artifactCount = listed.length;
+          artifactListCheck =
+            listedArtifacts.ok &&
+            listed.length > 0 &&
+            artifactSha256s.length === listed.length &&
+            artifactPaths.length === listed.length &&
+            artifactSizes.length === listed.length &&
+            artifactSha256s.every((value) => /^[0-9a-f]{64}$/.test(value))
+              ? okCheck(
+                  listedArtifacts.status,
+                  "MCP list_artifacts returned the produced artifacts and SHA-256 digests.",
+                )
+              : listedArtifacts.ok
+                ? {
+                    ok: false,
+                    status: listedArtifacts.status,
+                    detail:
+                      "MCP list_artifacts responded, but produced artifacts or SHA-256 digests were missing.",
+                  }
+                : failedCheck(
+                    listedArtifacts,
+                    "MCP list_artifacts did not succeed.",
+                  );
+
+          if (
+            !artifactListCheck.ok ||
+            !input.publishArtifactPath ||
+            !toolNames?.includes("publish_artifact")
+          ) {
+            return;
+          }
+          const published = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 131,
+              method: "tools/call",
+              params: {
+                name: "publish_artifact",
+                arguments: {
+                  workspaceId: operationWorkspaceId,
+                  path: input.publishArtifactPath,
+                  purpose: "inspection",
+                  ttlSeconds: 30,
+                },
+              },
+            },
+            sessionId,
+          );
+          const publishedResult = asRecord(
+            asRecord(parseMcpResponseJson(published.text))?.result,
+          );
+          const publishedStructured = asRecord(
+            publishedResult?.structuredContent,
+          );
+          publishedArtifactUrl = stringField(publishedStructured, "url");
+          publishedArtifactSha256 = stringField(publishedStructured, "sha256");
+          if (published.ok && publishedArtifactUrl) {
+            const artifactResponse = await fetch(publishedArtifactUrl);
+            const bytes = Buffer.from(await artifactResponse.arrayBuffer());
+            publishedArtifactBytes = bytes.length;
+            const downloadedHash = createHash("sha256")
+              .update(bytes)
+              .digest("hex");
+            artifactPublicationCheck =
+              artifactResponse.ok &&
+              downloadedHash === publishedArtifactSha256 &&
+              artifactResponse.headers
+                .get("cache-control")
+                ?.includes("no-store") === true &&
+              artifactResponse.headers.get("x-content-type-options") ===
+                "nosniff"
+                ? okCheck(
+                    artifactResponse.status,
+                    "MCP publish_artifact returned a retrievable, hash-matching, no-store artifact URL.",
+                  )
+                : {
+                    ok: false,
+                    status: artifactResponse.status,
+                    detail:
+                      "Published artifact bytes, digest, or security headers did not match.",
+                  };
+          } else {
+            artifactPublicationCheck = failedCheck(
+              published,
+              "MCP publish_artifact did not succeed.",
+            );
+          }
+        };
+        const requestedJob = input.backgroundJob ?? input.captureProfile;
+        const startToolName = input.captureProfile
+          ? "start_capture"
+          : "start_job";
+        if (
+          operationWorkspaceId &&
+          requestedJob &&
+          toolNames.includes(startToolName) &&
+          toolNames.includes("poll_job")
+        ) {
+          const startedJob = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 20,
+              method: "tools/call",
+              params: {
+                name: startToolName,
+                arguments: input.captureProfile
+                  ? {
+                      workspaceId: operationWorkspaceId,
+                      profile: input.captureProfile,
+                    }
+                  : {
+                      workspaceId: operationWorkspaceId,
+                      runner: input.backgroundJob?.runner,
+                      args: input.backgroundJob?.args,
+                      timeoutSeconds: input.backgroundJob?.timeoutSeconds ?? 30,
+                      artifactRoots: input.backgroundJob?.artifactRoots,
+                    },
+              },
+            },
+            sessionId,
+          );
+          const startedJobResult = asRecord(
+            asRecord(parseMcpResponseJson(startedJob.text))?.result,
+          );
+          const startedJobStructured = asRecord(
+            startedJobResult?.structuredContent,
+          );
+          const startedJobSnapshot = asRecord(startedJobStructured?.job);
+          const jobId = stringField(startedJobSnapshot, "jobId");
+          backgroundJobId = jobId;
+
+          if (startedJob.ok && jobId) {
+            if (input.backgroundJob?.cancel) {
+              await postMcpJsonRpc(
+                info.publicMcpUrl,
+                accessToken,
+                {
+                  jsonrpc: "2.0",
+                  id: 21,
+                  method: "tools/call",
+                  params: {
+                    name: "cancel_job",
+                    arguments: {
+                      workspaceId: operationWorkspaceId,
+                      jobId,
+                    },
+                  },
+                },
+                sessionId,
+              );
+            }
+            const pollAttempts =
+              ((input.backgroundJob?.timeoutSeconds ?? 120) + 10) * 20;
+            for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
+              const polledJob = await postMcpJsonRpc(
+                info.publicMcpUrl,
+                accessToken,
+                {
+                  jsonrpc: "2.0",
+                  id: 22 + attempt,
+                  method: "tools/call",
+                  params: {
+                    name: "poll_job",
+                    arguments: {
+                      workspaceId: operationWorkspaceId,
+                      jobId,
+                    },
+                  },
+                },
+                sessionId,
+              );
+              const polledResult = asRecord(
+                asRecord(parseMcpResponseJson(polledJob.text))?.result,
+              );
+              const polledStructured = asRecord(
+                polledResult?.structuredContent,
+              );
+              const polledSnapshot = asRecord(polledStructured?.job);
+              backgroundJobStatus = stringField(polledSnapshot, "status");
+              backgroundJobOutput = stringField(polledSnapshot, "output");
+              const artifactStatus = stringField(
+                polledSnapshot,
+                "artifactStatus",
+              );
+              backgroundArtifactStatus = artifactStatus;
+              backgroundArtifactErrors = Array.isArray(
+                polledSnapshot?.artifactErrors,
+              )
+                ? polledSnapshot.artifactErrors.filter(
+                    (value): value is string => typeof value === "string",
+                  )
+                : undefined;
+              if (
+                backgroundJobStatus &&
+                !["running", "cancelling"].includes(backgroundJobStatus) &&
+                (!(
+                  input.captureProfile || input.backgroundJob?.artifactRoots
+                ) ||
+                  artifactStatus !== "pending")
+              ) {
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+          }
+
+          const expectedStatus = input.backgroundJob?.cancel
+            ? "cancelled"
+            : "succeeded";
+          const expectedArtifactStatus = input.backgroundJob?.cancel
+            ? "incomplete"
+            : "complete";
+          const artifactsExpected = Boolean(
+            input.captureProfile || input.backgroundJob?.artifactRoots,
+          );
+          backgroundJobCheck =
+            backgroundJobStatus === expectedStatus &&
+            (!artifactsExpected ||
+              backgroundArtifactStatus === expectedArtifactStatus)
+              ? okCheck(
+                  startedJob.status,
+                  input.backgroundJob?.cancel
+                    ? "MCP background validation job started, cancelled, and was polled successfully."
+                    : input.captureProfile
+                      ? "MCP capture profile started, completed, and was polled successfully."
+                      : "MCP background validation job started, completed, and was polled successfully.",
+                )
+              : startedJob.ok
+                ? {
+                    ok: false,
+                    status: startedJob.status,
+                    detail: `MCP ${input.captureProfile ? "capture" : "background job"} did not reach ${expectedStatus} with artifact state ${artifactsExpected ? expectedArtifactStatus : "not required"}; final status was ${backgroundJobStatus ?? "unknown"} with artifacts ${backgroundArtifactStatus ?? "unknown"}.`,
+                  }
+                : failedCheck(startedJob, "MCP start_job did not succeed.");
+
+          if (backgroundJobCheck.ok && jobId && artifactsExpected) {
+            await inspectArtifacts(jobId);
+          }
+        } else if (input.inspectArtifactJobId) {
+          await inspectArtifacts(input.inspectArtifactJobId);
+        }
+
+        const readToolName =
+          config.toolNaming === "legacy" ? "read_file" : "read";
+        const shellToolName =
+          config.toolNaming === "legacy" ? "run_shell" : "bash";
         if (
           input.verifyProjectMemoryShadowTools &&
           workspaceId &&
@@ -509,8 +1019,16 @@ export async function probePublicExternalClientFlow(
     tokenExchange: tokenExchangeCheck,
     initialize: initializeCheck,
     toolsList: toolsListCheck,
+    devspaceInfo: devspaceInfoCheck,
     openWorkspace: openWorkspaceCheck,
+    listWorkspaces: listWorkspacesCheck,
+    resumeWorkspace: resumeWorkspaceCheck,
+    backgroundJob: backgroundJobCheck,
+    artifactList: artifactListCheck,
+    artifactPublication: artifactPublicationCheck,
     toolNames,
+    runnerNames,
+    schemaFingerprint,
     workspaceId,
     workspaceRoot,
     projectMemoryReceiptId,
@@ -519,14 +1037,51 @@ export async function probePublicExternalClientFlow(
     projectMemoryMissingReadOutcome,
     projectMemoryMissingShellOutcome,
     projectMemoryShellSucceeded,
+    backgroundJobStatus,
+    backgroundJobId,
+    backgroundArtifactStatus,
+    backgroundArtifactErrors,
+    backgroundJobOutput,
+    artifactCount,
+    artifactSha256s,
+    artifactPaths,
+    artifactSizes,
+    publishedArtifactUrl,
+    publishedArtifactSha256,
+    publishedArtifactBytes,
     ready:
       clientRegistrationCheck.ok &&
       authorizationCheck.ok &&
       tokenExchangeCheck.ok &&
       initializeCheck.ok &&
       toolsListCheck.ok &&
-      openWorkspaceCheck.ok,
+      devspaceInfoCheck.ok &&
+      openWorkspaceCheck.ok &&
+      listWorkspacesCheck.ok &&
+      resumeWorkspaceCheck.ok &&
+      (!requestedExternalJob(input) || backgroundJobCheck?.ok === true) &&
+      (!requestedExternalArtifacts(input) || artifactListCheck?.ok === true) &&
+      (!input.publishArtifactPath || artifactPublicationCheck?.ok === true),
   };
+}
+
+function requestedExternalJob(input: {
+  backgroundJob?: unknown;
+  captureProfile?: string;
+}): boolean {
+  return Boolean(input.backgroundJob || input.captureProfile);
+}
+
+function requestedExternalArtifacts(input: {
+  backgroundJob?: { artifactRoots?: string[] };
+  captureProfile?: string;
+  inspectArtifactJobId?: string;
+}): boolean {
+  return Boolean(
+    input.captureProfile ||
+    input.backgroundJob?.artifactRoots ||
+    input.inspectArtifactJobId,
+  );
 }
 
 export function publicProbeRequestInitForBaseUrl(
@@ -566,7 +1121,10 @@ function localUrl(baseUrl: string, path: string): string {
   return new URL(path, `${stripTrailingSlash(baseUrl)}/`).toString();
 }
 
-function localUrlFromPublicUrl(localBaseUrl: string, publicEndpoint: string): string {
+function localUrlFromPublicUrl(
+  localBaseUrl: string,
+  publicEndpoint: string,
+): string {
   const parsed = new URL(publicEndpoint);
   return new URL(
     `${parsed.pathname}${parsed.search}`,
@@ -629,7 +1187,9 @@ function mcpToolCallSucceeded(result: JsonFetchResult): boolean {
   return Boolean(toolResult) && toolResult?.isError !== true;
 }
 
-function extractInvalidHostMessage(result: JsonFetchResult): string | undefined {
+function extractInvalidHostMessage(
+  result: JsonFetchResult,
+): string | undefined {
   for (const candidate of [result.text, result.error]) {
     if (!candidate) continue;
     const match = candidate.match(/Invalid Host:\s*([^\s"}\]]+)/i);
@@ -673,7 +1233,9 @@ async function probeChatGptFlowAtBaseUrl(params: {
     protectedResource.ok &&
     protectedResourceJson?.resource === params.info.publicMcpUrl &&
     Array.isArray(protectedResourceJson.authorization_servers) &&
-    protectedResourceJson.authorization_servers.includes(params.info.oauthIssuer);
+    protectedResourceJson.authorization_servers.includes(
+      params.info.oauthIssuer,
+    );
   const protectedResourceCheck = protectedResourceMatches
     ? okCheck(
         protectedResource.status,
@@ -699,7 +1261,8 @@ async function probeChatGptFlowAtBaseUrl(params: {
   const authServerMatches =
     authServer.ok &&
     authServerJson?.issuer === params.info.oauthIssuer &&
-    authServerJson.authorization_endpoint === params.info.authorizationEndpoint &&
+    authServerJson.authorization_endpoint ===
+      params.info.authorizationEndpoint &&
     authServerJson.registration_endpoint === params.info.registrationEndpoint;
   const authServerCheck = authServerMatches
     ? okCheck(
@@ -720,7 +1283,8 @@ async function probeChatGptFlowAtBaseUrl(params: {
 
   let clientRegistrationCheck: DoctorProbeCheck = {
     ok: false,
-    detail: "Skipped because OAuth authorization-server metadata was not usable.",
+    detail:
+      "Skipped because OAuth authorization-server metadata was not usable.",
   };
   let authorizationPageCheck: DoctorProbeCheck = {
     ok: false,
@@ -729,7 +1293,9 @@ async function probeChatGptFlowAtBaseUrl(params: {
 
   if (authServer.ok && authServerJson?.registration_endpoint) {
     const registration = await fetchJson(
-      params.rewriteAbsoluteEndpoint(String(authServerJson.registration_endpoint)),
+      params.rewriteAbsoluteEndpoint(
+        String(authServerJson.registration_endpoint),
+      ),
       withJsonBody(params.requestInit, {
         redirect_uris: [CHATGPT_REDIRECT_URI],
         client_name: "ChatGPT",
@@ -763,13 +1329,18 @@ async function probeChatGptFlowAtBaseUrl(params: {
       authServerJson.authorization_endpoint &&
       protectedResourceJson?.resource
     ) {
-      const authorizeUrl = new URL(String(authServerJson.authorization_endpoint));
+      const authorizeUrl = new URL(
+        String(authServerJson.authorization_endpoint),
+      );
       const rewrittenAuthorizeUrl = new URL(
         params.rewriteAbsoluteEndpoint(authorizeUrl.toString()),
       );
       rewrittenAuthorizeUrl.searchParams.set("response_type", "code");
       rewrittenAuthorizeUrl.searchParams.set("client_id", clientId);
-      rewrittenAuthorizeUrl.searchParams.set("redirect_uri", CHATGPT_REDIRECT_URI);
+      rewrittenAuthorizeUrl.searchParams.set(
+        "redirect_uri",
+        CHATGPT_REDIRECT_URI,
+      );
       rewrittenAuthorizeUrl.searchParams.set(
         "code_challenge",
         "devspace-doctor-check",

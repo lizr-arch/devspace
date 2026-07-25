@@ -65,6 +65,10 @@ Do not include `/mcp` in `DEVSPACE_PUBLIC_BASE_URL`.
 By default, DevSpace derives allowed Host headers from the local host and public
 URL. Use `DEVSPACE_ALLOWED_HOSTS=*` only for intentional local debugging.
 
+When a tunnel or reverse proxy runs locally and forwards to the loopback-bound
+server, enable `trustProxy`. DevSpace then trusts exactly one proxy hop. Do not
+enable it when the server is directly reachable from untrusted networks.
+
 ## Tunnels
 
 DevSpace does not manage tunnels. Your tunnel or reverse proxy should point to:
@@ -85,6 +89,37 @@ package scripts.
 Filesystem path containment applies to DevSpace file tools. Shell commands run
 as local commands and can do what your user account can do. This is why the MCP
 client must be trusted and the Owner password must stay private.
+
+## Background Validation Jobs
+
+Background jobs do not accept a shell command string. They select a code-owned
+runner policy, validate its action and path-like arguments, resolve only a
+locally configured or fixed executable, spawn without a shell, and cap
+concurrency, runtime, and captured output. Job state and logs are stored under
+the private DevSpace state directory.
+
+Repository-owned build or test scripts can still execute code as the local
+user. Only run jobs in trusted approved repositories, and use `cancel_job` when
+a process behaves unexpectedly.
+
+Blender, Godot, package, compiler, and test runners are classified
+`trusted_local`, not `strict`: workspace/argument checks do not prevent trusted
+project code from using the local user's filesystem or network authority.
+`devspace_info` reports this containment level and runner availability
+explicitly.
+
+When a job declares narrow `artifactRoots`, DevSpace snapshots and scans those
+workspace-relative directories, rejects symbolic-link escape, validates
+supported file signatures, calculates SHA-256, and stores metadata outside the
+repository. Failed, cancelled, timed-out, and interrupted jobs retain discovered
+partial artifacts with an `incomplete` label. See
+[Artifact Security](artifact-security.md).
+
+Publishing is a separate gate. It accepts only a registered artifact version,
+revalidates canonical path, signature, size, and SHA-256 on every access, and
+uses a 256-bit short-lived bearer token kept only in memory. Raster images are
+served with `nosniff`, `no-store`, sandboxed CSP, and safe disposition headers;
+active formats are not inlined. A restart invalidates every publication URL.
 
 ## Project Memory SHADOW Boundary
 

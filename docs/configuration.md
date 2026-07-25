@@ -26,6 +26,7 @@ npx @waishnav/devspace doctor --live
 npx @waishnav/devspace doctor --public
 npx @waishnav/devspace config get
 npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
+npx @waishnav/devspace config set toolMode full
 ```
 
 ## Core Environment Variables
@@ -37,6 +38,8 @@ npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 | `DEVSPACE_ALLOWED_ROOTS` | Comma-separated local roots that workspaces may open. |
 | `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the MCP endpoint and built-in OAuth pages, without `/mcp`. |
 | `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
+| `DEVSPACE_TOOL_MODE` | `minimal` (default) or `full`; full exposes dedicated grep, glob, and ls tools. |
+| `DEVSPACE_TRUST_PROXY` | Set to `1` only when DevSpace is behind one local tunnel/reverse-proxy hop. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_READ_ONLY` | Set to `1` to expose a read-only MCP surface with no write, edit, or shell tools. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
@@ -80,11 +83,20 @@ origin during OAuth approval.
 | `minimal` | Default. Disables dedicated search and list tools. Clients use the shell tool with `rg`, `grep`, `find`, `ls`, or `tree` for inspection. |
 | `full` | Enables dedicated `grep`, `glob`, and `ls` tools. |
 
+The persisted equivalent is `"toolMode": "minimal"` or
+`"toolMode": "full"` in `~/.devspace/config.json`. An environment variable
+overrides the persisted value.
+
+For a tunnel agent that connects to loopback, `"trustProxy": true` trusts
+exactly one proxy hop so OAuth rate limiting can use the forwarded client IP.
+Leave it false when clients connect directly.
+
 `DEVSPACE_READ_ONLY=1` switches DevSpace into a read-only profile. In that
-mode, DevSpace exposes `open_workspace`, `read`, `grep`, `glob`, and `ls`, and
-disables `write`, `edit`, and `bash`. Dedicated read/search tools stay enabled
-even when `DEVSPACE_TOOL_MODE=minimal`, because the shell fallback is
-intentionally unavailable in read-only mode.
+mode, DevSpace exposes diagnostics, workspace discovery/recovery,
+`open_workspace`, `read`, `grep`, `glob`, and `ls`, and disables file mutation,
+shell, and background-job tools. Dedicated read/search tools stay enabled even
+when `DEVSPACE_TOOL_MODE=minimal`, because the shell fallback is intentionally
+unavailable in read-only mode.
 
 ## Widgets
 
@@ -110,6 +122,29 @@ Example:
 DEVSPACE_SKILL_PATHS="$HOME/.codex/skills,$HOME/.claude/skills" \
 npx @waishnav/devspace serve
 ```
+
+## Runner Registry
+
+Background runners are code-owned policies. The private `config.json` may
+enable/disable a built-in runner, select its absolute executable, or lower its
+timeout and concurrency caps:
+
+```json
+{
+  "runners": {
+    "godot-mono": {
+      "executable": "/Applications/Godot_mono.app/Contents/MacOS/Godot",
+      "enabled": true,
+      "maxTimeoutSeconds": 1800,
+      "maxConcurrent": 1
+    }
+  }
+}
+```
+
+The MCP client cannot provide executable paths. Invalid override entries are
+reported by `devspace_info` without preventing the service from starting. See
+[Runner Registry](runner-registry.md) for the policy and containment contract.
 
 ## Project Memory SHADOW Preflight
 

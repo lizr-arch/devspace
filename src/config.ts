@@ -4,6 +4,7 @@ import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { loadDevspaceFiles } from "./user-config.js";
+import type { RunnerRegistryConfig } from "./runner-registry.js";
 
 export type ToolNamingMode = "legacy" | "short";
 export type WidgetMode = "off" | "changes" | "full";
@@ -39,6 +40,7 @@ export interface ServerConfig {
   agentDir: string;
   logging: LoggingConfig;
   projectMemory: ProjectMemoryConfig;
+  runners: RunnerRegistryConfig;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -100,7 +102,10 @@ function parseBoolean(value: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(value?.toLowerCase() ?? "");
 }
 
-function parseMinimalTools(env: NodeJS.ProcessEnv): boolean {
+function parseMinimalTools(
+  env: NodeJS.ProcessEnv,
+  configuredMode?: "minimal" | "full",
+): boolean {
   if (env.DEVSPACE_TOOL_MODE === "minimal") return true;
   if (env.DEVSPACE_TOOL_MODE === "full") return false;
   if (env.DEVSPACE_TOOL_MODE) {
@@ -108,6 +113,8 @@ function parseMinimalTools(env: NodeJS.ProcessEnv): boolean {
   }
   if (env.DEVSPACE_MINIMAL_TOOLS !== undefined)
     return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS);
+  if (configuredMode === "minimal") return true;
+  if (configuredMode === "full") return false;
   return true;
 }
 
@@ -174,7 +181,10 @@ function parseToolNaming(value: string | undefined): ToolNamingMode {
   throw new Error(`Invalid DEVSPACE_TOOL_NAMING: ${value}`);
 }
 
-function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
+function parseLoggingConfig(
+  env: NodeJS.ProcessEnv,
+  configuredTrustProxy = false,
+): LoggingConfig {
   return {
     level: parseLogLevel(env.DEVSPACE_LOG_LEVEL),
     format: parseLogFormat(env.DEVSPACE_LOG_FORMAT),
@@ -188,7 +198,10 @@ function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
         ? true
         : parseBoolean(env.DEVSPACE_LOG_TOOL_CALLS),
     shellCommands: parseBoolean(env.DEVSPACE_LOG_SHELL_COMMANDS),
-    trustProxy: parseBoolean(env.DEVSPACE_TRUST_PROXY),
+    trustProxy:
+      env.DEVSPACE_TRUST_PROXY === undefined
+        ? configuredTrustProxy
+        : parseBoolean(env.DEVSPACE_TRUST_PROXY),
   };
 }
 
@@ -208,8 +221,12 @@ function parseProjectMemoryConfig(
         throw new Error(`Invalid projectMemory repository at index ${index}`);
       }
       const root = resolve(expandHomePath(entry.root));
-      if (!allowedRoots.some((allowedRoot) => isPathInsideRoot(root, allowedRoot))) {
-        throw new Error(`Project Memory root is outside allowed roots: ${root}`);
+      if (
+        !allowedRoots.some((allowedRoot) => isPathInsideRoot(root, allowedRoot))
+      ) {
+        throw new Error(
+          `Project Memory root is outside allowed roots: ${root}`,
+        );
       }
       const rootKey = process.platform === "win32" ? root.toLowerCase() : root;
       if (seenRoots.has(rootKey)) {
@@ -377,7 +394,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       derivedAllowedHosts,
     ),
     publicBaseUrl,
-    minimalTools: parseMinimalTools(env),
+    minimalTools: parseMinimalTools(env, files.config.toolMode),
     readOnly: parseReadOnly(env),
     toolNaming: parseToolNaming(env.DEVSPACE_TOOL_NAMING),
     widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
@@ -403,11 +420,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir(),
       ),
     ),
-    logging: parseLoggingConfig(env),
+    logging: parseLoggingConfig(env, files.config.trustProxy),
     projectMemory: parseProjectMemoryConfig(
       files.config.projectMemory,
       allowedRoots,
     ),
+    runners: files.config.runners ?? {},
   };
 }
 

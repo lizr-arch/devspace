@@ -61,6 +61,19 @@ export interface WorkspaceContext {
   projectMemory?: ProjectMemoryPreflightView;
 }
 
+export interface WorkspaceSessionSummary {
+  workspaceId: string;
+  root: string;
+  mode: WorkspaceMode;
+  sourceRoot?: string;
+  managed: boolean;
+  status: string;
+  createdAt: string;
+  lastUsedAt: string;
+  resumable: boolean;
+  unavailableReason?: string;
+}
+
 export interface WorkspaceReadPath {
   absolutePath: string;
   readRoots: string[];
@@ -90,10 +103,91 @@ export class WorkspaceRegistry {
     const mode = options.mode ?? "checkout";
 
     if (mode === "worktree") {
-      return this.openWorktreeWorkspace(options.path, options.baseRef, options.task);
+      return this.openWorktreeWorkspace(
+        options.path,
+        options.baseRef,
+        options.task,
+      );
     }
 
     return this.openCheckoutWorkspace(options.path, options.task);
+  }
+
+  async resumeWorkspace(
+    workspaceId: string,
+    task?: string,
+  ): Promise<WorkspaceContext> {
+    const workspace = this.getWorkspace(workspaceId);
+    const rootStats = await stat(workspace.root).catch(() => undefined);
+    if (!rootStats?.isDirectory()) {
+      throw new Error(
+        `Stored workspace is no longer available: ${workspace.root}`,
+      );
+    }
+
+    const agentsFiles = this.loadInitialAgentsFiles(workspace.root);
+    const availableAgentsFiles = await this.findAvailableAgentsFiles(
+      workspace.root,
+      agentsFiles,
+    );
+    const projectMemory = task
+      ? await this.preflightProjectMemory(workspace.id, task)
+      : undefined;
+
+    return { workspace, agentsFiles, availableAgentsFiles, projectMemory };
+  }
+
+  async listWorkspaces(limit = 20): Promise<WorkspaceSessionSummary[]> {
+    const sessions =
+      this.store?.listSessions(limit) ??
+      Array.from(this.workspaces.values())
+        .slice(-limit)
+        .reverse()
+        .map((workspace) => ({
+          id: workspace.id,
+          root: workspace.root,
+          status: "active",
+          mode: workspace.mode,
+          sourceRoot: workspace.sourceRoot,
+          baseRef: workspace.worktree?.baseRef,
+          baseSha: workspace.worktree?.baseSha,
+          managed: workspace.worktree?.managed ?? false,
+          createdAt: "",
+          lastUsedAt: "",
+        }));
+    const summaries: WorkspaceSessionSummary[] = [];
+
+    for (const session of sessions) {
+      try {
+        this.assertWorkspaceRootAllowed(
+          session.root,
+          session.mode,
+          session.sourceRoot,
+        );
+      } catch {
+        // Do not disclose sessions whose roots are outside the current policy.
+        continue;
+      }
+
+      const rootStats = await stat(session.root).catch(() => undefined);
+      const resumable = Boolean(rootStats?.isDirectory());
+      summaries.push({
+        workspaceId: session.id,
+        root: session.root,
+        mode: session.mode,
+        sourceRoot: session.sourceRoot,
+        managed: session.managed,
+        status: session.status,
+        createdAt: session.createdAt,
+        lastUsedAt: session.lastUsedAt,
+        resumable,
+        unavailableReason: resumable
+          ? undefined
+          : "Workspace directory is missing or inaccessible.",
+      });
+    }
+
+    return summaries;
   }
 
   getWorkspace(workspaceId: string): Workspace {
