@@ -75,6 +75,53 @@ Artifact tracking does not constrain what trusted Blender, Godot, compiler, or
 package scripts can write as the local user. It makes declared outputs
 traceable and rejects known path escapes; it is not an OS sandbox.
 
-Artifact registration also does not make a file publicly readable. Milestone C
-adds a separate short-lived publication gate that revalidates the ledger
-record, current path, hash, type, and size at request time.
+Artifact registration also does not make a file publicly readable.
+
+## Short-lived publication
+
+`publish_artifact` accepts a Workspace ID plus exactly one opaque artifact ID
+or exact workspace-relative path. Before issuing a URL it revalidates the
+ledger record, canonical path, signature-derived MIME type, size, and SHA-256.
+Unregistered, missing, superseded, changed, symbolic-link, traversal, and
+workspace-external files are rejected.
+
+Publication grants use a random 256-bit bearer token. Only its SHA-256 is kept
+in process memory; raw tokens are not persisted or written to audit events.
+The default lifetime is ten minutes and callers may request 30-3,600 seconds.
+A DevSpace restart intentionally invalidates every outstanding URL.
+
+Every HTTP access repeats path, signature, size, and digest verification, then
+opens the file with no-follow semantics and hashes the same descriptor that is
+streamed. A file swapped between publication and access is rejected. Response
+headers include:
+
+```text
+Content-Type: signature-derived type
+Content-Disposition: inline for raster images, attachment otherwise
+X-Content-Type-Options: nosniff
+Cache-Control: private, no-store, max-age=0
+Content-Security-Policy: default-src 'none'; sandbox
+Referrer-Policy: no-referrer
+```
+
+PNG, JPEG, and WEBP are inline image previews. JSON, text/log, GLB, and BLEND
+are safe downloads; V1 does not inline HTML, SVG, scripts, or a 3D viewer.
+Publication caps are 32 MiB for images, 4 MiB for JSON/text/log, and 128 MiB for
+GLB/BLEND.
+
+The configured public base URL must be HTTPS. Plain HTTP is accepted only for
+loopback integration tests. The URL is a bearer secret: share it only with the
+intended reviewer and use the shortest practical TTL.
+
+Audit events record publication, access, and rejection with artifact/workspace
+identity, purpose, expiry, and a short token-hash prefix. They never record the
+raw token or local absolute path.
+
+Stable publication errors include:
+
+```text
+ARTIFACT_NOT_FOUND
+ARTIFACT_MIME_REJECTED
+ARTIFACT_TOO_LARGE
+PUBLISH_TOKEN_EXPIRED
+```

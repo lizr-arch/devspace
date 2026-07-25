@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createServer } from "../src/server.js";
 import { loadConfig } from "../src/config.js";
 import { probePublicExternalClientFlow } from "../src/doctor.js";
@@ -17,6 +25,29 @@ copyFileSync(
   join(process.cwd(), "tests", "fixtures", "blender_asset", "create_asset.py"),
   join(workspaceRoot, "tools", "create_asset.py"),
 );
+const godotFixture = join(process.cwd(), "tests", "fixtures", "godot_capture");
+for (const name of ["project.godot", "capture.tscn", "capture.gd"]) {
+  copyFileSync(join(godotFixture, name), join(workspaceRoot, name));
+}
+cpSync(join(godotFixture, ".devspace"), join(workspaceRoot, ".devspace"), {
+  recursive: true,
+});
+execFileSync("git", ["init", "-q", workspaceRoot]);
+execFileSync("git", ["-C", workspaceRoot, "config", "user.name", "DevSpace"]);
+execFileSync("git", [
+  "-C",
+  workspaceRoot,
+  "config",
+  "user.email",
+  "fixture@devspace.local",
+]);
+execFileSync("git", ["-C", workspaceRoot, "add", "."]);
+execFileSync("git", ["-C", workspaceRoot, "commit", "-qm", "fixture baseline"]);
+const sourceCommit = execFileSync(
+  "git",
+  ["-C", workspaceRoot, "rev-parse", "HEAD"],
+  { encoding: "utf8" },
+).trim();
 
 const port = await freePort();
 const config = loadConfig({
@@ -88,13 +119,51 @@ try {
   assert.ok(probe.artifactSha256s?.every((value) => value.length === 64));
   assert.ok(probe.artifactSizes?.every((value) => value > 0));
 
+  const captureProbe = await probePublicExternalClientFlow(config, {
+    workspacePath: workspaceRoot,
+    resumeWorkspaceId: probe.workspaceId,
+    resumeWorkspaceRoot: workspaceRoot,
+    captureProfile: "fixture",
+    publishArtifactPath: "artifacts/captures/game_capture.png",
+  });
+  if (!captureProbe.ready) {
+    console.error(JSON.stringify(captureProbe, null, 2));
+  }
+  assert.equal(captureProbe.ready, true);
+  assert.equal(captureProbe.backgroundJobStatus, "succeeded");
+  assert.equal(captureProbe.backgroundArtifactStatus, "complete");
+  assert.equal(captureProbe.artifactList?.ok, true);
+  assert.equal(captureProbe.artifactPublication?.ok, true);
+  assert.equal(captureProbe.artifactCount, 2);
+  assert.deepEqual([...(captureProbe.artifactPaths ?? [])].sort(), [
+    "artifacts/captures/capture_manifest.json",
+    "artifacts/captures/game_capture.png",
+  ]);
+  assert.ok((captureProbe.publishedArtifactBytes ?? 0) > 0);
+  assert.match(captureProbe.publishedArtifactSha256 ?? "", /^[0-9a-f]{64}$/);
+
+  const captureManifest = JSON.parse(
+    readFileSync(
+      join(workspaceRoot, "artifacts", "captures", "capture_manifest.json"),
+      "utf8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(captureManifest.engine, "Godot");
+  assert.equal(captureManifest.sourceCommit, sourceCommit);
+  assert.equal(captureManifest.assetLoaded, true);
+  assert.equal(
+    captureManifest.imageSha256,
+    captureProbe.publishedArtifactSha256,
+  );
+  assert.deepEqual(captureManifest.viewport, [640, 360]);
+
   const restoredLedger = new ArtifactLedger(stateDir);
   const restored = await restoredLedger.listArtifacts({
     workspaceId: probe.workspaceId ?? "",
     workspaceRoot,
-    limit: 10,
+    limit: 20,
   });
-  assert.equal(restored.length, 4);
+  assert.equal(restored.length, 6);
   assert.ok(restored.every((artifact) => artifact.presence === "present"));
 
   console.log(
@@ -102,9 +171,15 @@ try {
       {
         ready: probe.ready,
         workspaceId: probe.workspaceId,
-        jobId: probe.backgroundJobId,
-        runner: "blender",
-        status: probe.backgroundJobStatus,
+        blenderJobId: probe.backgroundJobId,
+        captureJobId: captureProbe.backgroundJobId,
+        blenderStatus: probe.backgroundJobStatus,
+        captureStatus: captureProbe.backgroundJobStatus,
+        capturePublication: {
+          url: captureProbe.publishedArtifactUrl,
+          sha256: captureProbe.publishedArtifactSha256,
+          bytes: captureProbe.publishedArtifactBytes,
+        },
         artifacts: restored.map((artifact) => ({
           relativePath: artifact.relativePath,
           type: artifact.artifactType,

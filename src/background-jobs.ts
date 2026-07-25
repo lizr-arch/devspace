@@ -72,6 +72,7 @@ interface PersistedJob {
   artifactCount: number;
   artifactErrors?: string[];
   artifactBaseline?: ArtifactBaseline;
+  captureProfile?: string;
 }
 
 interface LiveJob extends PersistedJob {
@@ -92,6 +93,8 @@ export interface StartJobInput {
   label?: string;
   timeoutSeconds?: number;
   artifactRoots?: string[];
+  captureProfile?: string;
+  environment?: Record<string, string>;
 }
 
 export interface JobSnapshot extends PersistedJob {
@@ -169,6 +172,7 @@ export class BackgroundJobManager {
       artifactStatus: artifactBaseline ? "pending" : "none",
       artifactCount: 0,
       artifactBaseline,
+      captureProfile: input.captureProfile,
     };
 
     writeFileSync(this.logPath(jobId), "", { mode: 0o600 });
@@ -178,7 +182,11 @@ export class BackgroundJobManager {
     try {
       const child = spawn(resolvedRunner.executable, input.args, {
         cwd: input.workingDirectory,
-        env: process.env,
+        env: {
+          ...process.env,
+          ...validatedJobEnvironment(input.environment),
+          DEVSPACE_JOB_ID: jobId,
+        },
         detached: process.platform !== "win32",
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
@@ -489,7 +497,27 @@ function publicSnapshot(job: LiveJob): PersistedJob {
     artifactStatus: job.artifactStatus ?? "none",
     artifactCount: job.artifactCount ?? 0,
     artifactErrors: job.artifactErrors ? [...job.artifactErrors] : undefined,
+    captureProfile: job.captureProfile,
   };
+}
+
+function validatedJobEnvironment(
+  environment: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!environment) return {};
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(environment)) {
+    if (
+      !/^DEVSPACE_CAPTURE_[A-Z0-9_]{1,64}$/.test(key) ||
+      typeof value !== "string" ||
+      value.length > 4096 ||
+      value.includes("\0")
+    ) {
+      throw new Error("CAPTURE_PROFILE_INVALID: Invalid capture environment.");
+    }
+    output[key] = value;
+  }
+  return output;
 }
 
 function isTerminal(status: JobStatus): boolean {

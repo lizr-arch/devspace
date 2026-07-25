@@ -75,6 +75,11 @@ export interface ListedArtifact extends ArtifactRecord {
   presence: ArtifactPresence;
 }
 
+export interface VerifiedArtifactFile {
+  artifact: ListedArtifact;
+  absolutePath: string;
+}
+
 export interface ArtifactDiscoveryResult {
   artifacts: ArtifactRecord[];
   errors: string[];
@@ -283,6 +288,39 @@ export class ArtifactLedger {
     return this.readLedger(workspaceId).artifacts.find(
       (artifact) => artifact.artifactId === artifactId,
     );
+  }
+
+  async resolveArtifact(input: {
+    workspaceId: string;
+    workspaceRoot: string;
+    artifactId?: string;
+    path?: string;
+  }): Promise<VerifiedArtifactFile> {
+    if (Boolean(input.artifactId) === Boolean(input.path)) {
+      throw new Error(
+        "Provide exactly one of artifactId or path when resolving an artifact.",
+      );
+    }
+    validateWorkspaceId(input.workspaceId);
+    const ledger = this.readLedger(input.workspaceId);
+    let record: ArtifactRecord | undefined;
+    if (input.artifactId) {
+      if (!/^artifact_[0-9a-f-]{36}$/.test(input.artifactId)) {
+        throw new Error("Invalid artifactId.");
+      }
+      record = ledger.artifacts.find(
+        (artifact) => artifact.artifactId === input.artifactId,
+      );
+    } else {
+      const path = normalizeRelativePath(input.path ?? "");
+      record = [...ledger.artifacts]
+        .reverse()
+        .find((artifact) => artifact.relativePath === path);
+    }
+    if (!record) {
+      throw new Error("ARTIFACT_NOT_FOUND: Artifact is not registered.");
+    }
+    return verifyArtifactRecord(input.workspaceRoot, record);
   }
 
   private appendRecords(
@@ -638,6 +676,47 @@ async function inspectPresence(
   } catch {
     return "unsafe";
   }
+}
+
+export async function verifyArtifactRecord(
+  workspaceRoot: string,
+  artifact: ArtifactRecord,
+): Promise<VerifiedArtifactFile> {
+  const absolutePath = resolve(workspaceRoot, artifact.relativePath);
+  if (!existsSync(absolutePath)) {
+    throw new Error(
+      `ARTIFACT_NOT_FOUND: Registered artifact is missing: ${artifact.relativePath}`,
+    );
+  }
+  assertArtifactFileSafe(workspaceRoot, absolutePath, artifact.relativePath);
+  const info = statSync(absolutePath);
+  if (info.size > MAX_HASHABLE_ARTIFACT_BYTES) {
+    throw new Error(
+      `ARTIFACT_TOO_LARGE: ${artifact.relativePath} exceeds ${MAX_HASHABLE_ARTIFACT_BYTES} bytes.`,
+    );
+  }
+  const format = artifactFormat(artifact.relativePath);
+  if (
+    !format ||
+    format.artifactType !== artifact.artifactType ||
+    format.mimeType !== artifact.mimeType ||
+    format.format !== artifact.format
+  ) {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: Artifact metadata no longer matches ${artifact.relativePath}.`,
+    );
+  }
+  validateArtifactSignature(absolutePath, artifact.format, info.size);
+  const sha256 = await sha256File(absolutePath);
+  if (info.size !== artifact.size || sha256 !== artifact.sha256) {
+    throw new Error(
+      `ARTIFACT_NOT_FOUND: Registered artifact version has been superseded: ${artifact.relativePath}`,
+    );
+  }
+  return {
+    artifact: { ...artifact, presence: "present" },
+    absolutePath,
+  };
 }
 
 function validateWorkspaceId(workspaceId: string): void {

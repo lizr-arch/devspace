@@ -59,6 +59,7 @@ export interface PublicExternalClientProbe {
   resumeWorkspace: DoctorProbeCheck;
   backgroundJob?: DoctorProbeCheck;
   artifactList?: DoctorProbeCheck;
+  artifactPublication?: DoctorProbeCheck;
   toolNames?: string[];
   runnerNames?: string[];
   schemaFingerprint?: string;
@@ -79,6 +80,9 @@ export interface PublicExternalClientProbe {
   artifactSha256s?: string[];
   artifactPaths?: string[];
   artifactSizes?: number[];
+  publishedArtifactUrl?: string;
+  publishedArtifactSha256?: string;
+  publishedArtifactBytes?: number;
   ready: boolean;
 }
 
@@ -184,6 +188,8 @@ export async function probePublicExternalClientFlow(
       artifactRoots?: string[];
       timeoutSeconds?: number;
     };
+    captureProfile?: string;
+    publishArtifactPath?: string;
   },
 ): Promise<PublicExternalClientProbe> {
   const info = deriveChatGptWebInfo(config);
@@ -228,6 +234,7 @@ export async function probePublicExternalClientFlow(
   };
   let backgroundJobCheck: DoctorProbeCheck | undefined;
   let artifactListCheck: DoctorProbeCheck | undefined;
+  let artifactPublicationCheck: DoctorProbeCheck | undefined;
   let toolNames: string[] | undefined;
   let runnerNames: string[] | undefined;
   let schemaFingerprint: string | undefined;
@@ -248,6 +255,9 @@ export async function probePublicExternalClientFlow(
   let artifactSha256s: string[] | undefined;
   let artifactPaths: string[] | undefined;
   let artifactSizes: number[] | undefined;
+  let publishedArtifactUrl: string | undefined;
+  let publishedArtifactSha256: string | undefined;
+  let publishedArtifactBytes: number | undefined;
 
   const registration = await fetchJson(
     info.registrationEndpoint,
@@ -630,10 +640,15 @@ export async function probePublicExternalClientFlow(
                   );
         }
 
+        const operationWorkspaceId = input.resumeWorkspaceId ?? workspaceId;
+        const requestedJob = input.backgroundJob ?? input.captureProfile;
+        const startToolName = input.captureProfile
+          ? "start_capture"
+          : "start_job";
         if (
-          workspaceId &&
-          input.backgroundJob &&
-          toolNames.includes("start_job") &&
+          operationWorkspaceId &&
+          requestedJob &&
+          toolNames.includes(startToolName) &&
           toolNames.includes("poll_job")
         ) {
           const startedJob = await postMcpJsonRpc(
@@ -644,14 +659,19 @@ export async function probePublicExternalClientFlow(
               id: 20,
               method: "tools/call",
               params: {
-                name: "start_job",
-                arguments: {
-                  workspaceId,
-                  runner: input.backgroundJob.runner,
-                  args: input.backgroundJob.args,
-                  timeoutSeconds: input.backgroundJob.timeoutSeconds ?? 30,
-                  artifactRoots: input.backgroundJob.artifactRoots,
-                },
+                name: startToolName,
+                arguments: input.captureProfile
+                  ? {
+                      workspaceId: operationWorkspaceId,
+                      profile: input.captureProfile,
+                    }
+                  : {
+                      workspaceId: operationWorkspaceId,
+                      runner: input.backgroundJob?.runner,
+                      args: input.backgroundJob?.args,
+                      timeoutSeconds: input.backgroundJob?.timeoutSeconds ?? 30,
+                      artifactRoots: input.backgroundJob?.artifactRoots,
+                    },
               },
             },
             sessionId,
@@ -667,7 +687,7 @@ export async function probePublicExternalClientFlow(
           backgroundJobId = jobId;
 
           if (startedJob.ok && jobId) {
-            if (input.backgroundJob.cancel) {
+            if (input.backgroundJob?.cancel) {
               await postMcpJsonRpc(
                 info.publicMcpUrl,
                 accessToken,
@@ -677,14 +697,17 @@ export async function probePublicExternalClientFlow(
                   method: "tools/call",
                   params: {
                     name: "cancel_job",
-                    arguments: { workspaceId, jobId },
+                    arguments: {
+                      workspaceId: operationWorkspaceId,
+                      jobId,
+                    },
                   },
                 },
                 sessionId,
               );
             }
             const pollAttempts =
-              ((input.backgroundJob.timeoutSeconds ?? 30) + 10) * 20;
+              ((input.backgroundJob?.timeoutSeconds ?? 120) + 10) * 20;
             for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
               const polledJob = await postMcpJsonRpc(
                 info.publicMcpUrl,
@@ -695,7 +718,10 @@ export async function probePublicExternalClientFlow(
                   method: "tools/call",
                   params: {
                     name: "poll_job",
-                    arguments: { workspaceId, jobId },
+                    arguments: {
+                      workspaceId: operationWorkspaceId,
+                      jobId,
+                    },
                   },
                 },
                 sessionId,
@@ -724,7 +750,7 @@ export async function probePublicExternalClientFlow(
               if (
                 backgroundJobStatus &&
                 !["running", "cancelling"].includes(backgroundJobStatus) &&
-                (!input.backgroundJob.artifactRoots ||
+                (!input.backgroundJob?.artifactRoots ||
                   artifactStatus !== "pending")
               ) {
                 break;
@@ -733,34 +759,39 @@ export async function probePublicExternalClientFlow(
             }
           }
 
-          const expectedStatus = input.backgroundJob.cancel
+          const expectedStatus = input.backgroundJob?.cancel
             ? "cancelled"
             : "succeeded";
-          const expectedArtifactStatus = input.backgroundJob.cancel
+          const expectedArtifactStatus = input.backgroundJob?.cancel
             ? "incomplete"
             : "complete";
+          const artifactsExpected = Boolean(
+            input.captureProfile || input.backgroundJob?.artifactRoots,
+          );
           backgroundJobCheck =
             backgroundJobStatus === expectedStatus &&
-            (!input.backgroundJob.artifactRoots ||
+            (!artifactsExpected ||
               backgroundArtifactStatus === expectedArtifactStatus)
               ? okCheck(
                   startedJob.status,
-                  input.backgroundJob.cancel
+                  input.backgroundJob?.cancel
                     ? "MCP background validation job started, cancelled, and was polled successfully."
-                    : "MCP background validation job started, completed, and was polled successfully.",
+                    : input.captureProfile
+                      ? "MCP capture profile started, completed, and was polled successfully."
+                      : "MCP background validation job started, completed, and was polled successfully.",
                 )
               : startedJob.ok
                 ? {
                     ok: false,
                     status: startedJob.status,
-                    detail: `MCP background job did not reach ${expectedStatus} with artifact state ${input.backgroundJob.artifactRoots ? expectedArtifactStatus : "not required"}; final status was ${backgroundJobStatus ?? "unknown"} with artifacts ${backgroundArtifactStatus ?? "unknown"}.`,
+                    detail: `MCP ${input.captureProfile ? "capture" : "background job"} did not reach ${expectedStatus} with artifact state ${artifactsExpected ? expectedArtifactStatus : "not required"}; final status was ${backgroundJobStatus ?? "unknown"} with artifacts ${backgroundArtifactStatus ?? "unknown"}.`,
                   }
                 : failedCheck(startedJob, "MCP start_job did not succeed.");
 
           if (
             backgroundJobCheck.ok &&
             jobId &&
-            input.backgroundJob.artifactRoots &&
+            artifactsExpected &&
             toolNames.includes("list_artifacts")
           ) {
             const listedArtifacts = await postMcpJsonRpc(
@@ -772,7 +803,11 @@ export async function probePublicExternalClientFlow(
                 method: "tools/call",
                 params: {
                   name: "list_artifacts",
-                  arguments: { workspaceId, jobId, limit: 100 },
+                  arguments: {
+                    workspaceId: operationWorkspaceId,
+                    jobId,
+                    limit: 100,
+                  },
                 },
               },
               sessionId,
@@ -821,6 +856,74 @@ export async function probePublicExternalClientFlow(
                       listedArtifacts,
                       "MCP list_artifacts did not succeed.",
                     );
+          }
+
+          if (
+            artifactListCheck?.ok &&
+            input.publishArtifactPath &&
+            toolNames.includes("publish_artifact")
+          ) {
+            const published = await postMcpJsonRpc(
+              info.publicMcpUrl,
+              accessToken,
+              {
+                jsonrpc: "2.0",
+                id: 131,
+                method: "tools/call",
+                params: {
+                  name: "publish_artifact",
+                  arguments: {
+                    workspaceId: operationWorkspaceId,
+                    path: input.publishArtifactPath,
+                    purpose: "inspection",
+                    ttlSeconds: 30,
+                  },
+                },
+              },
+              sessionId,
+            );
+            const publishedResult = asRecord(
+              asRecord(parseMcpResponseJson(published.text))?.result,
+            );
+            const publishedStructured = asRecord(
+              publishedResult?.structuredContent,
+            );
+            publishedArtifactUrl = stringField(publishedStructured, "url");
+            publishedArtifactSha256 = stringField(
+              publishedStructured,
+              "sha256",
+            );
+            if (published.ok && publishedArtifactUrl) {
+              const artifactResponse = await fetch(publishedArtifactUrl);
+              const bytes = Buffer.from(await artifactResponse.arrayBuffer());
+              publishedArtifactBytes = bytes.length;
+              const downloadedHash = createHash("sha256")
+                .update(bytes)
+                .digest("hex");
+              artifactPublicationCheck =
+                artifactResponse.ok &&
+                downloadedHash === publishedArtifactSha256 &&
+                artifactResponse.headers
+                  .get("cache-control")
+                  ?.includes("no-store") === true &&
+                artifactResponse.headers.get("x-content-type-options") ===
+                  "nosniff"
+                  ? okCheck(
+                      artifactResponse.status,
+                      "MCP publish_artifact returned a retrievable, hash-matching, no-store artifact URL.",
+                    )
+                  : {
+                      ok: false,
+                      status: artifactResponse.status,
+                      detail:
+                        "Published artifact bytes, digest, or security headers did not match.",
+                    };
+            } else {
+              artifactPublicationCheck = failedCheck(
+                published,
+                "MCP publish_artifact did not succeed.",
+              );
+            }
           }
         }
 
@@ -917,6 +1020,7 @@ export async function probePublicExternalClientFlow(
     resumeWorkspace: resumeWorkspaceCheck,
     backgroundJob: backgroundJobCheck,
     artifactList: artifactListCheck,
+    artifactPublication: artifactPublicationCheck,
     toolNames,
     runnerNames,
     schemaFingerprint,
@@ -937,6 +1041,9 @@ export async function probePublicExternalClientFlow(
     artifactSha256s,
     artifactPaths,
     artifactSizes,
+    publishedArtifactUrl,
+    publishedArtifactSha256,
+    publishedArtifactBytes,
     ready:
       clientRegistrationCheck.ok &&
       authorizationCheck.ok &&
@@ -947,9 +1054,24 @@ export async function probePublicExternalClientFlow(
       openWorkspaceCheck.ok &&
       listWorkspacesCheck.ok &&
       resumeWorkspaceCheck.ok &&
-      (!input.backgroundJob || backgroundJobCheck?.ok === true) &&
-      (!input.backgroundJob?.artifactRoots || artifactListCheck?.ok === true),
+      (!requestedExternalJob(input) || backgroundJobCheck?.ok === true) &&
+      (!requestedExternalArtifacts(input) || artifactListCheck?.ok === true) &&
+      (!input.publishArtifactPath || artifactPublicationCheck?.ok === true),
   };
+}
+
+function requestedExternalJob(input: {
+  backgroundJob?: unknown;
+  captureProfile?: string;
+}): boolean {
+  return Boolean(input.backgroundJob || input.captureProfile);
+}
+
+function requestedExternalArtifacts(input: {
+  backgroundJob?: { artifactRoots?: string[] };
+  captureProfile?: string;
+}): boolean {
+  return Boolean(input.captureProfile || input.backgroundJob?.artifactRoots);
 }
 
 export function publicProbeRequestInitForBaseUrl(

@@ -48,6 +48,13 @@ import {
   MAX_LIST_ARTIFACTS,
 } from "./artifact-ledger.js";
 import {
+  ArtifactPublisher,
+  DEFAULT_ARTIFACT_TTL_SECONDS,
+  MAX_ARTIFACT_TTL_SECONDS,
+  MIN_ARTIFACT_TTL_SECONDS,
+} from "./artifact-publisher.js";
+import { loadCaptureProfile } from "./capture-profiles.js";
+import {
   editFileTool,
   findFilesTool,
   grepFilesTool,
@@ -77,7 +84,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "game-art-v1.artifacts-b.2026-07-25";
+const TOOL_SCHEMA_REVISION = "game-art-v1.preview-c.2026-07-25";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -252,6 +259,7 @@ function exposedToolNames(
     "devspace_info",
     "list_workspaces",
     "list_artifacts",
+    "publish_artifact",
     "resume_workspace",
     "open_workspace",
     "project_memory_preflight",
@@ -265,7 +273,13 @@ function exposedToolNames(
     tools.push(toolNames.grep, toolNames.glob, toolNames.ls);
   }
   if (!config.readOnly) {
-    tools.push(toolNames.shell, "start_job", "poll_job", "cancel_job");
+    tools.push(
+      toolNames.shell,
+      "start_job",
+      "start_capture",
+      "poll_job",
+      "cancel_job",
+    );
   }
   return tools;
 }
@@ -321,7 +335,7 @@ function serverInstructions(
     return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.${projectMemory}`;
   }
 
-  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, and job tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or complete text rewrites, import_png for original PNG bytes from an HTTPS result URL or Base64 data, ${toolNames.shell} for bounded foreground commands, and start_job/poll_job/cancel_job for long-running validation commands. Do not create, download, or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}${projectMemory}`;
+  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, job, capture, and artifact tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or complete text rewrites, import_png for original PNG bytes from an HTTPS result URL or Base64 data, ${toolNames.shell} for bounded foreground commands, start_job/poll_job/cancel_job for long-running validation commands, start_capture for a validated project capture profile, list_artifacts for persistent SHA-256 records, and publish_artifact only when a short-lived review/download URL is needed. Do not create, download, or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}${projectMemory}`;
 }
 
 export interface CreateServerOptions {
@@ -438,6 +452,7 @@ const jobSnapshotOutputSchema = z.object({
   ]),
   artifactCount: z.number().int(),
   artifactErrors: z.array(z.string()).optional(),
+  captureProfile: z.string().optional(),
   output: z.string().optional(),
   outputOffsetBytes: z.number().int().optional(),
   nextOutputOffsetBytes: z.number().int().optional(),
@@ -468,6 +483,27 @@ const artifactOutputSchema = z.object({
     "unsafe",
     "unverified",
   ]),
+});
+
+const captureProfileOutputSchema = z.object({
+  name: z.string(),
+  runner: z.enum(["godot", "godot-mono"]),
+  workingDirectory: z.string(),
+  args: z.array(z.string()),
+  artifactRoots: z.array(z.string()),
+  timeoutSeconds: z.number().int(),
+  capture: z.object({
+    project: z.string(),
+    scene: z.string(),
+    viewportWidth: z.number().int(),
+    viewportHeight: z.number().int(),
+    randomSeed: z.number().int(),
+    warmupFrames: z.number().int(),
+    captureFrame: z.number().int(),
+    outputPath: z.string(),
+    manifestPath: z.string(),
+    sourceCommit: z.string(),
+  }),
 });
 
 function formatRunnerSummary(runners: RunnerInspection[]): string {
@@ -857,6 +893,7 @@ function createMcpServer(
   jobs: BackgroundJobManager,
   runners: RunnerRegistry,
   artifacts: ArtifactLedger,
+  publisher: ArtifactPublisher,
   runtime: ServiceRuntime,
 ): McpServer {
   const toolNames = toolNamesFor(config);
@@ -962,6 +999,15 @@ function createMcpServer(
           ),
           diagnostics: z.array(z.string()),
         }),
+        artifactPublication: z.object({
+          tokenPersistence: z.literal("memory_only"),
+          defaultTtlSeconds: z.number().int(),
+          minTtlSeconds: z.number().int(),
+          maxTtlSeconds: z.number().int(),
+          restartInvalidatesTokens: z.literal(true),
+          supportedFormats: z.array(z.string()),
+          captureProfileDirectory: z.literal(".devspace/captures"),
+        }),
       }),
       _meta: {},
       annotations: {
@@ -1000,6 +1046,24 @@ function createMcpServer(
           maxOutputBytes: MAX_JOB_OUTPUT_BYTES,
         },
         runnerRegistry,
+        artifactPublication: {
+          tokenPersistence: "memory_only" as const,
+          defaultTtlSeconds: DEFAULT_ARTIFACT_TTL_SECONDS,
+          minTtlSeconds: MIN_ARTIFACT_TTL_SECONDS,
+          maxTtlSeconds: MAX_ARTIFACT_TTL_SECONDS,
+          restartInvalidatesTokens: true as const,
+          supportedFormats: [
+            "BLEND",
+            "GLB",
+            "PNG",
+            "JPEG",
+            "WEBP",
+            "JSON",
+            "TXT",
+            "LOG",
+          ],
+          captureProfileDirectory: ".devspace/captures" as const,
+        },
       };
       const result = [
         `DevSpace ${PACKAGE_VERSION}`,
@@ -1168,6 +1232,120 @@ function createMcpServer(
           },
         },
         structuredContent: { result, artifacts: listed },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "publish_artifact",
+    {
+      title: "Publish artifact",
+      description:
+        "Create a high-entropy, short-lived URL for one registered artifact version after revalidating its current workspace path, type, size, and SHA-256. Provide exactly one of artifactId or path. Image URLs are inline previews; JSON, text, GLB, and BLEND use safe downloads. Grants live only in memory and become invalid when DevSpace restarts.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier that owns the artifact."),
+        artifactId: z
+          .string()
+          .regex(/^artifact_[0-9a-f-]{36}$/)
+          .optional()
+          .describe("Opaque artifact ID returned by list_artifacts."),
+        path: z
+          .string()
+          .max(512)
+          .optional()
+          .describe(
+            "Exact workspace-relative path of the latest registered artifact version.",
+          ),
+        purpose: z
+          .enum(["review", "download", "inspection"])
+          .optional()
+          .describe("Defaults to review and is retained in the audit event."),
+        ttlSeconds: z
+          .number()
+          .int()
+          .min(MIN_ARTIFACT_TTL_SECONDS)
+          .max(MAX_ARTIFACT_TTL_SECONDS)
+          .optional()
+          .describe(
+            `Defaults to ${DEFAULT_ARTIFACT_TTL_SECONDS}; valid range ${MIN_ARTIFACT_TTL_SECONDS}-${MAX_ARTIFACT_TTL_SECONDS}.`,
+          ),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+      },
+      outputSchema: resultOutputSchema({
+        artifact: artifactOutputSchema,
+        url: z.string().url(),
+        expiresAt: z.string(),
+        contentType: z.string(),
+        size: z.number().int().nonnegative(),
+        sha256: z.string(),
+        previewType: z.enum(["image", "text", "json", "download"]),
+      }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({
+      workspaceId,
+      artifactId,
+      path,
+      purpose,
+      ttlSeconds,
+      projectMemoryReceiptId,
+    }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const projectMemory = workspaces.observeProjectMemoryAccess(
+        workspaceId,
+        "publish_artifact",
+        projectMemoryReceiptId,
+      );
+      const publication = await publisher.publish({
+        workspaceId,
+        workspaceRoot: workspace.root,
+        artifactId,
+        path,
+        purpose,
+        ttlSeconds,
+      });
+      const result = [
+        `Published ${publication.artifact.relativePath}`,
+        `URL: ${publication.url}`,
+        `Expires: ${publication.expiresAt}`,
+        `Type: ${publication.previewType} (${publication.contentType})`,
+        `Size: ${publication.size}`,
+        `SHA-256: ${publication.sha256}`,
+      ].join("\n");
+      logToolCall(config, {
+        tool: "publish_artifact",
+        workspaceId,
+        path: publication.artifact.relativePath,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: "publish_artifact",
+          projectMemory,
+          card: {
+            workspaceId,
+            path: publication.artifact.relativePath,
+            summary: {
+              artifactId: publication.artifact.artifactId,
+              previewType: publication.previewType,
+              expiresAt: publication.expiresAt,
+              sha256: publication.sha256,
+            },
+          },
+        },
+        structuredContent: { result, ...publication },
       };
     },
   );
@@ -2302,6 +2480,95 @@ function createMcpServer(
 
     registerAppTool(
       server,
+      "start_capture",
+      {
+        title: "Start capture profile",
+        description:
+          "Load a strict project-owned .devspace/captures/<name>.json profile and start its approved Godot or Godot Mono runner through the existing background Job lifecycle. Profiles cannot select an executable; DevSpace validates the workspace-local profile, runner arguments, output roots, capture metadata, timeout, and screenshot/manifest paths before spawn.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          profile: z
+            .string()
+            .regex(/^[A-Za-z0-9_-]{1,80}$/)
+            .describe(
+              "Capture profile name without a path or extension, for example asset_review.",
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          job: jobSnapshotOutputSchema,
+          profile: captureProfileOutputSchema,
+        }),
+        ...toolWidgetDescriptorMeta(config, "job"),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+      },
+      async ({ workspaceId, profile, projectMemoryReceiptId }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "start_capture",
+          projectMemoryReceiptId,
+        );
+        const loaded = loadCaptureProfile({
+          workspaceRoot: workspace.root,
+          name: profile,
+          runners,
+        });
+        const job = await jobs.start({
+          workspaceId,
+          workspaceRoot: workspace.root,
+          workingDirectory: loaded.workingDirectoryAbsolute,
+          runner: loaded.runner,
+          args: loaded.args,
+          label: `capture:${loaded.name}`,
+          timeoutSeconds: loaded.timeoutSeconds,
+          artifactRoots: loaded.artifactRoots,
+          captureProfile: loaded.name,
+          environment: loaded.environment,
+        });
+        const publicProfile = {
+          name: loaded.name,
+          runner: loaded.runner,
+          workingDirectory: loaded.workingDirectory,
+          args: loaded.args,
+          artifactRoots: loaded.artifactRoots,
+          timeoutSeconds: loaded.timeoutSeconds,
+          capture: loaded.capture,
+        };
+        const result = `Started capture ${loaded.name} as ${job.jobId}. Poll with poll_job, then use list_artifacts and publish_artifact.`;
+        logToolCall(config, {
+          tool: "start_capture",
+          workspaceId,
+          path: `.devspace/captures/${loaded.name}.json`,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "start_capture",
+            projectMemory,
+            card: {
+              workspaceId,
+              path: `.devspace/captures/${loaded.name}.json`,
+              summary: job,
+            },
+          },
+          structuredContent: { result, job, profile: publicProfile },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
       "poll_job",
       {
         title: "Poll background job",
@@ -2488,6 +2755,18 @@ export function createServer(
   );
   const reviewCheckpoints = createReviewCheckpointManager();
   const artifacts = new ArtifactLedger(config.stateDir);
+  const publisher = new ArtifactPublisher(config.publicBaseUrl, artifacts, {
+    audit: (event) =>
+      logEvent(config.logging, "info", event.event, {
+        artifactId: event.artifactId,
+        workspaceId: event.workspaceId,
+        path: event.relativePath,
+        expiresAt: event.expiresAt,
+        tokenHashPrefix: event.tokenHashPrefix,
+        purpose: event.purpose,
+        reason: event.reason,
+      }),
+  });
   const jobs = new BackgroundJobManager(config.stateDir, runners, artifacts);
 
   if (config.logging.trustProxy) {
@@ -2515,6 +2794,11 @@ export function createServer(
     });
 
     next();
+  });
+
+  app.get("/artifacts/:token", async (req, res) => {
+    const token = typeof req.params.token === "string" ? req.params.token : "";
+    await publisher.serve(token, res);
   });
 
   app.use(
@@ -2634,6 +2918,7 @@ export function createServer(
           jobs,
           runners,
           artifacts,
+          publisher,
           runtime,
         );
         await server.connect(transport);
@@ -2662,6 +2947,7 @@ export function createServer(
       if (closed) return;
       closed = true;
       jobs.close();
+      publisher.close();
       oauthProvider.close();
       projectMemory.close();
       workspaceStore.close?.();
