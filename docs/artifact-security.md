@@ -69,6 +69,26 @@ limited to 512 MiB for hashing; JSON signature validation is limited to 4 MiB.
 Files above these limits produce an explicit `ARTIFACT_TOO_LARGE` error instead
 of an incomplete hash.
 
+## Standard 3D review outputs
+
+Project Blender scripts may use this reusable V1 naming contract:
+
+```text
+preview_front.png
+preview_back.png
+preview_left.png
+preview_right.png
+preview_top.png
+preview_perspective.png
+preview_wireframe.png
+preview_contact_sheet.png
+```
+
+DevSpace registers and publishes these images but does not implement their
+camera, composition, wireframe, or contact-sheet logic. A project script may
+produce only the views relevant to its review gate; the integration fixture
+uses `preview_perspective.png`.
+
 ## Trust boundary
 
 Artifact tracking does not constrain what trusted Blender, Godot, compiler, or

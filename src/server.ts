@@ -441,6 +441,17 @@ const jobSnapshotOutputSchema = z.object({
   signal: z.string().optional(),
   outputBytes: z.number().int(),
   outputTruncated: z.boolean(),
+  errorCode: z
+    .enum([
+      "RUNNER_UNAVAILABLE",
+      "JOB_TIMEOUT",
+      "JOB_CANCELLED",
+      "JOB_INTERRUPTED",
+      "BLENDER_FAILED",
+      "CAPTURE_FAILED",
+      "RUNNER_FAILED",
+    ])
+    .optional(),
   error: z.string().optional(),
   artifactRoots: z.array(z.string()).optional(),
   artifactStatus: z.enum([

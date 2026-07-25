@@ -116,7 +116,14 @@ export function loadCaptureProfile(input: {
     input.workspaceRoot,
     workingDirectory,
   );
-  const canonicalWorkingDirectory = realpathSync(workingDirectoryAbsolute);
+  let canonicalWorkingDirectory: string;
+  try {
+    canonicalWorkingDirectory = realpathSync(workingDirectoryAbsolute);
+  } catch {
+    throw new Error(
+      "CAPTURE_PROFILE_INVALID: Capture working directory does not exist.",
+    );
+  }
   if (
     !statSync(canonicalWorkingDirectory).isDirectory() ||
     !isPathInsideRoot(canonicalWorkingDirectory, canonicalWorkspace)
@@ -125,10 +132,22 @@ export function loadCaptureProfile(input: {
       "WORKSPACE_ESCAPE: Capture working directory is outside the workspace.",
     );
   }
-  const artifactRoots = validateArtifactRoots(
-    input.workspaceRoot,
-    profile.artifactRoots,
-  );
+  let artifactRoots: string[];
+  try {
+    artifactRoots = validateArtifactRoots(
+      input.workspaceRoot,
+      profile.artifactRoots,
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (
+      reason.startsWith("WORKSPACE_ESCAPE:") ||
+      reason.startsWith("ARTIFACT_")
+    ) {
+      throw error;
+    }
+    throw new Error(`CAPTURE_PROFILE_INVALID: ${reason}`);
+  }
   assertOutputCovered(profile.capture.outputPath, artifactRoots, "outputPath");
   assertOutputCovered(
     profile.capture.manifestPath,

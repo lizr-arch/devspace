@@ -115,6 +115,12 @@ repository. Failed, cancelled, timed-out, and interrupted jobs retain discovered
 partial artifacts with an `incomplete` label. See
 [Artifact Security](artifact-security.md).
 
+Publishing is a separate gate. It accepts only a registered artifact version,
+revalidates canonical path, signature, size, and SHA-256 on every access, and
+uses a 256-bit short-lived bearer token kept only in memory. Raster images are
+served with `nosniff`, `no-store`, sandboxed CSP, and safe disposition headers;
+active formats are not inlined. A restart invalidates every publication URL.
+
 ## Project Memory SHADOW Boundary
 
 Project Memory commands come only from the operator's DevSpace configuration.

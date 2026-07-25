@@ -69,6 +69,8 @@ try {
   assert.equal(cancelling.status, "cancelling");
   const cancelled = await waitForTerminal(manager, long.jobId);
   assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.errorCode, "JOB_CANCELLED");
+  assert.match(cancelled.error ?? "", /^JOB_CANCELLED:/);
   assert.equal(manager.cancel(long.jobId).status, "cancelled");
 
   const singleRunnerManager = new BackgroundJobManager(
@@ -196,6 +198,8 @@ if (script === "wait.py") {
     blenderFailure.jobId,
   );
   assert.equal(blenderFailed.status, "failed");
+  assert.equal(blenderFailed.errorCode, "BLENDER_FAILED");
+  assert.match(blenderFailed.error ?? "", /^BLENDER_FAILED:/);
   assert.equal(blenderFailed.artifactStatus, "incomplete");
   assert.ok(blenderFailed.artifactCount > 0);
 
@@ -213,6 +217,8 @@ if (script === "wait.py") {
     blenderTimeout.jobId,
   );
   assert.equal(blenderTimedOut.status, "timed_out");
+  assert.equal(blenderTimedOut.errorCode, "JOB_TIMEOUT");
+  assert.match(blenderTimedOut.error ?? "", /^JOB_TIMEOUT:/);
   assert.equal(blenderTimedOut.artifactStatus, "incomplete");
 
   const blenderCancel = await blenderManager.start({
@@ -230,6 +236,7 @@ if (script === "wait.py") {
     blenderCancel.jobId,
   );
   assert.equal(blenderCancelled.status, "cancelled");
+  assert.equal(blenderCancelled.errorCode, "JOB_CANCELLED");
   assert.equal(blenderCancelled.artifactStatus, "incomplete");
   blenderManager.close();
 
@@ -240,6 +247,76 @@ if (script === "wait.py") {
     limit: 20,
   });
   assert.ok(restoredBlenderList.length >= 4);
+
+  const fakeGodotPath = join(root, "fake-godot");
+  writeFileSync(
+    fakeGodotPath,
+    `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  console.log("4.7.1.stable.mono");
+  process.exit(0);
+}
+process.exit(9);
+`,
+  );
+  chmodSync(fakeGodotPath, 0o755);
+  const captureManager = new BackgroundJobManager(
+    join(root, "capture-state"),
+    new RunnerRegistry({
+      "godot-mono": {
+        executable: fakeGodotPath,
+        maxConcurrent: 1,
+        maxTimeoutSeconds: 30,
+      },
+    }),
+  );
+  const failedCapture = await captureManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "godot-mono",
+    args: ["--headless", "--path", ".", "res://capture.tscn"],
+    timeoutSeconds: 30,
+    captureProfile: "fixture",
+  });
+  const captureFailed = await waitForTerminal(
+    captureManager,
+    failedCapture.jobId,
+  );
+  assert.equal(captureFailed.status, "failed");
+  assert.equal(captureFailed.errorCode, "CAPTURE_FAILED");
+  assert.match(captureFailed.error ?? "", /^CAPTURE_FAILED:/);
+  captureManager.close();
+
+  const interruptedState = join(root, "interrupted-state");
+  const interruptedManager = new BackgroundJobManager(interruptedState);
+  const interruptedStart = await interruptedManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "wait"],
+    timeoutSeconds: 30,
+  });
+  const interruptedPid = liveProcessId(
+    interruptedManager,
+    interruptedStart.jobId,
+  );
+  interruptedManager.close();
+  const interrupted = interruptedManager.poll(interruptedStart.jobId);
+  assert.equal(interrupted.status, "interrupted");
+  assert.equal(interrupted.errorCode, "JOB_INTERRUPTED");
+  assert.match(interrupted.error ?? "", /^JOB_INTERRUPTED:/);
+  await waitForProcessExit(interruptedPid);
+  const restartedInterruptedManager = new BackgroundJobManager(
+    interruptedState,
+  );
+  const restoredInterrupted = restartedInterruptedManager.poll(
+    interruptedStart.jobId,
+  );
+  assert.equal(restoredInterrupted.status, "interrupted");
+  assert.equal(restoredInterrupted.errorCode, "JOB_INTERRUPTED");
+  restartedInterruptedManager.close();
 
   console.log("background job tests passed");
 } finally {
@@ -276,4 +353,25 @@ async function waitForTerminal(manager: BackgroundJobManager, jobId: string) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for ${jobId}`);
+}
+
+function liveProcessId(manager: BackgroundJobManager, jobId: string): number {
+  const internal = manager as unknown as {
+    jobs: Map<string, { child?: { pid?: number } }>;
+  };
+  const pid = internal.jobs.get(jobId)?.child?.pid;
+  assert.ok(pid);
+  return pid;
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Background process ${pid} remained after manager close.`);
 }

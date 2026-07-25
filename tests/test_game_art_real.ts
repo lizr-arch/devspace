@@ -14,6 +14,7 @@ import { probePublicExternalClientFlow } from "../src/doctor.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer as createNetServer } from "node:net";
+import { request as httpRequest } from "node:http";
 import { ArtifactLedger } from "../src/artifact-ledger.js";
 
 const root = mkdtempSync(join(tmpdir(), "devspace-game-art-real-"));
@@ -64,10 +65,7 @@ const config = loadConfig({
   HOST: "127.0.0.1",
   PORT: String(port),
 });
-const { app, close } = createServer(config);
-const httpServer = await new Promise<import("node:http").Server>((resolve) => {
-  const server = app.listen(config.port, config.host, () => resolve(server));
-});
+let runningServer = await startDevSpace();
 
 try {
   const probe = await probePublicExternalClientFlow(config, {
@@ -87,13 +85,40 @@ try {
       artifactRoots: ["artifacts/blender_fixture"],
       timeoutSeconds: 120,
     },
+    publishArtifactPath: "artifacts/blender_fixture/preview_perspective.png",
   });
   if (!probe.ready) {
     console.error(JSON.stringify(probe, null, 2));
   }
   assert.equal(probe.ready, true);
+  assert.deepEqual(probe.toolNames, [
+    "devspace_info",
+    "list_workspaces",
+    "list_artifacts",
+    "publish_artifact",
+    "resume_workspace",
+    "open_workspace",
+    "project_memory_preflight",
+    "read",
+    "write",
+    "import_png",
+    "edit",
+    "grep",
+    "glob",
+    "ls",
+    "bash",
+    "start_job",
+    "start_capture",
+    "poll_job",
+    "cancel_job",
+  ]);
+  assert.equal(probe.runnerNames?.includes("blender"), true);
+  assert.equal(probe.runnerNames?.includes("godot-mono"), true);
   assert.equal(probe.backgroundJobStatus, "succeeded");
   assert.equal(probe.artifactList?.ok, true);
+  assert.equal(probe.artifactPublication?.ok, true);
+  assert.ok((probe.publishedArtifactBytes ?? 0) > 0);
+  assert.match(probe.publishedArtifactSha256 ?? "", /^[0-9a-f]{64}$/);
   if (probe.artifactCount !== 4) {
     console.error(
       JSON.stringify(
@@ -166,6 +191,35 @@ try {
   assert.equal(restored.length, 6);
   assert.ok(restored.every((artifact) => artifact.presence === "present"));
 
+  const firstPublicationUrl = captureProbe.publishedArtifactUrl;
+  assert.ok(firstPublicationUrl);
+  await stopDevSpace(runningServer);
+  runningServer = await startDevSpace();
+
+  assert.equal(await freshHttpStatus(firstPublicationUrl), 404);
+
+  const recoveryProbe = await probePublicExternalClientFlow(config, {
+    workspacePath: workspaceRoot,
+    resumeWorkspaceId: probe.workspaceId,
+    resumeWorkspaceRoot: workspaceRoot,
+    inspectArtifactJobId: captureProbe.backgroundJobId,
+    publishArtifactPath: "artifacts/captures/game_capture.png",
+  });
+  if (!recoveryProbe.ready) {
+    console.error(JSON.stringify(recoveryProbe, null, 2));
+  }
+  assert.equal(recoveryProbe.ready, true);
+  assert.equal(recoveryProbe.listWorkspaces.ok, true);
+  assert.equal(recoveryProbe.resumeWorkspace.ok, true);
+  assert.equal(recoveryProbe.artifactList?.ok, true);
+  assert.equal(recoveryProbe.artifactPublication?.ok, true);
+  assert.equal(recoveryProbe.artifactCount, 2);
+  assert.equal(
+    recoveryProbe.publishedArtifactSha256,
+    captureProbe.publishedArtifactSha256,
+  );
+  assert.notEqual(recoveryProbe.publishedArtifactUrl, firstPublicationUrl);
+
   console.log(
     JSON.stringify(
       {
@@ -179,6 +233,17 @@ try {
           url: captureProbe.publishedArtifactUrl,
           sha256: captureProbe.publishedArtifactSha256,
           bytes: captureProbe.publishedArtifactBytes,
+        },
+        blenderPublication: {
+          url: probe.publishedArtifactUrl,
+          sha256: probe.publishedArtifactSha256,
+          bytes: probe.publishedArtifactBytes,
+        },
+        restartRecovery: {
+          oldPublicationInvalidated: true,
+          workspaceResumed: recoveryProbe.resumeWorkspace.ok,
+          artifactCount: recoveryProbe.artifactCount,
+          republishedSha256: recoveryProbe.publishedArtifactSha256,
         },
         artifacts: restored.map((artifact) => ({
           relativePath: artifact.relativePath,
@@ -194,13 +259,37 @@ try {
     ),
   );
 } finally {
+  await stopDevSpace(runningServer);
+  rmSync(root, { recursive: true, force: true });
+}
+
+interface RunningDevSpace {
+  httpServer: import("node:http").Server;
+  close: () => void;
+  stopped: boolean;
+}
+
+async function startDevSpace(): Promise<RunningDevSpace> {
+  const { app, close } = createServer(config);
+  const httpServer = await new Promise<import("node:http").Server>(
+    (resolvePromise) => {
+      const server = app.listen(config.port, config.host, () =>
+        resolvePromise(server),
+      );
+    },
+  );
+  return { httpServer, close, stopped: false };
+}
+
+async function stopDevSpace(server: RunningDevSpace): Promise<void> {
+  if (server.stopped) return;
+  server.stopped = true;
   await new Promise<void>((resolvePromise, rejectPromise) => {
-    httpServer.close((error) =>
+    server.httpServer.close((error) =>
       error ? rejectPromise(error) : resolvePromise(),
     );
   });
-  close();
-  rmSync(root, { recursive: true, force: true });
+  server.close();
 }
 
 async function freePort(): Promise<number> {
@@ -216,4 +305,19 @@ async function freePort(): Promise<number> {
     server.close((error) => (error ? rejectPromise(error) : resolvePromise()));
   });
   return port;
+}
+
+async function freshHttpStatus(url: string): Promise<number> {
+  return await new Promise<number>((resolvePromise, rejectPromise) => {
+    const request = httpRequest(
+      url,
+      { agent: false, headers: { Connection: "close" } },
+      (response) => {
+        response.resume();
+        response.once("end", () => resolvePromise(response.statusCode ?? 0));
+      },
+    );
+    request.once("error", rejectPromise);
+    request.end();
+  });
 }

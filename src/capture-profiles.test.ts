@@ -134,6 +134,20 @@ try {
     /must include capture.scene/,
   );
 
+  writeProfile("missing-working-directory", {
+    ...validProfile,
+    workingDirectory: "does-not-exist",
+  });
+  assert.throws(
+    () =>
+      loadCaptureProfile({
+        workspaceRoot,
+        name: "missing-working-directory",
+        runners,
+      }),
+    /CAPTURE_PROFILE_INVALID: Capture working directory does not exist/,
+  );
+
   writeProfile("outside-script", {
     ...validProfile,
     args: [

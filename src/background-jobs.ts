@@ -45,6 +45,15 @@ export type JobStatus =
 export type JobArtifactStatus =
   "none" | "pending" | "complete" | "incomplete" | "error";
 
+export type JobErrorCode =
+  | "RUNNER_UNAVAILABLE"
+  | "JOB_TIMEOUT"
+  | "JOB_CANCELLED"
+  | "JOB_INTERRUPTED"
+  | "BLENDER_FAILED"
+  | "CAPTURE_FAILED"
+  | "RUNNER_FAILED";
+
 export const DEFAULT_POLL_BYTES = 64 * 1024;
 export const MAX_POLL_BYTES = 256 * 1024;
 
@@ -66,6 +75,7 @@ interface PersistedJob {
   signal?: string;
   outputBytes: number;
   outputTruncated: boolean;
+  errorCode?: JobErrorCode;
   error?: string;
   artifactRoots?: string[];
   artifactStatus: JobArtifactStatus;
@@ -199,7 +209,8 @@ export class BackgroundJobManager {
         this.appendOutput(job, chunk),
       );
       child.once("error", (error) => {
-        job.error = error.message;
+        job.errorCode = failureCode(job);
+        job.error = `${job.errorCode}: ${error.message}`;
       });
       child.once("exit", (code, signal) => {
         this.finalize(job, code, signal);
@@ -214,7 +225,9 @@ export class BackgroundJobManager {
     } catch (error) {
       job.status = "failed";
       job.endedAt = new Date().toISOString();
-      job.error = error instanceof Error ? error.message : String(error);
+      job.errorCode = failureCode(job);
+      const reason = error instanceof Error ? error.message : String(error);
+      job.error = `${job.errorCode}: ${reason}`;
       this.persist(job);
       void this.finalizeArtifacts(job);
       throw error;
@@ -281,9 +294,15 @@ export class BackgroundJobManager {
       if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
       if (job.killHandle) clearTimeout(job.killHandle);
       this.signalProcess(job, "SIGTERM");
+      job.killHandle = setTimeout(() => {
+        this.signalProcess(job, "SIGKILL");
+      }, 3_000);
+      job.killHandle.unref();
       job.status = "interrupted";
       job.endedAt = new Date().toISOString();
-      job.error = "DevSpace stopped while the job was running.";
+      job.errorCode = "JOB_INTERRUPTED";
+      job.error =
+        "JOB_INTERRUPTED: DevSpace stopped while the job was running.";
       this.persist(job);
     }
   }
@@ -308,7 +327,9 @@ export class BackgroundJobManager {
         if (job.status === "running" || job.status === "cancelling") {
           job.status = "interrupted";
           job.endedAt = new Date().toISOString();
-          job.error = "DevSpace restarted while the job was running.";
+          job.errorCode = "JOB_INTERRUPTED";
+          job.error =
+            "JOB_INTERRUPTED: DevSpace restarted while the job was running.";
           this.persist(job);
         }
         this.jobs.set(job.jobId, job);
@@ -387,16 +408,25 @@ export class BackgroundJobManager {
     job.exitCode = code ?? undefined;
     job.signal = signal ?? undefined;
     job.endedAt = new Date().toISOString();
-    if (job.timeoutRequested) {
+    if (job.status === "interrupted") {
+      job.errorCode = "JOB_INTERRUPTED";
+      job.error ??=
+        "JOB_INTERRUPTED: DevSpace stopped while the job was running.";
+    } else if (job.timeoutRequested) {
       job.status = "timed_out";
+      job.errorCode = "JOB_TIMEOUT";
+      job.error = `JOB_TIMEOUT: Process exceeded ${job.timeoutSeconds} seconds.`;
     } else if (job.cancelRequested) {
       job.status = "cancelled";
+      job.errorCode = "JOB_CANCELLED";
+      job.error = "JOB_CANCELLED: Job was cancelled by the client.";
     } else if (code === 0) {
       job.status = "succeeded";
     } else {
       job.status = "failed";
+      job.errorCode = failureCode(job);
       if (!job.error) {
-        job.error = `Process exited with ${signal ? `signal ${signal}` : `code ${String(code)}`}.`;
+        job.error = `${job.errorCode}: Process exited with ${signal ? `signal ${signal}` : `code ${String(code)}`}.`;
       }
     }
     job.child = undefined;
@@ -492,6 +522,7 @@ function publicSnapshot(job: LiveJob): PersistedJob {
     signal: job.signal,
     outputBytes: job.outputBytes,
     outputTruncated: job.outputTruncated,
+    errorCode: job.errorCode,
     error: job.error,
     artifactRoots: job.artifactRoots ? [...job.artifactRoots] : undefined,
     artifactStatus: job.artifactStatus ?? "none",
@@ -499,6 +530,14 @@ function publicSnapshot(job: LiveJob): PersistedJob {
     artifactErrors: job.artifactErrors ? [...job.artifactErrors] : undefined,
     captureProfile: job.captureProfile,
   };
+}
+
+function failureCode(
+  job: Pick<PersistedJob, "runner" | "captureProfile">,
+): JobErrorCode {
+  if (job.captureProfile) return "CAPTURE_FAILED";
+  if (job.runner === "blender") return "BLENDER_FAILED";
+  return "RUNNER_FAILED";
 }
 
 function validatedJobEnvironment(

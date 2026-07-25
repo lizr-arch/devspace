@@ -189,6 +189,7 @@ export async function probePublicExternalClientFlow(
       timeoutSeconds?: number;
     };
     captureProfile?: string;
+    inspectArtifactJobId?: string;
     publishArtifactPath?: string;
   },
 ): Promise<PublicExternalClientProbe> {
@@ -573,9 +574,12 @@ export async function probePublicExternalClientFlow(
           const listed = Array.isArray(listStructured?.workspaces)
             ? listStructured.workspaces
             : [];
+          const expectedListedWorkspaceId =
+            input.resumeWorkspaceId ?? workspaceId;
           const containsWorkspace = listed.some(
             (entry) =>
-              stringField(asRecord(entry), "workspaceId") === workspaceId,
+              stringField(asRecord(entry), "workspaceId") ===
+              expectedListedWorkspaceId,
           );
           listWorkspacesCheck =
             listWorkspaces.ok && containsWorkspace
@@ -641,6 +645,137 @@ export async function probePublicExternalClientFlow(
         }
 
         const operationWorkspaceId = input.resumeWorkspaceId ?? workspaceId;
+        const inspectArtifacts = async (jobId: string): Promise<void> => {
+          if (!operationWorkspaceId || !toolNames?.includes("list_artifacts")) {
+            return;
+          }
+          const listedArtifacts = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 130,
+              method: "tools/call",
+              params: {
+                name: "list_artifacts",
+                arguments: {
+                  workspaceId: operationWorkspaceId,
+                  jobId,
+                  limit: 100,
+                },
+              },
+            },
+            sessionId,
+          );
+          const listedResult = asRecord(
+            asRecord(parseMcpResponseJson(listedArtifacts.text))?.result,
+          );
+          const listedStructured = asRecord(listedResult?.structuredContent);
+          const listed = Array.isArray(listedStructured?.artifacts)
+            ? listedStructured.artifacts
+            : [];
+          artifactSha256s = listed
+            .map((artifact) => stringField(asRecord(artifact), "sha256"))
+            .filter((value): value is string => Boolean(value));
+          artifactPaths = listed
+            .map((artifact) => stringField(asRecord(artifact), "relativePath"))
+            .filter((value): value is string => Boolean(value));
+          artifactSizes = listed
+            .map((artifact) => asRecord(artifact)?.size)
+            .filter(
+              (value): value is number =>
+                typeof value === "number" && Number.isFinite(value),
+            );
+          artifactCount = listed.length;
+          artifactListCheck =
+            listedArtifacts.ok &&
+            listed.length > 0 &&
+            artifactSha256s.length === listed.length &&
+            artifactPaths.length === listed.length &&
+            artifactSizes.length === listed.length &&
+            artifactSha256s.every((value) => /^[0-9a-f]{64}$/.test(value))
+              ? okCheck(
+                  listedArtifacts.status,
+                  "MCP list_artifacts returned the produced artifacts and SHA-256 digests.",
+                )
+              : listedArtifacts.ok
+                ? {
+                    ok: false,
+                    status: listedArtifacts.status,
+                    detail:
+                      "MCP list_artifacts responded, but produced artifacts or SHA-256 digests were missing.",
+                  }
+                : failedCheck(
+                    listedArtifacts,
+                    "MCP list_artifacts did not succeed.",
+                  );
+
+          if (
+            !artifactListCheck.ok ||
+            !input.publishArtifactPath ||
+            !toolNames?.includes("publish_artifact")
+          ) {
+            return;
+          }
+          const published = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 131,
+              method: "tools/call",
+              params: {
+                name: "publish_artifact",
+                arguments: {
+                  workspaceId: operationWorkspaceId,
+                  path: input.publishArtifactPath,
+                  purpose: "inspection",
+                  ttlSeconds: 30,
+                },
+              },
+            },
+            sessionId,
+          );
+          const publishedResult = asRecord(
+            asRecord(parseMcpResponseJson(published.text))?.result,
+          );
+          const publishedStructured = asRecord(
+            publishedResult?.structuredContent,
+          );
+          publishedArtifactUrl = stringField(publishedStructured, "url");
+          publishedArtifactSha256 = stringField(publishedStructured, "sha256");
+          if (published.ok && publishedArtifactUrl) {
+            const artifactResponse = await fetch(publishedArtifactUrl);
+            const bytes = Buffer.from(await artifactResponse.arrayBuffer());
+            publishedArtifactBytes = bytes.length;
+            const downloadedHash = createHash("sha256")
+              .update(bytes)
+              .digest("hex");
+            artifactPublicationCheck =
+              artifactResponse.ok &&
+              downloadedHash === publishedArtifactSha256 &&
+              artifactResponse.headers
+                .get("cache-control")
+                ?.includes("no-store") === true &&
+              artifactResponse.headers.get("x-content-type-options") ===
+                "nosniff"
+                ? okCheck(
+                    artifactResponse.status,
+                    "MCP publish_artifact returned a retrievable, hash-matching, no-store artifact URL.",
+                  )
+                : {
+                    ok: false,
+                    status: artifactResponse.status,
+                    detail:
+                      "Published artifact bytes, digest, or security headers did not match.",
+                  };
+          } else {
+            artifactPublicationCheck = failedCheck(
+              published,
+              "MCP publish_artifact did not succeed.",
+            );
+          }
+        };
         const requestedJob = input.backgroundJob ?? input.captureProfile;
         const startToolName = input.captureProfile
           ? "start_capture"
@@ -788,143 +923,11 @@ export async function probePublicExternalClientFlow(
                   }
                 : failedCheck(startedJob, "MCP start_job did not succeed.");
 
-          if (
-            backgroundJobCheck.ok &&
-            jobId &&
-            artifactsExpected &&
-            toolNames.includes("list_artifacts")
-          ) {
-            const listedArtifacts = await postMcpJsonRpc(
-              info.publicMcpUrl,
-              accessToken,
-              {
-                jsonrpc: "2.0",
-                id: 130,
-                method: "tools/call",
-                params: {
-                  name: "list_artifacts",
-                  arguments: {
-                    workspaceId: operationWorkspaceId,
-                    jobId,
-                    limit: 100,
-                  },
-                },
-              },
-              sessionId,
-            );
-            const listedResult = asRecord(
-              asRecord(parseMcpResponseJson(listedArtifacts.text))?.result,
-            );
-            const listedStructured = asRecord(listedResult?.structuredContent);
-            const listed = Array.isArray(listedStructured?.artifacts)
-              ? listedStructured.artifacts
-              : [];
-            artifactSha256s = listed
-              .map((artifact) => stringField(asRecord(artifact), "sha256"))
-              .filter((value): value is string => Boolean(value));
-            artifactPaths = listed
-              .map((artifact) =>
-                stringField(asRecord(artifact), "relativePath"),
-              )
-              .filter((value): value is string => Boolean(value));
-            artifactSizes = listed
-              .map((artifact) => asRecord(artifact)?.size)
-              .filter(
-                (value): value is number =>
-                  typeof value === "number" && Number.isFinite(value),
-              );
-            artifactCount = listed.length;
-            artifactListCheck =
-              listedArtifacts.ok &&
-              listed.length > 0 &&
-              artifactSha256s.length === listed.length &&
-              artifactPaths.length === listed.length &&
-              artifactSizes.length === listed.length &&
-              artifactSha256s.every((value) => /^[0-9a-f]{64}$/.test(value))
-                ? okCheck(
-                    listedArtifacts.status,
-                    "MCP list_artifacts returned the produced artifacts and SHA-256 digests.",
-                  )
-                : listedArtifacts.ok
-                  ? {
-                      ok: false,
-                      status: listedArtifacts.status,
-                      detail:
-                        "MCP list_artifacts responded, but produced artifacts or SHA-256 digests were missing.",
-                    }
-                  : failedCheck(
-                      listedArtifacts,
-                      "MCP list_artifacts did not succeed.",
-                    );
+          if (backgroundJobCheck.ok && jobId && artifactsExpected) {
+            await inspectArtifacts(jobId);
           }
-
-          if (
-            artifactListCheck?.ok &&
-            input.publishArtifactPath &&
-            toolNames.includes("publish_artifact")
-          ) {
-            const published = await postMcpJsonRpc(
-              info.publicMcpUrl,
-              accessToken,
-              {
-                jsonrpc: "2.0",
-                id: 131,
-                method: "tools/call",
-                params: {
-                  name: "publish_artifact",
-                  arguments: {
-                    workspaceId: operationWorkspaceId,
-                    path: input.publishArtifactPath,
-                    purpose: "inspection",
-                    ttlSeconds: 30,
-                  },
-                },
-              },
-              sessionId,
-            );
-            const publishedResult = asRecord(
-              asRecord(parseMcpResponseJson(published.text))?.result,
-            );
-            const publishedStructured = asRecord(
-              publishedResult?.structuredContent,
-            );
-            publishedArtifactUrl = stringField(publishedStructured, "url");
-            publishedArtifactSha256 = stringField(
-              publishedStructured,
-              "sha256",
-            );
-            if (published.ok && publishedArtifactUrl) {
-              const artifactResponse = await fetch(publishedArtifactUrl);
-              const bytes = Buffer.from(await artifactResponse.arrayBuffer());
-              publishedArtifactBytes = bytes.length;
-              const downloadedHash = createHash("sha256")
-                .update(bytes)
-                .digest("hex");
-              artifactPublicationCheck =
-                artifactResponse.ok &&
-                downloadedHash === publishedArtifactSha256 &&
-                artifactResponse.headers
-                  .get("cache-control")
-                  ?.includes("no-store") === true &&
-                artifactResponse.headers.get("x-content-type-options") ===
-                  "nosniff"
-                  ? okCheck(
-                      artifactResponse.status,
-                      "MCP publish_artifact returned a retrievable, hash-matching, no-store artifact URL.",
-                    )
-                  : {
-                      ok: false,
-                      status: artifactResponse.status,
-                      detail:
-                        "Published artifact bytes, digest, or security headers did not match.",
-                    };
-            } else {
-              artifactPublicationCheck = failedCheck(
-                published,
-                "MCP publish_artifact did not succeed.",
-              );
-            }
-          }
+        } else if (input.inspectArtifactJobId) {
+          await inspectArtifacts(input.inspectArtifactJobId);
         }
 
         const readToolName =
@@ -1070,8 +1073,13 @@ function requestedExternalJob(input: {
 function requestedExternalArtifacts(input: {
   backgroundJob?: { artifactRoots?: string[] };
   captureProfile?: string;
+  inspectArtifactJobId?: string;
 }): boolean {
-  return Boolean(input.captureProfile || input.backgroundJob?.artifactRoots);
+  return Boolean(
+    input.captureProfile ||
+    input.backgroundJob?.artifactRoots ||
+    input.inspectArtifactJobId,
+  );
 }
 
 export function publicProbeRequestInitForBaseUrl(

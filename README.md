@@ -232,6 +232,10 @@ DevSpace gives ChatGPT tools to:
   arbitrary background shell string
 - declare narrow job artifact roots and list persistent, versioned BLEND, GLB,
   image, JSON, and text records with SHA-256 and current presence
+- start strict project-owned Godot capture profiles through the same Job
+  lifecycle and track screenshots/manifests
+- publish one registered artifact through a high-entropy, short-lived URL that
+  revalidates its path, signature, size, and SHA-256 on every access
 - use isolated Git worktrees for parallel coding sessions
 - follow project instructions from `AGENTS.md` and `CLAUDE.md`
 - discover local agent skills from your skill folders
@@ -279,6 +283,10 @@ devspace doctor
 - [Local Coach Bridge](https://github.com/Waishnav/devspace/blob/main/docs/local-coach-bridge.md)
 - [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
 - [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)
+- [Game Art Production V1](./docs/game-art-production.md)
+- [Runner Registry](./docs/runner-registry.md)
+- [Artifact Security](./docs/artifact-security.md)
+- [Capture Profiles](./docs/capture-profiles.md)
 - [Troubleshooting Gotchas](https://github.com/Waishnav/devspace/blob/main/docs/gotchas.md)
 
 ## Philosophy
