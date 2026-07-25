@@ -15,6 +15,15 @@ export interface DevspaceUserConfig {
   stateDir?: string;
   worktreeRoot?: string;
   agentDir?: string;
+  runners?: Record<
+    string,
+    {
+      executable?: string;
+      enabled?: boolean;
+      maxTimeoutSeconds?: number;
+      maxConcurrent?: number;
+    }
+  >;
   projectMemory?: {
     repositories?: Array<{
       root: string;

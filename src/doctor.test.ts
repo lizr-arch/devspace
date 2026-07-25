@@ -216,6 +216,17 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.backgroundJobStatus, "succeeded");
     assert.match(probe.backgroundJobOutput ?? "", /typecheck/);
     assert.match(probe.schemaFingerprint ?? "", /^[0-9a-f]{64}$/);
+    assert.deepEqual(probe.runnerNames, [
+      "npm",
+      "pnpm",
+      "yarn",
+      "bun",
+      "dotnet",
+      "cargo",
+      "pytest",
+      "godot",
+      "godot-mono",
+    ]);
     assert.equal(probe.workspaceRoot, process.cwd());
     assert.match(probe.workspaceId ?? "", /^ws_/);
 

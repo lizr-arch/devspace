@@ -291,6 +291,14 @@ writeFileSync(
     port: 8787,
     allowedRoots: [process.cwd()],
     publicBaseUrl: "https://devspace.example.com",
+    runners: {
+      npm: {
+        executable: process.execPath,
+        enabled: true,
+        maxTimeoutSeconds: 30,
+        maxConcurrent: 1,
+      },
+    },
   }),
 );
 writeFileSync(
@@ -310,6 +318,14 @@ assert.deepEqual(fileConfig.allowedHosts, [
   "::1",
   "devspace.example.com",
 ]);
+assert.deepEqual(fileConfig.runners, {
+  npm: {
+    executable: process.execPath,
+    enabled: true,
+    maxTimeoutSeconds: 30,
+    maxConcurrent: 1,
+  },
+});
 
 const projectMemoryRoot = mkdtempSync(
   join(tmpdir(), "devspace-project-memory-config-root-"),

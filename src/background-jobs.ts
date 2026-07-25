@@ -10,23 +10,27 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { access } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import type { Readable } from "node:stream";
+import {
+  DEFAULT_JOB_TIMEOUT_SECONDS,
+  MAX_CONCURRENT_JOBS,
+  MAX_JOB_OUTPUT_BYTES,
+  MAX_JOB_TIMEOUT_SECONDS,
+  RUNNER_NAMES,
+  RunnerRegistry,
+  validateRunnerArguments,
+  type RunnerName,
+} from "./runner-registry.js";
 
-export const JOB_RUNNERS = [
-  "npm",
-  "pnpm",
-  "yarn",
-  "bun",
-  "dotnet",
-  "cargo",
-  "pytest",
-  "godot",
-  "godot-mono",
-] as const;
-export type JobRunner = (typeof JOB_RUNNERS)[number];
+export const JOB_RUNNERS = RUNNER_NAMES;
+export type JobRunner = RunnerName;
+export {
+  DEFAULT_JOB_TIMEOUT_SECONDS,
+  MAX_CONCURRENT_JOBS,
+  MAX_JOB_OUTPUT_BYTES,
+  MAX_JOB_TIMEOUT_SECONDS,
+};
 
 export type JobStatus =
   | "running"
@@ -37,10 +41,6 @@ export type JobStatus =
   | "timed_out"
   | "interrupted";
 
-export const DEFAULT_JOB_TIMEOUT_SECONDS = 15 * 60;
-export const MAX_JOB_TIMEOUT_SECONDS = 60 * 60;
-export const MAX_JOB_OUTPUT_BYTES = 2 * 1024 * 1024;
-export const MAX_CONCURRENT_JOBS = 2;
 export const DEFAULT_POLL_BYTES = 64 * 1024;
 export const MAX_POLL_BYTES = 256 * 1024;
 
@@ -50,12 +50,14 @@ interface PersistedJob {
   workspaceRoot: string;
   workingDirectory: string;
   runner: JobRunner;
+  runnerVersion?: string;
   args: string[];
   label?: string;
   status: JobStatus;
   startedAt: string;
   endedAt?: string;
   timeoutSeconds: number;
+  maxOutputBytes: number;
   exitCode?: number;
   signal?: string;
   outputBytes: number;
@@ -91,9 +93,11 @@ export class BackgroundJobManager {
   private readonly jobs = new Map<string, LiveJob>();
   private readonly jobsDir: string;
   private initialized = false;
-  private readonly executableCache = new Map<JobRunner, string>();
 
-  constructor(private readonly stateDir: string) {
+  constructor(
+    private readonly stateDir: string,
+    private readonly runners = new RunnerRegistry(),
+  ) {
     this.jobsDir = join(stateDir, "jobs");
   }
 
@@ -104,22 +108,32 @@ export class BackgroundJobManager {
         `At most ${MAX_CONCURRENT_JOBS} background jobs may run concurrently.`,
       );
     }
-    validateJobArguments(input.runner, input.args);
-    const timeoutSeconds = input.timeoutSeconds ?? DEFAULT_JOB_TIMEOUT_SECONDS;
+    const definition = this.runners.getDefinition(input.runner);
+    if (this.runningCount(input.runner) >= definition.maxConcurrent) {
+      throw new Error(
+        `At most ${definition.maxConcurrent} ${input.runner} job(s) may run concurrently.`,
+      );
+    }
+    this.runners.validateArguments(input.runner, input.args, {
+      workspaceRoot: input.workspaceRoot,
+      workingDirectory: input.workingDirectory,
+    });
+    const timeoutSeconds =
+      input.timeoutSeconds ?? definition.defaultTimeoutSeconds;
     if (
       !Number.isInteger(timeoutSeconds) ||
       timeoutSeconds < 1 ||
-      timeoutSeconds > MAX_JOB_TIMEOUT_SECONDS
+      timeoutSeconds > definition.maxTimeoutSeconds
     ) {
       throw new Error(
-        `timeoutSeconds must be between 1 and ${MAX_JOB_TIMEOUT_SECONDS}.`,
+        `timeoutSeconds must be between 1 and ${definition.maxTimeoutSeconds} for ${input.runner}.`,
       );
     }
     if (input.label !== undefined && input.label.length > 200) {
       throw new Error("Job label must be at most 200 characters.");
     }
 
-    const executable = await this.resolveExecutable(input.runner);
+    const resolvedRunner = await this.runners.resolve(input.runner);
     const jobId = `job_${randomUUID()}`;
     const job: LiveJob = {
       jobId,
@@ -127,11 +141,13 @@ export class BackgroundJobManager {
       workspaceRoot: input.workspaceRoot,
       workingDirectory: input.workingDirectory,
       runner: input.runner,
+      runnerVersion: resolvedRunner.version,
       args: [...input.args],
       label: input.label,
       status: "running",
       startedAt: new Date().toISOString(),
       timeoutSeconds,
+      maxOutputBytes: definition.maxOutputBytes,
       outputBytes: 0,
       outputTruncated: false,
     };
@@ -141,7 +157,7 @@ export class BackgroundJobManager {
     this.persist(job);
 
     try {
-      const child = spawn(executable, input.args, {
+      const child = spawn(resolvedRunner.executable, input.args, {
         cwd: input.workingDirectory,
         env: process.env,
         detached: process.platform !== "win32",
@@ -277,15 +293,18 @@ export class BackgroundJobManager {
     return job;
   }
 
-  private runningCount(): number {
+  private runningCount(runner?: JobRunner): number {
     return Array.from(this.jobs.values()).filter(
-      (job) => job.status === "running" || job.status === "cancelling",
+      (job) =>
+        (!runner || job.runner === runner) &&
+        (job.status === "running" || job.status === "cancelling"),
     ).length;
   }
 
   private appendOutput(job: LiveJob, chunk: Buffer | string): void {
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    const remaining = MAX_JOB_OUTPUT_BYTES - job.outputBytes;
+    const remaining =
+      (job.maxOutputBytes ?? MAX_JOB_OUTPUT_BYTES) - job.outputBytes;
     if (remaining <= 0) {
       job.outputTruncated = true;
       return;
@@ -353,25 +372,6 @@ export class BackgroundJobManager {
     renameSync(temporary, target);
   }
 
-  private async resolveExecutable(runner: JobRunner): Promise<string> {
-    const cached = this.executableCache.get(runner);
-    if (cached) return cached;
-
-    for (const candidate of executableCandidates(runner)) {
-      try {
-        await access(candidate);
-        this.executableCache.set(runner, candidate);
-        return candidate;
-      } catch {
-        // Try the next fixed candidate.
-      }
-    }
-
-    const discovered = await discoverFromLoginShell(runner);
-    this.executableCache.set(runner, discovered);
-    return discovered;
-  }
-
   private metadataPath(jobId: string): string {
     return join(this.jobsDir, `${jobId}.json`);
   }
@@ -382,138 +382,7 @@ export class BackgroundJobManager {
 }
 
 export function validateJobArguments(runner: JobRunner, args: string[]): void {
-  if (!Array.isArray(args) || args.length === 0 || args.length > 128) {
-    throw new Error("Job args must contain between 1 and 128 arguments.");
-  }
-  for (const argument of args) {
-    if (
-      typeof argument !== "string" ||
-      argument.length === 0 ||
-      argument.length > 4096 ||
-      argument.includes("\0") ||
-      argument.includes("\n") ||
-      argument.includes("\r")
-    ) {
-      throw new Error("Job arguments must be non-empty, single-line strings.");
-    }
-    rejectExternalPathArgument(argument);
-  }
-
-  const action = args[0];
-  const allowedActions: Partial<Record<JobRunner, string[]>> = {
-    npm: ["test", "run"],
-    pnpm: ["test", "run", "build", "check", "lint", "typecheck"],
-    yarn: ["test", "run", "build", "check", "lint", "typecheck"],
-    bun: ["test", "run", "build"],
-    dotnet: ["build", "test", "format"],
-    cargo: ["build", "test", "check", "clippy", "fmt"],
-  };
-  const allowed = allowedActions[runner];
-  if (allowed && !allowed.includes(action)) {
-    throw new Error(
-      `${runner} jobs only allow these actions: ${allowed.join(", ")}.`,
-    );
-  }
-  if (runner === "npm" && action === "run" && !args[1]) {
-    throw new Error("npm run jobs require a script name.");
-  }
-  if (
-    (runner === "godot" || runner === "godot-mono") &&
-    !args.includes("--headless")
-  ) {
-    throw new Error(`${runner} jobs must include --headless.`);
-  }
-  if (
-    (runner === "godot" || runner === "godot-mono") &&
-    args.includes("--editor")
-  ) {
-    throw new Error(`${runner} background jobs cannot open the editor.`);
-  }
-}
-
-function rejectExternalPathArgument(argument: string): void {
-  const candidate = argument.includes("=")
-    ? argument.slice(argument.indexOf("=") + 1)
-    : argument;
-  if (
-    isAbsolute(candidate) ||
-    candidate.startsWith("~") ||
-    /^[A-Za-z]:[\\/]/.test(candidate) ||
-    candidate.split(/[\\/]/).includes("..")
-  ) {
-    throw new Error(
-      `Job arguments may not reference absolute or parent paths: ${argument}`,
-    );
-  }
-}
-
-function executableCandidates(runner: JobRunner): string[] {
-  const home = homedir();
-  const common: Partial<Record<JobRunner, string[]>> = {
-    npm: [
-      join(home, ".hermes", "node", "bin", "npm"),
-      "/opt/homebrew/bin/npm",
-      "/usr/local/bin/npm",
-    ],
-    pnpm: [
-      join(home, ".hermes", "node", "bin", "pnpm"),
-      "/opt/homebrew/bin/pnpm",
-    ],
-    yarn: [
-      join(home, ".hermes", "node", "bin", "yarn"),
-      "/opt/homebrew/bin/yarn",
-    ],
-    bun: [join(home, ".bun", "bin", "bun"), "/opt/homebrew/bin/bun"],
-    dotnet: ["/usr/local/share/dotnet/dotnet", "/opt/homebrew/bin/dotnet"],
-    cargo: [join(home, ".cargo", "bin", "cargo"), "/opt/homebrew/bin/cargo"],
-    pytest: ["/opt/homebrew/bin/pytest", "/usr/local/bin/pytest"],
-    godot: [
-      "/Applications/Godot.app/Contents/MacOS/Godot",
-      "/opt/homebrew/bin/godot",
-    ],
-    "godot-mono": [
-      "/Applications/Godot_mono.app/Contents/MacOS/Godot",
-      "/Applications/Godot Mono.app/Contents/MacOS/Godot",
-      "/opt/homebrew/bin/godot-mono",
-    ],
-  };
-  return common[runner] ?? [];
-}
-
-async function discoverFromLoginShell(runner: JobRunner): Promise<string> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn("/bin/zsh", ["-lic", `command -v -- ${runner}`], {
-      env: process.env,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.once("error", rejectPromise);
-    child.once("exit", (code) => {
-      const candidate = stdout.trim().split(/\r?\n/).at(-1) ?? "";
-      if (
-        code !== 0 ||
-        !candidate ||
-        !isAbsolute(candidate) ||
-        basename(candidate).length === 0
-      ) {
-        rejectPromise(
-          new Error(
-            `Unable to locate ${runner}. Install it or make it available in the login shell PATH.${stderr.trim() ? ` ${stderr.trim()}` : ""}`,
-          ),
-        );
-        return;
-      }
-      resolvePromise(resolve(candidate));
-    });
-  });
+  validateRunnerArguments(runner, args);
 }
 
 function publicSnapshot(job: LiveJob): PersistedJob {
@@ -523,12 +392,14 @@ function publicSnapshot(job: LiveJob): PersistedJob {
     workspaceRoot: job.workspaceRoot,
     workingDirectory: job.workingDirectory,
     runner: job.runner,
+    runnerVersion: job.runnerVersion,
     args: [...job.args],
     label: job.label,
     status: job.status,
     startedAt: job.startedAt,
     endedAt: job.endedAt,
     timeoutSeconds: job.timeoutSeconds,
+    maxOutputBytes: job.maxOutputBytes ?? MAX_JOB_OUTPUT_BYTES,
     exitCode: job.exitCode,
     signal: job.signal,
     outputBytes: job.outputBytes,

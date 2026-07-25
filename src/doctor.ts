@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { JobRunner } from "./background-jobs.js";
+import { JOB_RUNNERS, type JobRunner } from "./background-jobs.js";
 import type { ServerConfig } from "./config.js";
 
 export const CHATGPT_REDIRECT_URI =
@@ -59,6 +59,7 @@ export interface PublicExternalClientProbe {
   resumeWorkspace: DoctorProbeCheck;
   backgroundJob?: DoctorProbeCheck;
   toolNames?: string[];
+  runnerNames?: string[];
   schemaFingerprint?: string;
   workspaceId?: string;
   workspaceRoot?: string;
@@ -217,6 +218,7 @@ export async function probePublicExternalClientFlow(
   };
   let backgroundJobCheck: DoctorProbeCheck | undefined;
   let toolNames: string[] | undefined;
+  let runnerNames: string[] | undefined;
   let schemaFingerprint: string | undefined;
   let workspaceId: string | undefined;
   let workspaceRoot: string | undefined;
@@ -430,10 +432,31 @@ export async function probePublicExternalClientFlow(
         const reportedTools = Array.isArray(devspaceInfoStructured?.tools)
           ? devspaceInfoStructured.tools
           : [];
+        const runnerRegistry = asRecord(devspaceInfoStructured?.runnerRegistry);
+        const runnerEntries = Array.isArray(runnerRegistry?.runners)
+          ? runnerRegistry.runners
+          : [];
+        runnerNames = runnerEntries
+          .map((runner) => stringField(asRecord(runner), "name"))
+          .filter((name): name is string => Boolean(name));
+        const runnerRegistryValid =
+          runnerNames.length === JOB_RUNNERS.length &&
+          runnerEntries.every((runner) => {
+            const record = asRecord(runner);
+            return (
+              typeof record?.enabled === "boolean" &&
+              typeof record?.available === "boolean" &&
+              typeof record?.executableExists === "boolean" &&
+              typeof record?.maxTimeoutSeconds === "number" &&
+              typeof record?.maxConcurrent === "number" &&
+              typeof record?.containment === "string"
+            );
+          });
         devspaceInfoCheck =
           devspaceInfo.ok &&
           schemaFingerprint &&
-          reportedTools.length === toolNames.length
+          reportedTools.length === toolNames.length &&
+          runnerRegistryValid
             ? okCheck(
                 devspaceInfo.status,
                 "MCP devspace_info returned the running tool schema fingerprint.",
@@ -443,7 +466,7 @@ export async function probePublicExternalClientFlow(
                   ok: false,
                   status: devspaceInfo.status,
                   detail:
-                    "MCP devspace_info responded, but its fingerprint or tool catalog was incomplete.",
+                    "MCP devspace_info responded, but its fingerprint, tool catalog, or runner registry was incomplete.",
                 }
               : failedCheck(devspaceInfo, "MCP devspace_info did not succeed.");
       }
@@ -787,6 +810,7 @@ export async function probePublicExternalClientFlow(
     resumeWorkspace: resumeWorkspaceCheck,
     backgroundJob: backgroundJobCheck,
     toolNames,
+    runnerNames,
     schemaFingerprint,
     workspaceId,
     workspaceRoot,

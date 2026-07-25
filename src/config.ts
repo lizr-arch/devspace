@@ -4,6 +4,7 @@ import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { loadDevspaceFiles } from "./user-config.js";
+import type { RunnerRegistryConfig } from "./runner-registry.js";
 
 export type ToolNamingMode = "legacy" | "short";
 export type WidgetMode = "off" | "changes" | "full";
@@ -39,6 +40,7 @@ export interface ServerConfig {
   agentDir: string;
   logging: LoggingConfig;
   projectMemory: ProjectMemoryConfig;
+  runners: RunnerRegistryConfig;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -423,6 +425,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       files.config.projectMemory,
       allowedRoots,
     ),
+    runners: files.config.runners ?? {},
   };
 }
 

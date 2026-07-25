@@ -123,6 +123,29 @@ DEVSPACE_SKILL_PATHS="$HOME/.codex/skills,$HOME/.claude/skills" \
 npx @waishnav/devspace serve
 ```
 
+## Runner Registry
+
+Background runners are code-owned policies. The private `config.json` may
+enable/disable a built-in runner, select its absolute executable, or lower its
+timeout and concurrency caps:
+
+```json
+{
+  "runners": {
+    "godot-mono": {
+      "executable": "/Applications/Godot_mono.app/Contents/MacOS/Godot",
+      "enabled": true,
+      "maxTimeoutSeconds": 1800,
+      "maxConcurrent": 1
+    }
+  }
+}
+```
+
+The MCP client cannot provide executable paths. Invalid override entries are
+reported by `devspace_info` without preventing the service from starting. See
+[Runner Registry](runner-registry.md) for the policy and containment contract.
+
 ## Project Memory SHADOW Preflight
 
 Project Memory integration is opt-in and operator configured in

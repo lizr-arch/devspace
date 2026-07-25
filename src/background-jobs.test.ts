@@ -6,6 +6,7 @@ import {
   BackgroundJobManager,
   validateJobArguments,
 } from "./background-jobs.js";
+import { RunnerRegistry } from "./runner-registry.js";
 
 const root = mkdtempSync(join(tmpdir(), "devspace-background-jobs-"));
 const stateDir = join(root, "state");
@@ -61,6 +62,35 @@ try {
   assert.equal(cancelling.status, "cancelling");
   const cancelled = await waitForTerminal(manager, long.jobId);
   assert.equal(cancelled.status, "cancelled");
+  assert.equal(manager.cancel(long.jobId).status, "cancelled");
+
+  const singleRunnerManager = new BackgroundJobManager(
+    join(root, "single-runner-state"),
+    new RunnerRegistry({ npm: { maxConcurrent: 1, maxTimeoutSeconds: 30 } }),
+  );
+  const singleLong = await singleRunnerManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "wait"],
+    timeoutSeconds: 30,
+  });
+  await assert.rejects(
+    () =>
+      singleRunnerManager.start({
+        workspaceId: "ws_test",
+        workspaceRoot,
+        workingDirectory: workspaceRoot,
+        runner: "npm",
+        args: ["run", "verify"],
+        timeoutSeconds: 30,
+      }),
+    /At most 1 npm job/,
+  );
+  singleRunnerManager.cancel(singleLong.jobId);
+  await waitForTerminal(singleRunnerManager, singleLong.jobId);
+  singleRunnerManager.close();
 
   const restoredManager = new BackgroundJobManager(stateDir);
   const restored = restoredManager.poll(completed.jobId);

@@ -41,6 +41,7 @@ import {
   MAX_POLL_BYTES,
   type JobSnapshot,
 } from "./background-jobs.js";
+import { RunnerRegistry, type RunnerInspection } from "./runner-registry.js";
 import {
   editFileTool,
   findFilesTool,
@@ -71,7 +72,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "web-gpt-v2.2026-07-24";
+const TOOL_SCHEMA_REVISION = "game-art-v1.runners-a.2026-07-25";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -408,12 +409,14 @@ const jobSnapshotOutputSchema = z.object({
   workspaceRoot: z.string(),
   workingDirectory: z.string(),
   runner: z.enum(JOB_RUNNERS),
+  runnerVersion: z.string().optional(),
   args: z.array(z.string()),
   label: z.string().optional(),
   status: jobStatusSchema,
   startedAt: z.string(),
   endedAt: z.string().optional(),
   timeoutSeconds: z.number().int(),
+  maxOutputBytes: z.number().int(),
   exitCode: z.number().int().optional(),
   signal: z.string().optional(),
   outputBytes: z.number().int(),
@@ -423,6 +426,21 @@ const jobSnapshotOutputSchema = z.object({
   outputOffsetBytes: z.number().int().optional(),
   nextOutputOffsetBytes: z.number().int().optional(),
 });
+
+function formatRunnerSummary(runners: RunnerInspection[]): string {
+  return runners
+    .map((runner) => {
+      const state = runner.available
+        ? runner.version
+          ? `available (${runner.version})`
+          : "available"
+        : runner.enabled
+          ? "unavailable"
+          : "disabled";
+      return `${runner.name}=${state}`;
+    })
+    .join(", ");
+}
 
 function projectMemoryReceiptInputSchema(): z.ZodOptional<z.ZodString> {
   return z
@@ -794,6 +812,7 @@ function createMcpServer(
   workspaces: WorkspaceRegistry,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   jobs: BackgroundJobManager,
+  runners: RunnerRegistry,
   runtime: ServiceRuntime,
 ): McpServer {
   const toolNames = toolNamesFor(config);
@@ -870,6 +889,35 @@ function createMcpServer(
           maxTimeoutSeconds: z.number().int(),
           maxOutputBytes: z.number().int(),
         }),
+        runnerRegistry: z.object({
+          runners: z.array(
+            z.object({
+              name: z.enum(JOB_RUNNERS),
+              enabled: z.boolean(),
+              available: z.boolean(),
+              executableExists: z.boolean(),
+              executableConfigured: z.boolean(),
+              supported: z.boolean(),
+              version: z.string().optional(),
+              diagnostic: z.string().optional(),
+              supportedPlatforms: z.array(z.string()),
+              argumentPolicy: z.string(),
+              workingDirectoryPolicy: z.literal("workspace"),
+              defaultTimeoutSeconds: z.number().int(),
+              maxTimeoutSeconds: z.number().int(),
+              maxConcurrent: z.number().int(),
+              maxOutputBytes: z.number().int(),
+              networkPolicy: z.enum([
+                "inherited",
+                "offline_requested",
+                "disabled",
+              ]),
+              containment: z.enum(["strict", "best_effort", "trusted_local"]),
+              artifactPolicy: z.literal("declared_workspace_roots"),
+            }),
+          ),
+          diagnostics: z.array(z.string()),
+        }),
       }),
       _meta: {},
       annotations: {
@@ -879,6 +927,7 @@ function createMcpServer(
       },
     },
     async () => {
+      const runnerRegistry = await runners.inspectAll();
       const uptimeSeconds = Math.max(
         0,
         (Date.now() - Date.parse(runtime.startedAt)) / 1000,
@@ -906,6 +955,7 @@ function createMcpServer(
           maxTimeoutSeconds: MAX_JOB_TIMEOUT_SECONDS,
           maxOutputBytes: MAX_JOB_OUTPUT_BYTES,
         },
+        runnerRegistry,
       };
       const result = [
         `DevSpace ${PACKAGE_VERSION}`,
@@ -914,7 +964,13 @@ function createMcpServer(
         `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
         `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
         `Allowed roots: ${config.allowedRoots.join(", ")}`,
-      ].join("\n");
+        `Runners: ${formatRunnerSummary(runnerRegistry.runners)}`,
+        runnerRegistry.diagnostics.length > 0
+          ? `Runner diagnostics: ${runnerRegistry.diagnostics.join(" | ")}`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n");
       return {
         content: [textBlock(result)],
         _meta: { tool: "devspace_info" },
@@ -2238,6 +2294,7 @@ export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
 ): RunningServer {
+  const runners = new RunnerRegistry(config.runners);
   const runtime = createServiceRuntime(config);
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
@@ -2272,7 +2329,7 @@ export function createServer(
     projectMemory,
   );
   const reviewCheckpoints = createReviewCheckpointManager();
-  const jobs = new BackgroundJobManager(config.stateDir);
+  const jobs = new BackgroundJobManager(config.stateDir, runners);
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", 1);
@@ -2416,6 +2473,7 @@ export function createServer(
           workspaces,
           reviewCheckpoints,
           jobs,
+          runners,
           runtime,
         );
         await server.connect(transport);
