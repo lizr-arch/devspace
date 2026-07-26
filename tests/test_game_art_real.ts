@@ -129,6 +129,10 @@ try {
     "capture_game_frame",
     "read_game_logs",
     "stop_game_session",
+    "inspect_glb",
+    "inspect_blend",
+    "inspect_audio",
+    "render_model_preview",
   ]);
   assert.equal(probe.runnerNames?.includes("blender"), true);
   assert.equal(probe.runnerNames?.includes("godot-mono"), true);

@@ -79,3 +79,15 @@ snapshots remain in private DevSpace state rather than the project.
 Each workspace can own one active Session and the service can own two. A
 service shutdown marks live Sessions interrupted. Restart cleanup signals only
 a persisted process group whose random identity token can still be verified.
+
+## M3: model and audio inspection
+
+`inspect_glb` parses only the GLB v2 header and JSON chunk in TypeScript.
+`inspect_blend` runs a fixed offline Blender script with auto-execution
+disabled. `inspect_audio` uses `music-metadata` plus fixed ffmpeg float-PCM
+decoding. `render_model_preview` accepts only four named views and dimensions
+up to 2048, and writes PNG evidence to private DevSpace state.
+
+Structured lists are capped at 500 items and structured results at 2 MiB.
+Inspectors hash their source and the real fixtures verify the source remains
+byte-identical before and after inspection or rendering.
