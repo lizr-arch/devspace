@@ -108,6 +108,10 @@ import {
   WorkspaceRegistry,
   type WorkspaceContext,
 } from "./workspaces.js";
+import {
+  McpSessionRegistry,
+  type McpSessionSnapshot,
+} from "./mcp-session-registry.js";
 
 type Transport = StreamableHTTPServerTransport;
 const PACKAGE_VERSION = (
@@ -154,6 +158,7 @@ interface ServiceRuntime {
   tools: string[];
   schemaFingerprint: string;
   requiredCapabilities: Record<string, ToolCapability>;
+  mcpSessionStats: () => McpSessionSnapshot;
   workspaceApp?: {
     resourceUri: string;
     buildFingerprint: string;
@@ -425,6 +430,7 @@ function exposedToolNames(
 function createServiceRuntime(
   config: ServerConfig,
   workspaceApp: WorkspaceAppBuild | undefined,
+  mcpSessionStats: () => McpSessionSnapshot,
 ): ServiceRuntime {
   const tools = exposedToolNames(config, toolNamesFor(config));
   const requiredCapabilities = Object.fromEntries(
@@ -457,6 +463,7 @@ function createServiceRuntime(
     tools,
     schemaFingerprint,
     requiredCapabilities,
+    mcpSessionStats,
     workspaceApp: workspaceApp
       ? {
           resourceUri: workspaceApp.resourceUri,
@@ -464,6 +471,22 @@ function createServiceRuntime(
           manifestSha256: workspaceApp.manifestSha256,
         }
       : undefined,
+  };
+}
+
+function processMemorySnapshot(): {
+  rssMiB: number;
+  heapUsedMiB: number;
+  heapTotalMiB: number;
+  externalMiB: number;
+} {
+  const memory = process.memoryUsage();
+  const toMiB = (bytes: number): number => Math.round(bytes / (1024 * 1024));
+  return {
+    rssMiB: toMiB(memory.rss),
+    heapUsedMiB: toMiB(memory.heapUsed),
+    heapTotalMiB: toMiB(memory.heapTotal),
+    externalMiB: toMiB(memory.external),
   };
 }
 
@@ -1297,6 +1320,22 @@ function createMcpServer(
           .optional(),
         allowedRoots: z.array(z.string()),
         worktreeRoot: z.string(),
+        mcpSessions: z.object({
+          active: z.number().int().nonnegative(),
+          created: z.number().int().nonnegative(),
+          closed: z.number().int().nonnegative(),
+          expired: z.number().int().nonnegative(),
+          capacityEvictions: z.number().int().nonnegative(),
+          closeErrors: z.number().int().nonnegative(),
+          idleTtlSeconds: z.number().positive(),
+          maxSessions: z.number().int().positive(),
+        }),
+        memory: z.object({
+          rssMiB: z.number().int().nonnegative(),
+          heapUsedMiB: z.number().int().nonnegative(),
+          heapTotalMiB: z.number().int().nonnegative(),
+          externalMiB: z.number().int().nonnegative(),
+        }),
         jobs: z.object({
           runners: z.array(z.enum(JOB_RUNNERS)),
           maxConcurrent: z.number().int(),
@@ -1351,6 +1390,8 @@ function createMcpServer(
     },
     async () => {
       const runnerRegistry = await runners.inspectAll();
+      const mcpSessions = runtime.mcpSessionStats();
+      const memory = processMemorySnapshot();
       const uptimeSeconds = Math.max(
         0,
         (Date.now() - Date.parse(runtime.startedAt)) / 1000,
@@ -1374,6 +1415,8 @@ function createMcpServer(
         workspaceApp: runtime.workspaceApp,
         allowedRoots: config.allowedRoots,
         worktreeRoot: config.worktreeRoot,
+        mcpSessions,
+        memory,
         jobs: {
           runners: [...JOB_RUNNERS],
           maxConcurrent: MAX_CONCURRENT_JOBS,
@@ -1408,6 +1451,8 @@ function createMcpServer(
         `Schema: ${TOOL_SCHEMA_REVISION} (${runtime.schemaFingerprint})`,
         `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
         `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
+        `MCP sessions: ${mcpSessions.active}/${mcpSessions.maxSessions} active; ${mcpSessions.expired} expired; ${mcpSessions.capacityEvictions} capacity evictions`,
+        `Memory: RSS ${memory.rssMiB} MiB; heap ${memory.heapUsedMiB}/${memory.heapTotalMiB} MiB`,
         runtime.workspaceApp
           ? `Workspace App: ${runtime.workspaceApp.resourceUri} (${runtime.workspaceApp.buildFingerprint})`
           : "Workspace App: disabled",
@@ -4228,8 +4273,25 @@ export function createServer(
     config.widgets === "off"
       ? undefined
       : resolveWorkspaceAppBuild(options.workspaceAppBuild);
+  const mcpSessions = new McpSessionRegistry<Transport>({
+    onClosed: ({ sessionId, reason }) => {
+      logEvent(config.logging, "info", "mcp_session_closed", {
+        sessionIdPrefix: sessionIdPrefix(sessionId),
+        reason,
+      });
+    },
+    onCloseError: ({ sessionId, reason, error }) => {
+      logEvent(config.logging, "warn", "mcp_session_close_error", {
+        sessionIdPrefix: sessionIdPrefix(sessionId),
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
   const runners = new RunnerRegistry(config.runners);
-  const runtime = createServiceRuntime(config, workspaceApp);
+  const runtime = createServiceRuntime(config, workspaceApp, () =>
+    mcpSessions.snapshot(),
+  );
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
@@ -4237,7 +4299,6 @@ export function createServer(
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
   });
-  const transports = new Map<string, Transport>();
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(
@@ -4349,6 +4410,8 @@ export function createServer(
       schemaRevision: TOOL_SCHEMA_REVISION,
       schemaFingerprint: runtime.schemaFingerprint,
       tools: runtime.tools.length,
+      mcpSessions: mcpSessions.snapshot(),
+      memory: processMemorySnapshot(),
     });
   });
 
@@ -4392,20 +4455,24 @@ export function createServer(
       isInitialize: initializeRequest,
     });
 
+    let transport: Transport | undefined;
+    let acquiredSessionId: string | undefined;
+    let initializingTransport = false;
     try {
-      let transport: Transport | undefined;
-
       if (sessionId) {
-        transport = transports.get(sessionId);
+        transport = mcpSessions.acquire(sessionId);
         if (!transport) {
           sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
           return;
         }
+        acquiredSessionId = sessionId;
       } else if (initializeRequest) {
-        transport = new StreamableHTTPServerTransport({
+        initializingTransport = true;
+        const createdTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
-            if (transport) transports.set(newSessionId, transport);
+            mcpSessions.register(newSessionId, createdTransport, 1);
+            acquiredSessionId = newSessionId;
             logEvent(config.logging, "info", "mcp_session_created", {
               requestId,
               sessionIdPrefix: sessionIdPrefix(newSessionId),
@@ -4413,14 +4480,15 @@ export function createServer(
             });
           },
         });
+        transport = createdTransport;
 
-        transport.onclose = () => {
-          const closedSessionId = transport?.sessionId;
+        createdTransport.onclose = () => {
+          const closedSessionId = createdTransport.sessionId;
           if (closedSessionId) {
-            transports.delete(closedSessionId);
-            logEvent(config.logging, "info", "mcp_session_closed", {
-              sessionIdPrefix: sessionIdPrefix(closedSessionId),
-            });
+            mcpSessions.handleTransportClosed(
+              closedSessionId,
+              createdTransport,
+            );
           }
         };
 
@@ -4437,7 +4505,7 @@ export function createServer(
           runtime,
           workspaceApp,
         );
-        await server.connect(transport);
+        await server.connect(createdTransport);
       } else {
         sendJsonRpcError(res, 400, -32000, "No valid MCP session");
         return;
@@ -4452,6 +4520,19 @@ export function createServer(
       if (!res.headersSent) {
         sendJsonRpcError(res, 500, -32603, "Internal server error");
       }
+    } finally {
+      if (acquiredSessionId) {
+        mcpSessions.release(acquiredSessionId);
+      } else if (initializingTransport && transport) {
+        try {
+          await transport.close();
+        } catch (error) {
+          logEvent(config.logging, "warn", "mcp_transport_close_error", {
+            requestId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
     }
   });
 
@@ -4462,6 +4543,7 @@ export function createServer(
     close: () => {
       if (closed) return;
       closed = true;
+      mcpSessions.close();
       jobs.close();
       games.close();
       publisher.close();
