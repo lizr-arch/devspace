@@ -211,8 +211,8 @@ https://mcp-mac.example.com/mcp
 
 Use one hostname and one tunnel per independently operated DevSpace machine.
 See the [Cloudflare Named Tunnel Guide](./docs/cloudflare-named-tunnel.md) for
-token handling, macOS startup, migration, multi-machine updates, network
-diagnostics, and full OAuth/MCP verification.
+token handling, macOS and Windows startup, migration, multi-machine updates,
+network diagnostics, and full OAuth/MCP verification.
 
 For ngrok, point the upstream at the IPv4 loopback address explicitly:
 
