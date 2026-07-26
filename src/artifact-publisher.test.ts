@@ -81,6 +81,25 @@ try {
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), png);
 
+  writeFileSync(join(outputRoot, "fake.png"), "not a png");
+  await assert.rejects(
+    publisher.preview({
+      workspaceId,
+      workspaceRoot,
+      path: "artifacts/publish/fake.png",
+    }),
+    /ASSET_(?:SIGNATURE_MISMATCH|FORMAT_REJECTED)/,
+  );
+  await assert.rejects(
+    publisher.preview({
+      workspaceId,
+      workspaceRoot,
+      artifactId: record.artifactId,
+      path: "artifacts/publish/preview.png",
+    }),
+    /ASSET_INPUT_INVALID/,
+  );
+
   const guessed = await fetch(
     `http://127.0.0.1:${port}/artifacts/${"A".repeat(43)}`,
   );

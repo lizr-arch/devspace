@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { createReadStream, openSync, closeSync, readSync, statSync } from "node:fs";
+import {
+  createReadStream,
+  openSync,
+  closeSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { extname } from "node:path";
 import {
   ArtifactLedger,
@@ -95,11 +101,11 @@ function inspectFormat(
 ): { format: string; mimeType: string; metadata: Record<string, unknown> } {
   switch (extname(path).toLowerCase()) {
     case ".png":
-      assertBytes(data, "PNG", 24);
+      assertBytes(data, "PNG", 26);
       if (
-        !data.subarray(0, 8).equals(
-          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        )
+        !data
+          .subarray(0, 8)
+          .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
       )
         rejected("PNG");
       return {
@@ -142,7 +148,8 @@ function inspectFormat(
       };
     case ".blend":
       assertBytes(data, "BLEND", 12);
-      if (data.subarray(0, 7).toString("ascii") !== "BLENDER") rejected("BLEND");
+      if (data.subarray(0, 7).toString("ascii") !== "BLENDER")
+        rejected("BLEND");
       return {
         format: "BLEND",
         mimeType: "application/x-blender",

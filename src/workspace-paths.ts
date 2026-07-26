@@ -5,7 +5,7 @@ import {
   existsSync,
   type Stats,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isPathInsideRoot } from "./roots.js";
 
 export type WorkspaceObjectKind = "file" | "directory";
@@ -47,7 +47,9 @@ export function resolveWorkspacePath(
   const ancestor = nearestExistingPath(absolutePath);
   const canonicalAncestor = realpathSync(ancestor);
   if (!isPathInsideRoot(canonicalAncestor, canonicalWorkspaceRoot)) {
-    throw new Error(`WORKSPACE_ESCAPE: Path resolves outside workspace: ${value}`);
+    throw new Error(
+      `WORKSPACE_ESCAPE: Path resolves outside workspace: ${value}`,
+    );
   }
   assertNoSymlinkComponents(
     canonicalWorkspaceRoot,
@@ -68,11 +70,15 @@ export function resolveExistingWorkspacePath(
   }
   const info = lstatSync(resolved.absolutePath);
   if (info.isSymbolicLink()) {
-    throw new Error(`WORKSPACE_ESCAPE: Symbolic links are not allowed: ${value}`);
+    throw new Error(
+      `WORKSPACE_ESCAPE: Symbolic links are not allowed: ${value}`,
+    );
   }
   const canonicalPath = realpathSync(resolved.absolutePath);
   if (!isPathInsideRoot(canonicalPath, resolved.canonicalWorkspaceRoot)) {
-    throw new Error(`WORKSPACE_ESCAPE: Path resolves outside workspace: ${value}`);
+    throw new Error(
+      `WORKSPACE_ESCAPE: Path resolves outside workspace: ${value}`,
+    );
   }
   const stats = statSync(canonicalPath);
   if (kind === "file" && !stats.isFile()) {
@@ -82,7 +88,9 @@ export function resolveExistingWorkspacePath(
     throw new Error(`PATH_TYPE_REJECTED: Expected a directory: ${value}`);
   }
   if (!stats.isFile() && !stats.isDirectory()) {
-    throw new Error(`PATH_TYPE_REJECTED: Unsupported filesystem object: ${value}`);
+    throw new Error(
+      `PATH_TYPE_REJECTED: Unsupported filesystem object: ${value}`,
+    );
   }
   return { ...resolved, absolutePath: canonicalPath, stats };
 }
@@ -91,9 +99,7 @@ export function workspaceRelativeFromAbsolute(
   workspaceRoot: string,
   absolutePath: string,
 ): string {
-  const candidate = relative(workspaceRoot, absolutePath)
-    .split("\\")
-    .join("/");
+  const candidate = relative(workspaceRoot, absolutePath).split("\\").join("/");
   return normalizeWorkspaceRelativePath(candidate);
 }
 
@@ -116,9 +122,10 @@ function assertNoSymlinkComponents(
   if (
     relationship === "" ||
     relationship === "." ||
-    relationship.startsWith("..")
+    relationship === ".." ||
+    relationship.startsWith(`..${sep}`)
   ) {
-    if (relationship.startsWith("..")) {
+    if (relationship === ".." || relationship.startsWith(`..${sep}`)) {
       throw new Error("WORKSPACE_ESCAPE: Path leaves workspace.");
     }
     return;

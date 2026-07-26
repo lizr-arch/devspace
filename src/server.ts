@@ -345,12 +345,7 @@ function exposedToolNames(
     tools.push(toolNames.grep, toolNames.glob, toolNames.ls);
   }
   if (!config.readOnly) {
-    tools.push(
-      "start_job",
-      "start_capture",
-      "poll_job",
-      "cancel_job",
-    );
+    tools.push("start_job", "start_capture", "poll_job", "cancel_job");
   }
   return tools;
 }
@@ -408,9 +403,12 @@ function requiredCapabilityForTool(tool: string): ToolCapability {
   }
   if (["git_status", "git_diff"].includes(tool)) return "git.read";
   if (
-    ["git_stage_paths", "git_unstage_paths", "git_commit", "git_branch"].includes(
-      tool,
-    )
+    [
+      "git_stage_paths",
+      "git_unstage_paths",
+      "git_commit",
+      "git_branch",
+    ].includes(tool)
   ) {
     return "git.write";
   }
@@ -1421,12 +1419,7 @@ function createMcpServer(
         openWorldHint: false,
       },
     },
-    async ({
-      workspaceId,
-      artifactId,
-      path,
-      projectMemoryReceiptId,
-    }) => {
+    async ({ workspaceId, artifactId, path, projectMemoryReceiptId }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
@@ -1721,13 +1714,23 @@ function createMcpServer(
           projectMemoryReceiptId,
         );
         const destination = resolveWorkspacePath(workspace.root, path);
+        let displacedTrashId: string | undefined;
+        if (overwrite && existsSync(destination.absolutePath)) {
+          const displaced = await moveWorkspacePathToTrash({
+            workspaceRoot: workspace.root,
+            stateDir: config.stateDir,
+            workspaceId,
+            path: destination.relativePath,
+          });
+          displacedTrashId = displaced.trashId;
+        }
         const imported = await importAsset({
           destination: destination.absolutePath,
           workspaceRoot: workspace.root,
           sourceUrl,
           base64Data,
           expectedSha256,
-          overwrite,
+          overwrite: false,
         });
         const importId = `import_${randomUUID()}`;
         const artifact = await artifacts.registerImport({
@@ -1752,7 +1755,7 @@ function createMcpServer(
           structuredContent: {
             result,
             importId,
-            imported,
+            imported: { ...imported, displacedTrashId },
             artifact: { ...artifact, presence: "present" as const },
           },
         };
@@ -1784,12 +1787,7 @@ function createMcpServer(
           openWorldHint: true,
         },
       },
-      async ({
-        workspaceId,
-        artifactId,
-        path,
-        projectMemoryReceiptId,
-      }) => {
+      async ({ workspaceId, artifactId, path, projectMemoryReceiptId }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         const projectMemory = workspaces.observeProjectMemoryAccess(
@@ -1808,7 +1806,10 @@ function createMcpServer(
             `Preview ${preview.path}\nURL: ${preview.url}\nExpires: ${preview.expiresAt}\nSHA-256: ${preview.sha256}`,
           ),
         ];
-        if (preview.previewType === "image" && preview.size <= 8 * 1024 * 1024) {
+        if (
+          preview.previewType === "image" &&
+          preview.size <= 8 * 1024 * 1024
+        ) {
           const resolved = resolveExistingWorkspacePath(
             workspace.root,
             preview.path,
@@ -1914,6 +1915,8 @@ function createMcpServer(
         );
         const operation = await copyWorkspacePath({
           workspaceRoot: workspace.root,
+          stateDir: config.stateDir,
+          workspaceId,
           sourcePath,
           destinationPath,
           overwrite,
@@ -2028,7 +2031,10 @@ function createMcpServer(
         server,
         tool,
         {
-          title: tool === "git_stage_paths" ? "Stage Git paths" : "Unstage Git paths",
+          title:
+            tool === "git_stage_paths"
+              ? "Stage Git paths"
+              : "Unstage Git paths",
           description:
             "Change the local Git index for an explicit, bounded list of workspace-relative paths.",
           inputSchema: {
@@ -2476,6 +2482,12 @@ function createMcpServer(
               "PATH_EXISTS: Destination exists; set overwrite=true or use edit.",
             );
           }
+          await moveWorkspacePathToTrash({
+            workspaceRoot: workspace.root,
+            stateDir: config.stateDir,
+            workspaceId,
+            path: destination.relativePath,
+          });
         }
         const response = await writeFileTool(input, {
           cwd: workspace.root,
@@ -2604,13 +2616,23 @@ function createMcpServer(
         );
         const destination = workspaces.resolvePath(workspace, path);
         try {
+          let displacedTrashId: string | undefined;
+          if (overwrite && existsSync(destination)) {
+            const displaced = await moveWorkspacePathToTrash({
+              workspaceRoot: workspace.root,
+              stateDir: config.stateDir,
+              workspaceId,
+              path,
+            });
+            displacedTrashId = displaced.trashId;
+          }
           const imported = await importPng({
             destination,
             workspaceRoot: workspace.root,
             sourceUrl,
             base64Data,
             expectedSha256,
-            overwrite,
+            overwrite: false,
           });
           await artifacts.registerImport({
             workspaceId,
@@ -2643,6 +2665,7 @@ function createMcpServer(
               result,
               path,
               ...imported,
+              displacedTrashId,
             },
           };
         } catch (error) {
@@ -3091,110 +3114,110 @@ function createMcpServer(
   if (!config.readOnly) {
     if (EXPOSE_LEGACY_SHELL) {
       registerAppTool(
-      server,
-      toolNames.shell,
-      {
-        title: config.toolNaming === "short" ? "Bash" : "Run shell",
-        description: config.minimalTools
-          ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
-          : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
-        inputSchema: {
-          workspaceId: z
-            .string()
-            .describe("Workspace identifier returned by open_workspace."),
-          command: z
-            .string()
-            .describe(
-              `Shell command to run. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
-            ),
-          workingDirectory: z
-            .string()
-            .optional()
-            .describe(
-              "Optional working directory relative to the workspace root. Defaults to the workspace root.",
-            ),
-          timeout: z
-            .number()
-            .positive()
-            .max(300)
-            .optional()
-            .describe("Timeout in seconds. Defaults to 30, max 300."),
-          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        server,
+        toolNames.shell,
+        {
+          title: config.toolNaming === "short" ? "Bash" : "Run shell",
+          description: config.minimalTools
+            ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
+            : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
+          inputSchema: {
+            workspaceId: z
+              .string()
+              .describe("Workspace identifier returned by open_workspace."),
+            command: z
+              .string()
+              .describe(
+                `Shell command to run. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
+              ),
+            workingDirectory: z
+              .string()
+              .optional()
+              .describe(
+                "Optional working directory relative to the workspace root. Defaults to the workspace root.",
+              ),
+            timeout: z
+              .number()
+              .positive()
+              .max(300)
+              .optional()
+              .describe("Timeout in seconds. Defaults to 30, max 300."),
+            projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+          },
+          outputSchema: resultOutputSchema(),
+          ...toolWidgetDescriptorMeta(config, "shell"),
+          annotations: SHELL_TOOL_ANNOTATIONS,
         },
-        outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "shell"),
-        annotations: SHELL_TOOL_ANNOTATIONS,
-      },
-      async ({
-        workspaceId,
-        workingDirectory,
-        projectMemoryReceiptId,
-        ...input
-      }) => {
-        const startedAt = performance.now();
-        const workspace = workspaces.getWorkspace(workspaceId);
-        const projectMemory = workspaces.observeProjectMemoryAccess(
+        async ({
           workspaceId,
-          toolNames.shell,
-          projectMemoryReceiptId,
-        );
-        const cwd = workspaces.resolveWorkingDirectory(
-          workspace,
           workingDirectory,
-        );
-        const response = await runShellTool(input, {
-          cwd,
-          root: workspace.root,
-        });
-
-        if (response.isError) {
-          logFailedToolResponse(
-            config,
-            {
-              tool: toolNames.shell,
-              workspaceId,
-              workingDirectory: workingDirectory ?? ".",
-              command: input.command,
-              commandLength: input.command.length,
-            },
-            response.content,
-            startedAt,
+          projectMemoryReceiptId,
+          ...input
+        }) => {
+          const startedAt = performance.now();
+          const workspace = workspaces.getWorkspace(workspaceId);
+          const projectMemory = workspaces.observeProjectMemoryAccess(
+            workspaceId,
+            toolNames.shell,
+            projectMemoryReceiptId,
           );
-          return response;
-        }
+          const cwd = workspaces.resolveWorkingDirectory(
+            workspace,
+            workingDirectory,
+          );
+          const response = await runShellTool(input, {
+            cwd,
+            root: workspace.root,
+          });
 
-        const summary = {
-          command: input.command,
-          workingDirectory: workingDirectory ?? ".",
-          ...textSummary(response.content),
-        };
-        logToolCall(config, {
-          tool: toolNames.shell,
-          workspaceId,
-          workingDirectory: workingDirectory ?? ".",
-          command: input.command,
-          commandLength: input.command.length,
-          success: true,
-          durationMs: Math.round(performance.now() - startedAt),
-        });
+          if (response.isError) {
+            logFailedToolResponse(
+              config,
+              {
+                tool: toolNames.shell,
+                workspaceId,
+                workingDirectory: workingDirectory ?? ".",
+                command: input.command,
+                commandLength: input.command.length,
+              },
+              response.content,
+              startedAt,
+            );
+            return response;
+          }
 
-        return {
-          ...response,
-          _meta: {
+          const summary = {
+            command: input.command,
+            workingDirectory: workingDirectory ?? ".",
+            ...textSummary(response.content),
+          };
+          logToolCall(config, {
             tool: toolNames.shell,
-            projectMemory,
-            card: {
-              workspaceId,
-              path: workingDirectory,
-              summary,
-              payload: { content: response.content },
+            workspaceId,
+            workingDirectory: workingDirectory ?? ".",
+            command: input.command,
+            commandLength: input.command.length,
+            success: true,
+            durationMs: Math.round(performance.now() - startedAt),
+          });
+
+          return {
+            ...response,
+            _meta: {
+              tool: toolNames.shell,
+              projectMemory,
+              card: {
+                workspaceId,
+                path: workingDirectory,
+                summary,
+                payload: { content: response.content },
+              },
             },
-          },
-          structuredContent: {
-            result: contentText(response.content),
-          },
-        };
-      },
+            structuredContent: {
+              result: contentText(response.content),
+            },
+          };
+        },
       );
     }
 

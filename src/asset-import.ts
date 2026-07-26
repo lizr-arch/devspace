@@ -15,14 +15,9 @@ import {
   resolveWorkspacePath,
   workspaceRelativeFromAbsolute,
 } from "./workspace-paths.js";
+import { isPathInsideRoot } from "./roots.js";
 
-export type ImportAssetFormat =
-  | "PNG"
-  | "JPEG"
-  | "WEBP"
-  | "GLB"
-  | "WAV"
-  | "OGG";
+export type ImportAssetFormat = "PNG" | "JPEG" | "WEBP" | "GLB" | "WAV" | "OGG";
 
 export const MAX_IMPORT_BYTES: Record<ImportAssetFormat, number> = {
   PNG: 25 * 1024 * 1024,
@@ -34,8 +29,7 @@ export const MAX_IMPORT_BYTES: Record<ImportAssetFormat, number> = {
 };
 
 const MAX_REDIRECTS = 5;
-const MAX_BASE64_CHARACTERS =
-  Math.ceil((MAX_IMPORT_BYTES.GLB * 4) / 3) + 4;
+const MAX_BASE64_CHARACTERS = Math.ceil((MAX_IMPORT_BYTES.GLB * 4) / 3) + 4;
 
 export interface ImportAssetInput {
   destination: string;
@@ -118,7 +112,9 @@ function decodeBase64(value: string): Buffer {
     value.length % 4 !== 0 ||
     !/^[A-Za-z0-9+/]*={0,2}$/.test(value)
   ) {
-    throw new Error("ASSET_SOURCE_INVALID: base64Data is not valid standard Base64.");
+    throw new Error(
+      "ASSET_SOURCE_INVALID: base64Data is not valid standard Base64.",
+    );
   }
   return Buffer.from(value, "base64");
 }
@@ -153,7 +149,9 @@ async function downloadAsset(
       throw new Error(`ASSET_TOO_LARGE: Asset exceeds ${maxBytes} bytes.`);
     }
     if (!response.body) {
-      throw new Error("ASSET_DOWNLOAD_FAILED: Download returned an empty body.");
+      throw new Error(
+        "ASSET_DOWNLOAD_FAILED: Download returned an empty body.",
+      );
     }
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -272,7 +270,7 @@ async function writeAtomicAsset(input: {
     if (!isMissingPathError(error)) throw error;
   }
   const canonicalParent = await realpath(dirname(resolved.absolutePath));
-  if (!canonicalParent.startsWith(resolved.canonicalWorkspaceRoot)) {
+  if (!isPathInsideRoot(canonicalParent, resolved.canonicalWorkspaceRoot)) {
     throw new Error("WORKSPACE_ESCAPE: Destination parent leaves workspace.");
   }
   const temporary = `${resolved.absolutePath}.devspace-${randomUUID()}.tmp`;
@@ -303,14 +301,12 @@ async function writeAtomicAsset(input: {
   }
 }
 
-export function detectAssetFormat(
-  data: Buffer,
-): ImportAssetFormat | undefined {
+export function detectAssetFormat(data: Buffer): ImportAssetFormat | undefined {
   if (
     data.length >= 8 &&
-    data.subarray(0, 8).equals(
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    )
+    data
+      .subarray(0, 8)
+      .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
   )
     return "PNG";
   if (

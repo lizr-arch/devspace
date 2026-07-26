@@ -31,6 +31,8 @@ try {
   await writeFile(join(root, "assets/raw/a.txt"), "alpha");
   const copied = await copyWorkspacePath({
     workspaceRoot: root,
+    stateDir,
+    workspaceId: "ws_files",
     sourcePath: "assets/raw/a.txt",
     destinationPath: "assets/copy.txt",
   });
@@ -39,6 +41,8 @@ try {
   await assert.rejects(
     copyWorkspacePath({
       workspaceRoot: root,
+      stateDir,
+      workspaceId: "ws_files",
       sourcePath: "assets/raw/a.txt",
       destinationPath: "assets/copy.txt",
     }),
@@ -50,6 +54,8 @@ try {
     await assert.rejects(
       copyWorkspacePath({
         workspaceRoot: root,
+        stateDir,
+        workspaceId: "ws_files",
         sourcePath: "assets/raw/a.txt",
         destinationPath: "assets/escape/a.txt",
       }),
@@ -66,6 +72,29 @@ try {
     destinationPath: "assets/moved.txt",
   });
   assert.equal(moved.destinationPath, "assets/moved.txt");
+  await writeFile(join(root, "assets/raw/replacement.txt"), "replacement");
+  const replaced = await copyWorkspacePath({
+    workspaceRoot: root,
+    stateDir,
+    workspaceId: "ws_files",
+    sourcePath: "assets/raw/replacement.txt",
+    destinationPath: "assets/moved.txt",
+    overwrite: true,
+  });
+  assert.match(replaced.displacedTrashId ?? "", /^trash_/);
+  assert.equal(
+    await readFile(
+      join(
+        stateDir,
+        "trash",
+        "ws_files",
+        replaced.displacedTrashId!,
+        "payload",
+      ),
+      "utf8",
+    ),
+    "alpha",
+  );
   const trash = await moveWorkspacePathToTrash({
     workspaceRoot: root,
     stateDir,
@@ -79,7 +108,7 @@ try {
       join(stateDir, "trash", "ws_files", trash.trashId, "payload"),
       "utf8",
     ),
-    "alpha",
+    "replacement",
   );
   await mkdir(join(root, "tree"), { recursive: true });
   await writeFile(join(root, "tree", "x.txt"), "x");
@@ -87,6 +116,8 @@ try {
   await assert.rejects(
     copyWorkspacePath({
       workspaceRoot: root,
+      stateDir,
+      workspaceId: "ws_files",
       sourcePath: "tree",
       destinationPath: "tree-copy",
     }),

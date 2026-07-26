@@ -15,6 +15,7 @@ import {
   type ArtifactRecord,
   type ListedArtifact,
 } from "./artifact-ledger.js";
+import { inspectArtifact } from "./artifact-inspector.js";
 import { resolveExistingWorkspacePath } from "./workspace-paths.js";
 
 export const DEFAULT_ARTIFACT_TTL_SECONDS = 10 * 60;
@@ -25,11 +26,7 @@ export const MAX_TEXT_PUBLISH_BYTES = 4 * 1024 * 1024;
 export const MAX_BINARY_PUBLISH_BYTES = 128 * 1024 * 1024;
 
 export type ArtifactPreviewType =
-  | "image"
-  | "audio"
-  | "text"
-  | "json"
-  | "download";
+  "image" | "audio" | "text" | "json" | "download";
 
 export interface ArtifactPublication {
   artifact: ListedArtifact;
@@ -159,8 +156,16 @@ export class ArtifactPublisher {
     path?: string;
     ttlSeconds?: number;
   }): Promise<
-    Omit<ArtifactPublication, "artifact"> & { artifact?: ListedArtifact; path: string }
+    Omit<ArtifactPublication, "artifact"> & {
+      artifact?: ListedArtifact;
+      path: string;
+    }
   > {
+    if (Boolean(input.artifactId) === Boolean(input.path)) {
+      throw new Error(
+        "ASSET_INPUT_INVALID: Provide exactly one of artifactId or path.",
+      );
+    }
     if (input.artifactId) {
       const published = await this.publish({
         ...input,
@@ -182,17 +187,18 @@ export class ArtifactPublisher {
         previewType: published.previewType,
       };
     }
-    if (!input.path) {
-      throw new Error(
-        "ASSET_INPUT_INVALID: Provide exactly one of artifactId or path.",
-      );
-    }
+    const inspection = await inspectArtifact({
+      ledger: this.ledger,
+      workspaceId: input.workspaceId,
+      workspaceRoot: input.workspaceRoot,
+      path: input.path,
+    });
     const resolved = resolveExistingWorkspacePath(
       input.workspaceRoot,
-      input.path,
+      input.path!,
       "file",
     );
-    const format = previewFormat(resolved.relativePath);
+    const format = previewFormat(inspection.format, inspection.mimeType);
     const descriptor = openSync(
       resolved.absolutePath,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
@@ -428,28 +434,22 @@ function previewTypeFor(artifact: ArtifactRecord): ArtifactPreviewType {
   return "download";
 }
 
-function previewFormat(relativePath: string): {
+function previewFormat(
+  format: string,
+  mimeType: string,
+): {
   previewType: Extract<ArtifactPreviewType, "image" | "audio">;
   mimeType: string;
 } {
-  const extension = relativePath.toLowerCase().split(".").pop();
-  switch (extension) {
-    case "png":
-      return { previewType: "image", mimeType: "image/png" };
-    case "jpg":
-    case "jpeg":
-      return { previewType: "image", mimeType: "image/jpeg" };
-    case "webp":
-      return { previewType: "image", mimeType: "image/webp" };
-    case "wav":
-      return { previewType: "audio", mimeType: "audio/wav" };
-    case "ogg":
-      return { previewType: "audio", mimeType: "audio/ogg" };
-    default:
-      throw new Error(
-        "PREVIEW_UNAVAILABLE: Only PNG, JPEG, WEBP, WAV, and OGG can be previewed in M1.",
-      );
+  if (["PNG", "JPEG", "WEBP"].includes(format)) {
+    return { previewType: "image", mimeType };
   }
+  if (["WAV", "OGG"].includes(format)) {
+    return { previewType: "audio", mimeType };
+  }
+  throw new Error(
+    "PREVIEW_UNAVAILABLE: Only PNG, JPEG, WEBP, WAV, and OGG can be previewed in M1.",
+  );
 }
 
 function assertPreviewSize(

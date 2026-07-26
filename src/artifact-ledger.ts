@@ -36,12 +36,7 @@ export const MAX_LIST_ARTIFACTS = 100;
 const MAX_JSON_VALIDATION_BYTES = 4 * 1024 * 1024;
 
 export type ArtifactType =
-  | "blend"
-  | "glb"
-  | "image"
-  | "audio"
-  | "json"
-  | "text";
+  "blend" | "glb" | "image" | "audio" | "json" | "text";
 export type ArtifactChange = "created" | "modified";
 export type ArtifactCompletion = "complete" | "incomplete";
 export type ArtifactPresence =
@@ -284,7 +279,9 @@ export class ArtifactLedger {
     const info = statSync(absolutePath);
     const format = artifactFormat(relativePath);
     if (!format) {
-      throw new Error("ARTIFACT_MIME_REJECTED: Imported format is not supported.");
+      throw new Error(
+        "ARTIFACT_MIME_REJECTED: Imported format is not supported.",
+      );
     }
     if (info.size > MAX_HASHABLE_ARTIFACT_BYTES) {
       throw new Error(
@@ -331,7 +328,10 @@ export class ArtifactLedger {
     const selected = [...ledger.artifacts]
       .reverse()
       .filter((artifact) =>
-        input.jobId ? artifact.origin.kind === "job" && artifact.origin.jobId === input.jobId : true,
+        input.jobId
+          ? artifact.origin.kind === "job" &&
+            artifact.origin.jobId === input.jobId
+          : true,
       )
       .filter((artifact) =>
         pathPrefix ? artifact.relativePath.startsWith(pathPrefix) : true,

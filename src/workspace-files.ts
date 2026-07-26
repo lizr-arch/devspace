@@ -36,7 +36,9 @@ export async function createWorkspaceDirectory(
   try {
     const info = await lstat(destination.absolutePath);
     if (info.isSymbolicLink() || !info.isDirectory()) {
-      throw new Error(`PATH_TYPE_REJECTED: Destination is not a real directory: ${path}`);
+      throw new Error(
+        `PATH_TYPE_REJECTED: Destination is not a real directory: ${path}`,
+      );
     }
     return { path: destination.relativePath, created: false };
   } catch (error) {
@@ -49,10 +51,12 @@ export async function createWorkspaceDirectory(
 
 export async function copyWorkspacePath(input: {
   workspaceRoot: string;
+  stateDir: string;
+  workspaceId: string;
   sourcePath: string;
   destinationPath: string;
   overwrite?: boolean;
-}): Promise<FileOperationSummary> {
+}): Promise<FileOperationSummary & { displacedTrashId?: string }> {
   const source = resolveExistingWorkspacePath(
     input.workspaceRoot,
     input.sourcePath,
@@ -63,6 +67,7 @@ export async function copyWorkspacePath(input: {
   );
   const summary = await summarizePath(source.absolutePath);
   const destinationExists = await pathExists(destination.absolutePath);
+  let displacedTrashId: string | undefined;
   if (destinationExists) {
     const existing = await lstat(destination.absolutePath);
     if (existing.isSymbolicLink()) {
@@ -95,17 +100,26 @@ export async function copyWorkspacePath(input: {
       });
     }
     if (destinationExists) {
-      await rm(destination.absolutePath, { force: false });
+      const trashed = await moveWorkspacePathToTrash({
+        workspaceRoot: input.workspaceRoot,
+        stateDir: input.stateDir,
+        workspaceId: input.workspaceId,
+        path: destination.relativePath,
+      });
+      displacedTrashId = trashed.trashId;
     }
     await rename(temporary, destination.absolutePath);
   } catch (error) {
-    await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+    await rm(temporary, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
     throw error;
   }
   return {
     ...summary,
     sourcePath: source.relativePath,
     destinationPath: destination.relativePath,
+    displacedTrashId,
   };
 }
 
@@ -217,7 +231,9 @@ export async function moveWorkspacePathToTrash(input: {
       copied.entries !== summary.entries ||
       copied.bytes !== summary.bytes
     ) {
-      throw new Error("PATH_COPY_VERIFY_FAILED: Trash quarantine copy did not verify.");
+      throw new Error(
+        "PATH_COPY_VERIFY_FAILED: Trash quarantine copy did not verify.",
+      );
     }
     await rm(source.absolutePath, {
       recursive: summary.kind === "directory",
@@ -253,11 +269,14 @@ async function summarizePath(
       entries += 1;
       const childPath = join(current, child.name);
       if (child.isSymbolicLink()) {
-        throw new Error("WORKSPACE_ESCAPE: Directory tree contains a symbolic link.");
+        throw new Error(
+          "WORKSPACE_ESCAPE: Directory tree contains a symbolic link.",
+        );
       }
       if (child.isDirectory()) pending.push(childPath);
       else if (child.isFile()) bytes += (await stat(childPath)).size;
-      else throw new Error("PATH_TYPE_REJECTED: Unsupported filesystem object.");
+      else
+        throw new Error("PATH_TYPE_REJECTED: Unsupported filesystem object.");
     }
   }
   return { kind: "directory", bytes, entries };

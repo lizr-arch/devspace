@@ -41,7 +41,12 @@ export async function inspectGitStatus(
     "HEAD",
   ]).catch(() => undefined);
   const raw = (
-    await runGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    await runGit(root, [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+    ])
   ).stdout;
   const staged = new Set<string>();
   const unstaged = new Set<string>();
@@ -197,14 +202,20 @@ export async function manageGitBranch(input: {
     } else {
       const status = await inspectGitStatus(root);
       if (!status.clean) {
-        throw new Error("GIT_DIRTY: Switching branches requires a clean workspace.");
+        throw new Error(
+          "GIT_DIRTY: Switching branches requires a clean workspace.",
+        );
       }
       await runGit(root, ["show-ref", "--verify", `refs/heads/${input.name}`]);
       await runGit(root, ["switch", "--", input.name]);
     }
   }
   const branches = (
-    await runGit(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+    await runGit(root, [
+      "for-each-ref",
+      "--format=%(refname:short)",
+      "refs/heads",
+    ])
   ).stdout
     .split("\n")
     .map((value) => value.trim())
@@ -259,7 +270,12 @@ async function rawGitDiff(
   paths: string[],
   contextLines: number,
 ): Promise<string> {
-  const args = ["diff", "--no-ext-diff", "--binary", `--unified=${contextLines}`];
+  const args = [
+    "diff",
+    "--no-ext-diff",
+    "--binary",
+    `--unified=${contextLines}`,
+  ];
   if (scope === "staged") args.push("--cached");
   if (scope === "head") args.push("HEAD");
   if (paths.length > 0) args.push("--", ...paths);
@@ -268,7 +284,9 @@ async function rawGitDiff(
 
 function normalizeGitPaths(paths: string[]): string[] {
   if (paths.length > MAX_GIT_PATHS) {
-    throw new Error(`GIT_INPUT_INVALID: At most ${MAX_GIT_PATHS} paths are allowed.`);
+    throw new Error(
+      `GIT_INPUT_INVALID: At most ${MAX_GIT_PATHS} paths are allowed.`,
+    );
   }
   return [...new Set(paths.map(normalizeWorkspaceRelativePath))];
 }
@@ -276,7 +294,9 @@ function normalizeGitPaths(paths: string[]): string[] {
 function normalizeRequiredGitPaths(paths: string[]): string[] {
   const normalized = normalizeGitPaths(paths);
   if (normalized.length === 0) {
-    throw new Error("GIT_INPUT_INVALID: At least one explicit path is required.");
+    throw new Error(
+      "GIT_INPUT_INVALID: At least one explicit path is required.",
+    );
   }
   return normalized;
 }
