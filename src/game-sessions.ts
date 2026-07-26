@@ -96,6 +96,7 @@ export class GameSessionManager {
     this.sessionsDir = join(stateDir, "game-sessions");
     this.evidenceDir = join(stateDir, "game-session-evidence");
     this.bridgePath = join(stateDir, "runtime", "godot-session-bridge.gd");
+    this.initialize();
   }
 
   async start(input: {

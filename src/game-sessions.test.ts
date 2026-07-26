@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +8,7 @@ import { GameSessionManager } from "./game-sessions.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-game-session-"));
 const stateDir = await mkdtemp(join(tmpdir(), "devspace-game-session-state-"));
+await testEagerCrashRecovery();
 const projectRoot = join(root, "fixture");
 await mkdir(projectRoot, { recursive: true });
 await writeFile(
@@ -39,8 +42,10 @@ var click_count := 0
 func _input(event: InputEvent) -> void:
 	if event is InputEventAction and event.action == "fixture_action" and event.pressed:
 		action_count += 1
+		print("DEVSPACE_FIXTURE_ACTION:", action_count)
 	if event is InputEventMouseButton and event.pressed:
 		click_count += 1
+		print("DEVSPACE_FIXTURE_CLICK:", click_count)
 `,
 );
 await writeFile(
@@ -148,6 +153,7 @@ try {
     y: 80,
     button: "left",
   });
+  await new Promise((resolve) => setTimeout(resolve, 100));
   await assert.rejects(
     manager.sendInput("ws_game_fixture", started.sessionId, {
       kind: "click",
@@ -175,6 +181,8 @@ try {
     256 * 1024,
   );
   assert.match(logs.output, /\[bridge\] authenticated/);
+  assert.match(logs.output, /DEVSPACE_FIXTURE_ACTION:1/);
+  assert.match(logs.output, /DEVSPACE_FIXTURE_CLICK:1/);
   assert.equal(logs.nextOutputOffsetBytes, logs.totalBytes);
 
   const stopped = await manager.stop("ws_game_fixture", started.sessionId);
@@ -248,4 +256,109 @@ try {
   manager.close();
   await rm(root, { recursive: true, force: true });
   await rm(stateDir, { recursive: true, force: true });
+}
+
+async function testEagerCrashRecovery(): Promise<void> {
+  const recoveryStateDir = await mkdtemp(
+    join(tmpdir(), "devspace-game-session-recovery-"),
+  );
+  let child: ChildProcess | undefined;
+  try {
+    const sessionsDir = join(recoveryStateDir, "game-sessions");
+    await mkdir(sessionsDir, { recursive: true });
+    const processToken = randomUUID();
+    child = spawn(
+      process.execPath,
+      ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000);"],
+      {
+        detached: process.platform !== "win32",
+        env: {
+          ...process.env,
+          DEVSPACE_PROCESS_TOKEN: processToken,
+        },
+        stdio: "ignore",
+      },
+    );
+    await new Promise<void>((resolve, reject) => {
+      child!.once("spawn", resolve);
+      child!.once("error", reject);
+    });
+    child.unref();
+    const sessionId = `session_${randomUUID()}`;
+    const emptyHash = "0".repeat(64);
+    await writeFile(
+      join(sessionsDir, `${sessionId}.json`),
+      JSON.stringify(
+        {
+          sessionId,
+          workspaceId: "ws_recovery_fixture",
+          workspaceRoot: root,
+          projectPath: "fixture",
+          scene: "res://main.tscn",
+          engine: "godot",
+          viewport: { width: 320, height: 180 },
+          status: "running",
+          startedAt: new Date().toISOString(),
+          dirtyDiffSha256: emptyHash,
+          statusSha256: emptyHash,
+          untrackedCount: 0,
+          processId: child.pid,
+          processGroupId: process.platform === "win32" ? undefined : child.pid,
+          processToken,
+        },
+        null,
+        2,
+      ),
+    );
+
+    const recovered = new GameSessionManager(recoveryStateDir);
+    const immediate = JSON.parse(
+      await readFile(join(sessionsDir, `${sessionId}.json`), "utf8"),
+    ) as { status: string };
+    assert.equal(immediate.status, "interrupted");
+    if (process.platform !== "win32") {
+      await waitUntilExited(child, 6_000);
+      assert.equal(isProcessAlive(child.pid), false);
+    }
+    recovered.close();
+  } finally {
+    if (child?.pid && isProcessAlive(child.pid)) {
+      try {
+        process.kill(
+          process.platform === "win32" ? child.pid : -child.pid,
+          "SIGKILL",
+        );
+      } catch {
+        // Already exited.
+      }
+    }
+    await rm(recoveryStateDir, { recursive: true, force: true });
+  }
+}
+
+async function waitUntilExited(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<void> {
+  if (!child.pid || !isProcessAlive(child.pid)) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Recovery process did not exit.")),
+      timeoutMs,
+    );
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function isProcessAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
