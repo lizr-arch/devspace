@@ -2,15 +2,9 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
-import {
-  buildCoachPack,
-  type IncludedEntry,
-} from "./context-pack.js";
+import { buildCoachPack, type IncludedEntry } from "./context-pack.js";
 import { parseCoachReply, type CoachReplySummary } from "./ingest.js";
-import {
-  createSensitiveOmission,
-  type OmittedEntry,
-} from "./policy.js";
+import { createSensitiveOmission, type OmittedEntry } from "./policy.js";
 import { expandHomePath } from "../roots.js";
 import { devspaceConfigDir, loadDevspaceFiles } from "../user-config.js";
 
@@ -172,7 +166,8 @@ export async function startCoachSession(
         included: packResult.manifest.included,
         omitted: packResult.manifest.omitted,
         totalCharacters: packResult.pack.length,
-        requiresExpansionApproval: packResult.manifest.requiresExpansionApproval,
+        requiresExpansionApproval:
+          packResult.manifest.requiresExpansionApproval,
       },
     ],
     replies: [],
@@ -246,7 +241,8 @@ export async function createNextCoachSessionPack(
 ): Promise<NextCoachSessionPackResult> {
   const resolved = resolveCoachSession(input.session, input.env);
   const state = await readCoachSessionState(resolved.sessionStatePath);
-  const task = input.task?.trim() || buildFollowupTask(state, state.pendingRequests);
+  const task =
+    input.task?.trim() || buildFollowupTask(state, state.pendingRequests);
 
   if (!task) {
     throw new Error(
@@ -288,7 +284,8 @@ export async function createNextCoachSessionPack(
         included: packResult.manifest.included,
         omitted: packResult.manifest.omitted,
         totalCharacters: packResult.pack.length,
-        requiresExpansionApproval: packResult.manifest.requiresExpansionApproval,
+        requiresExpansionApproval:
+          packResult.manifest.requiresExpansionApproval,
       },
     ],
   };

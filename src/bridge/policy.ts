@@ -179,7 +179,9 @@ function createIgnoreRule(pattern: string): IgnoreRule {
   if (normalized.startsWith("*.")) {
     return {
       matches(relativePath) {
-        return relativePath.toLowerCase().endsWith(normalized.slice(1).toLowerCase());
+        return relativePath
+          .toLowerCase()
+          .endsWith(normalized.slice(1).toLowerCase());
       },
     };
   }
@@ -200,7 +202,9 @@ function createIgnoreRule(pattern: string): IgnoreRule {
     };
   }
 
-  const exactPath = normalized.startsWith("/") ? normalized.slice(1) : normalized;
+  const exactPath = normalized.startsWith("/")
+    ? normalized.slice(1)
+    : normalized;
   return {
     matches(relativePath) {
       return relativePath === exactPath || basename(relativePath) === exactPath;
@@ -209,5 +213,8 @@ function createIgnoreRule(pattern: string): IgnoreRule {
 }
 
 function isEnvTemplateFile(fileName: string): boolean {
-  return fileName === ".env.example" || (fileName.startsWith(".env.") && fileName.endsWith(".example"));
+  return (
+    fileName === ".env.example" ||
+    (fileName.startsWith(".env.") && fileName.endsWith(".example"))
+  );
 }

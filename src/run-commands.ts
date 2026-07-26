@@ -147,9 +147,7 @@ export function runReportCommand(): void {
   const latestRunId = findLatestRunId();
 
   if (!existsSync(executionReportPath) && !latestRunId) {
-    throw new Error(
-      "No run report found. Run `devspace run current` first.",
-    );
+    throw new Error("No run report found. Run `devspace run current` first.");
   }
 
   const parsedReport = existsSync(executionReportPath)
@@ -199,13 +197,18 @@ function parseRunCurrentArgs(args: string[]): RunCurrentOptions {
   };
 }
 
-function parsePositiveInteger(value: string | undefined, fallback: number): number {
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+): number {
   if (!value) return fallback;
   const parsed = parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function normalizeMode(mode: string): "manual" | "guided" | "delegate" | "free" {
+function normalizeMode(
+  mode: string,
+): "manual" | "guided" | "delegate" | "free" {
   if (mode === "manual" || mode === "guided" || mode === "free") return mode;
   return "delegate";
 }
@@ -393,7 +396,10 @@ function safeGitOutput(args: string[]): string | null {
   }
 }
 
-function fallbackIfEmpty(value: string | null | undefined, fallback: string): string {
+function fallbackIfEmpty(
+  value: string | null | undefined,
+  fallback: string,
+): string {
   return value && value.trim() ? value : fallback;
 }
 
@@ -401,7 +407,11 @@ function mapReportStatus(
   verdict: VerdictType | null,
   stateStatus: GlobalState["status"],
 ): ReportStatus {
-  if (verdict === "PASS" || verdict === "PASS_WITH_WARNINGS" || verdict === "DONE") {
+  if (
+    verdict === "PASS" ||
+    verdict === "PASS_WITH_WARNINGS" ||
+    verdict === "DONE"
+  ) {
     return "已完成";
   }
 

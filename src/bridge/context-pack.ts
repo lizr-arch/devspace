@@ -135,7 +135,8 @@ export async function buildCoachPack(
       manifest.requiresExpansionApproval = true;
       manifest.omitted.push({
         path: candidate.relativePath,
-        reason: "Character ceiling reached; explicit expansion approval required",
+        reason:
+          "Character ceiling reached; explicit expansion approval required",
       });
       continue;
     }
@@ -261,9 +262,7 @@ function analyzeTaskProfile(task: string, keywords: string[]): TaskProfile {
   const lowerTask = task.toLowerCase();
   const keywordSet = new Set(keywords.map((keyword) => keyword.toLowerCase()));
   const hasKeyword = (...values: string[]): boolean =>
-    values.some(
-      (value) => keywordSet.has(value) || lowerTask.includes(value),
-    );
+    values.some((value) => keywordSet.has(value) || lowerTask.includes(value));
 
   const wantsTests = hasKeyword(
     "test",
@@ -467,7 +466,10 @@ function buildPackHeader(
   let header = composeHeader(titleLine, taskLine, repoLine, budgetLine);
 
   while (header.length > budget && taskLine.length > 0) {
-    taskLine = truncateText(task, Math.max(0, taskLine.length - (header.length - budget) - 3));
+    taskLine = truncateText(
+      task,
+      Math.max(0, taskLine.length - (header.length - budget) - 3),
+    );
     truncatedTask = true;
     header = composeHeader(titleLine, taskLine, repoLine, budgetLine);
   }
@@ -529,7 +531,10 @@ function selectFittingSnippet(
   snippet: { lineStart: number; lineEnd: number; lines: string[] };
   text: string;
 } | null {
-  for (const lineCount of buildSnippetLinePlan(candidate.relativePath, maxLines)) {
+  for (const lineCount of buildSnippetLinePlan(
+    candidate.relativePath,
+    maxLines,
+  )) {
     const snippet = selectSnippet(candidate, keywords, lineCount);
     const text = renderSnippet(candidate.relativePath, snippet);
     if (wouldFitWithinBudget(currentSections, text, budget)) {
@@ -540,7 +545,10 @@ function selectFittingSnippet(
   return null;
 }
 
-function buildSnippetLinePlan(relativePath: string, maxLines: number): number[] {
+function buildSnippetLinePlan(
+  relativePath: string,
+  maxLines: number,
+): number[] {
   const lowerPath = relativePath.toLowerCase();
   const preferred = isSourcePath(lowerPath)
     ? [80, 48, 32, 24, 16, 12, 8]

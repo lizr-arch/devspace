@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -121,7 +128,10 @@ P1
 `,
   );
 
-  await writeFile(join(devspaceDir, "execution_report.md"), "# 执行报告\n\n## 状态\n待执行\n");
+  await writeFile(
+    join(devspaceDir, "execution_report.md"),
+    "# 执行报告\n\n## 状态\n待执行\n",
+  );
 
   await execFileAsync(
     process.execPath,
@@ -142,7 +152,10 @@ P1
     { cwd: root },
   );
 
-  const report = await readFile(join(devspaceDir, "execution_report.md"), "utf-8");
+  const report = await readFile(
+    join(devspaceDir, "execution_report.md"),
+    "utf-8",
+  );
   assert.match(report, /task-run-001/);
   assert.doesNotMatch(report, /## 状态\n待执行/);
 

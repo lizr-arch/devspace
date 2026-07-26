@@ -326,6 +326,7 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "grep",
       "glob",
       "ls",
+      "inspect_glb",
     ]);
   } finally {
     await new Promise<void>((resolve, reject) => {

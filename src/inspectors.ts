@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -227,9 +228,9 @@ export class ExternalInspectorManager {
       runner.executable,
       [
         "--background",
-        source.absolutePath,
         "--disable-autoexec",
         "--offline-mode",
+        source.absolutePath,
         "--python-exit-code",
         "23",
         "--python",
@@ -286,30 +287,44 @@ export class ExternalInspectorManager {
     const height = previewDimension(input.height ?? 512);
     const view = input.view ?? "perspective";
     const output = this.privateOutput("model-preview", ".png");
-    const script = this.writeScript("render_model.py", MODEL_RENDERER);
-    const runner = await this.runners
-      .resolve("blender")
-      .catch(() => unavailable("Blender"));
-    await runFixed(
-      runner.executable,
-      [
-        "--background",
-        "--factory-startup",
-        "--disable-autoexec",
-        "--offline-mode",
-        "--python-exit-code",
-        "23",
-        "--python",
-        script,
-        "--",
+    const sourceBefore = sha256(readFileSync(source.absolutePath));
+    if (extension === ".glb") {
+      await this.renderGlbWithGodot(
         source.absolutePath,
         output,
         view,
-        String(width),
-        String(height),
-      ],
-      this.stateDir,
-    );
+        width,
+        height,
+      );
+    } else {
+      const script = this.writeScript("render_model.py", MODEL_RENDERER);
+      const runner = await this.runners
+        .resolve("blender")
+        .catch(() => unavailable("Blender"));
+      await runFixed(
+        runner.executable,
+        [
+          "--background",
+          "--factory-startup",
+          "--disable-autoexec",
+          "--offline-mode",
+          "--python-exit-code",
+          "23",
+          "--python",
+          script,
+          "--",
+          source.absolutePath,
+          output,
+          view,
+          String(width),
+          String(height),
+        ],
+        this.stateDir,
+      );
+    }
+    if (sha256(readFileSync(source.absolutePath)) !== sourceBefore) {
+      throw new Error("INSPECTOR_SOURCE_MUTATED");
+    }
     const bytes = readFileSync(output);
     if (
       bytes.length < 8 ||
@@ -333,6 +348,51 @@ export class ExternalInspectorManager {
     const path = join(this.scriptDir, name);
     writeFileSync(path, content, { mode: 0o600 });
     return path;
+  }
+
+  private async renderGlbWithGodot(
+    source: string,
+    output: string,
+    view: string,
+    width: number,
+    height: number,
+  ): Promise<void> {
+    const project = join(this.evidenceDir, `godot-preview-${randomUUID()}`);
+    mkdirSync(project, { recursive: true, mode: 0o700 });
+    copyFileSync(source, join(project, "model.glb"));
+    writeFileSync(
+      join(project, "project.godot"),
+      `[application]\nconfig/name="DevSpace Model Preview"\n[display]\nwindow/size/viewport_width=${width}\nwindow/size/viewport_height=${height}\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n`,
+      { mode: 0o600 },
+    );
+    const script = join(project, "preview.gd");
+    writeFileSync(script, GODOT_MODEL_PREVIEW, { mode: 0o600 });
+    const runner = await this.runners
+      .resolve("godot")
+      .catch(async () =>
+        this.runners.resolve("godot-mono").catch(() => unavailable("Godot")),
+      );
+    await runFixed(
+      runner.executable,
+      ["--headless", "--editor", "--path", project, "--quit-after", "3"],
+      project,
+    );
+    await runFixed(
+      runner.executable,
+      [
+        "--path",
+        project,
+        "--resolution",
+        `${width}x${height}`,
+        "--script",
+        script,
+      ],
+      project,
+      {
+        DEVSPACE_PREVIEW_OUTPUT: output,
+        DEVSPACE_PREVIEW_VIEW: view,
+      },
+    );
   }
 
   private privateOutput(prefix: string, extension: string): string {
@@ -425,10 +485,12 @@ function runFixed(
   executable: string,
   args: string[],
   cwd: string,
+  environment: Record<string, string> = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd,
+      env: { ...process.env, ...environment },
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -533,6 +595,7 @@ for image in bpy.data.images:
     path = bpy.path.abspath(image.filepath) if image.filepath else ""
     if path and os.path.isabs(image.filepath): absolute_paths.append(image.filepath)
     if path and not os.path.exists(path): missing.append(image.filepath)
+dependencies = [lib.filepath for lib in bpy.data.libraries] + [image.filepath for image in bpy.data.images if image.filepath]
 meshes = [{"name": m.name, "vertices": len(m.vertices), "polygons": len(m.polygons),
     "triangles": sum(max(0, len(p.vertices)-2) for p in m.polygons)} for m in bpy.data.meshes]
 actions = [{"name": a.name, "durationFrames": a.frame_range[1]-a.frame_range[0],
@@ -543,6 +606,7 @@ result = {"blenderVersion": bpy.app.version_string, "objectCount": len(bpy.data.
  "armatureCount": len(bpy.data.armatures), "boneCount": sum(len(a.bones) for a in bpy.data.armatures),
  "objects": objects[:500], "meshes": meshes[:500], "collections": [c.name for c in bpy.data.collections][:500],
  "materials": [m.name for m in bpy.data.materials][:500], "images": [i.filepath for i in bpy.data.images][:500],
+ "dependencies": dependencies[:500],
  "absolutePaths": absolute_paths[:500], "missingTextures": missing[:500], "actions": actions[:500],
  "truncated": any(len(x)>500 for x in [bpy.data.objects,bpy.data.meshes,bpy.data.collections,bpy.data.materials,bpy.data.images,bpy.data.actions])}
 with open(output, "w", encoding="utf8") as f: json.dump(result, f)
@@ -572,10 +636,69 @@ bpy.context.scene.camera = camera
 for direction, energy in [((4,-4,6),1200),((-3,2,2),500)]:
     bpy.ops.object.light_add(type="AREA", location=center+Vector(direction)*radius)
     bpy.context.object.data.energy=energy; bpy.context.object.data.shape="DISK"; bpy.context.object.data.size=radius*2
+bpy.context.scene.world = bpy.context.scene.world or bpy.data.worlds.new("DevSpaceWorld")
 bpy.context.scene.world.color=(0.035,0.035,0.05)
 scene=bpy.context.scene
-scene.render.engine="BLENDER_EEVEE_NEXT"
+scene.render.engine="BLENDER_EEVEE"
 scene.render.resolution_x=int(width); scene.render.resolution_y=int(height); scene.render.resolution_percentage=100
 scene.render.image_settings.file_format="PNG"; scene.render.filepath=output; scene.render.film_transparent=False
 bpy.ops.render.render(write_still=True)
+`;
+
+const GODOT_MODEL_PREVIEW = String.raw`extends SceneTree
+
+func _initialize() -> void:
+	_render.call_deferred()
+
+func _render() -> void:
+	var packed = load("res://model.glb")
+	if packed == null or not packed is PackedScene:
+		push_error("INSPECTOR_PREVIEW_IMPORT_FAILED")
+		quit(23)
+		return
+	var model = packed.instantiate()
+	root.add_child(model)
+	var bounds := AABB()
+	var found := false
+	for node in model.find_children("*", "MeshInstance3D", true, false):
+		var local: AABB = node.get_aabb()
+		var world: AABB = node.global_transform * local
+		bounds = world if not found else bounds.merge(world)
+		found = true
+	if not found:
+		push_error("INSPECTOR_PREVIEW_NO_MESH")
+		quit(23)
+		return
+	var center = bounds.get_center()
+	var radius = max(bounds.size.length() * 0.5, 0.01)
+	var world_environment := WorldEnvironment.new()
+	var environment := Environment.new()
+	environment.background_mode = Environment.BG_COLOR
+	environment.background_color = Color(0.035, 0.035, 0.05)
+	world_environment.environment = environment
+	root.add_child(world_environment)
+	var camera := Camera3D.new()
+	var directions = {
+		"front": Vector3(0, 0, 1),
+		"right": Vector3(1, 0, 0),
+		"top": Vector3(0, 1, 0),
+		"perspective": Vector3(1, 0.75, 1).normalized()
+	}
+	var view = OS.get_environment("DEVSPACE_PREVIEW_VIEW")
+	camera.position = center + directions.get(view, directions.perspective) * radius * 3.0
+	camera.look_at(center, Vector3.UP if view != "top" else Vector3.FORWARD)
+	if view != "perspective":
+		camera.projection = Camera3D.PROJECTION_ORTHOGONAL
+		camera.size = radius * 2.5
+	root.add_child(camera)
+	for rotation in [Vector3(-0.7, -0.7, 0), Vector3(0.5, 2.4, 0)]:
+		var light := DirectionalLight3D.new()
+		light.rotation = rotation
+		light.light_energy = 1.2 if rotation.x < 0 else 0.5
+		root.add_child(light)
+	await process_frame
+	await RenderingServer.frame_post_draw
+	var image = root.get_texture().get_image()
+	var error = image.save_png(OS.get_environment("DEVSPACE_PREVIEW_OUTPUT"))
+	quit(0 if error == OK else 23)
 `;

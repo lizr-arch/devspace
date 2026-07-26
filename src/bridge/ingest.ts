@@ -38,7 +38,11 @@ export function parseCoachReply(markdown: string): CoachReplySummary {
   ]);
   const verificationCommands = extractVerificationCommands(sections);
   const referencedFiles = extractReferencedFiles(
-    collectSectionBody(sections, ["referenced files", "files referenced", "引用文件"]),
+    collectSectionBody(sections, [
+      "referenced files",
+      "files referenced",
+      "引用文件",
+    ]),
   );
 
   return {
@@ -110,7 +114,12 @@ function extractListItems(body: string): string[] {
 }
 
 function extractVerificationCommands(sections: MarkdownSection[]): string[] {
-  const bodies = collectSectionBody(sections, ["verification", "verify", "验证", "tests"]);
+  const bodies = collectSectionBody(sections, [
+    "verification",
+    "verify",
+    "验证",
+    "tests",
+  ]);
   const commands: string[] = [];
 
   for (const body of bodies) {
@@ -144,9 +153,7 @@ function extractReferencedFiles(bodies: string[]): ReferencedFile[] {
 
       const lineMatch = /:(\d+)$/u.exec(normalizedItem);
       const path = (
-        lineMatch
-          ? normalizedItem.slice(0, lineMatch.index)
-          : normalizedItem
+        lineMatch ? normalizedItem.slice(0, lineMatch.index) : normalizedItem
       )
         .trim()
         .replaceAll("\\", "/");

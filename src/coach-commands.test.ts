@@ -76,12 +76,9 @@ async function writeFixtureRepo(repoRoot: string): Promise<void> {
   );
   await writeFile(
     join(repoRoot, ".trae", "notes.md"),
-    [
-      "# Bridge Notes",
-      "",
-      "read-only boundary bridge bridge bridge",
-      "",
-    ].join("\n"),
+    ["# Bridge Notes", "", "read-only boundary bridge bridge bridge", ""].join(
+      "\n",
+    ),
   );
   await writeFile(
     join(repoRoot, ".env.production"),
@@ -161,21 +158,11 @@ async function writeRankingFixtureRepo(repoRoot: string): Promise<void> {
   );
   await writeFile(
     join(repoRoot, "docs", "local-coach-bridge.md"),
-    [
-      "# Local Coach Bridge",
-      "",
-      "bridge read-only boundary",
-      "",
-    ].join("\n"),
+    ["# Local Coach Bridge", "", "bridge read-only boundary", ""].join("\n"),
   );
   await writeFile(
     join(repoRoot, "reports", "final_self_audit.md"),
-    [
-      "# Final Audit",
-      "",
-      "bridge read-only boundary",
-      "",
-    ].join("\n"),
+    ["# Final Audit", "", "bridge read-only boundary", ""].join("\n"),
   );
 }
 
@@ -197,18 +184,13 @@ async function writeEnvExampleFixtureRepo(repoRoot: string): Promise<void> {
   await mkdir(join(repoRoot, "src"), { recursive: true });
   await writeFile(
     join(repoRoot, ".env.example"),
-    [
-      "API_BASE_URL=https://example.test",
-      "FEATURE_FLAG_BRIDGE=true",
-      "",
-    ].join("\n"),
+    ["API_BASE_URL=https://example.test", "FEATURE_FLAG_BRIDGE=true", ""].join(
+      "\n",
+    ),
   );
   await writeFile(
     join(repoRoot, "src", "config.ts"),
-    [
-      "export const exampleConfigPath = '.env.example';",
-      "",
-    ].join("\n"),
+    ["export const exampleConfigPath = '.env.example';", ""].join("\n"),
   );
 }
 
@@ -277,7 +259,10 @@ try {
   assert.doesNotMatch(pack, /client\.key/);
 
   assert.equal(manifest.repoPath, repoRoot);
-  assert.equal(manifest.task, "Explain how coach pack reads config and source files");
+  assert.equal(
+    manifest.task,
+    "Explain how coach pack reads config and source files",
+  );
   assert.equal(Array.isArray(manifest.included), true);
   assert.equal(manifest.included.length > 0, true);
   assert.equal(
@@ -417,7 +402,10 @@ try {
       },
     },
   );
-  const realisticRankingPack = await readFile(realisticRankingPackPath, "utf-8");
+  const realisticRankingPack = await readFile(
+    realisticRankingPackPath,
+    "utf-8",
+  );
   assert.match(
     realisticRankingPack,
     /src\/bridge\/context-pack\.ts|src\\bridge\\context-pack\.ts/,
@@ -459,7 +447,10 @@ try {
       },
     },
   );
-  const singleSlotRankingPack = await readFile(singleSlotRankingPackPath, "utf-8");
+  const singleSlotRankingPack = await readFile(
+    singleSlotRankingPackPath,
+    "utf-8",
+  );
   assert.match(
     singleSlotRankingPack,
     /src\/bridge\/context-pack\.ts|src\\bridge\\context-pack\.ts/,
@@ -552,12 +543,13 @@ try {
     },
   );
   const envExamplePack = await readFile(envExamplePackPath, "utf-8");
-  const envExampleManifest = JSON.parse(await readFile(envExampleManifestPath, "utf-8"));
+  const envExampleManifest = JSON.parse(
+    await readFile(envExampleManifestPath, "utf-8"),
+  );
   assert.match(envExamplePack, /\.env\.example/);
   assert.equal(
-    envExampleManifest.omitted.some(
-      (entry: { reason: string }) =>
-        /Sensitive file matched but omitted \(.env-family\)/i.test(entry.reason),
+    envExampleManifest.omitted.some((entry: { reason: string }) =>
+      /Sensitive file matched but omitted \(.env-family\)/i.test(entry.reason),
     ),
     false,
   );
@@ -588,20 +580,28 @@ try {
       },
     },
   );
-  const sessionId = extractLineValue(sessionStartResult.stdout, "Created coach session");
+  const sessionId = extractLineValue(
+    sessionStartResult.stdout,
+    "Created coach session",
+  );
   const sessionDir = extractLineValue(sessionStartResult.stdout, "Session dir");
   const sessionStatePath = join(sessionDir, "session.json");
   const initialPackPath = join(sessionDir, "pack-001.md");
   const initialManifestPath = join(sessionDir, "pack-001.manifest.json");
   const initialPack = extractCoachPack(sessionStartResult.stdout);
-  const initialSessionState = JSON.parse(await readFile(sessionStatePath, "utf-8"));
+  const initialSessionState = JSON.parse(
+    await readFile(sessionStatePath, "utf-8"),
+  );
   assert.equal(initialSessionState.sessionId, sessionId);
   assert.equal(initialSessionState.repoPath, coachSessionRepoRoot);
   assert.equal(initialSessionState.status, "WAITING_FOR_COACH");
   assert.equal(initialSessionState.turns.length, 1);
   assert.equal(existsSync(initialPackPath), false);
   assert.match(initialPack, /src\/coach\.ts|src\\coach\.ts/);
-  assert.equal(JSON.parse(await readFile(initialManifestPath, "utf-8")).task.length > 0, true);
+  assert.equal(
+    JSON.parse(await readFile(initialManifestPath, "utf-8")).task.length > 0,
+    true,
+  );
 
   const sessionReplyPath = join(root, "session_reply.md");
   await writeFile(
@@ -642,7 +642,9 @@ try {
       },
     },
   );
-  const ingestedSessionState = JSON.parse(await readFile(sessionStatePath, "utf-8"));
+  const ingestedSessionState = JSON.parse(
+    await readFile(sessionStatePath, "utf-8"),
+  );
   assert.equal(ingestedSessionState.status, "READY_FOR_NEXT_PACK");
   assert.equal(ingestedSessionState.replies.length, 1);
   assert.equal(
@@ -655,14 +657,7 @@ try {
 
   const sessionStatusResult = await execFileAsync(
     process.execPath,
-    [
-      tsxCliPath,
-      cliPath,
-      "coach-session",
-      "status",
-      "--session",
-      sessionId,
-    ],
+    [tsxCliPath, cliPath, "coach-session", "status", "--session", sessionId],
     {
       cwd: root,
       env: {
@@ -675,7 +670,10 @@ try {
   const sessionStatus = JSON.parse(sessionStatusResult.stdout);
   assert.equal(sessionStatus.sessionId, sessionId);
   assert.equal(sessionStatus.status, "READY_FOR_NEXT_PACK");
-  assert.deepEqual(sessionStatus.pendingRequests, ["src/config.ts", "README.md"]);
+  assert.deepEqual(sessionStatus.pendingRequests, [
+    "src/config.ts",
+    "README.md",
+  ]);
   assert.deepEqual(sessionStatus.usage, {
     packCount: 1,
     uniqueFileCount: initialSessionState.turns[0].included.length,
@@ -718,13 +716,23 @@ try {
     },
   );
   const nextPackPath = extractLineValue(nextPackResult.stdout, "Wrote pack");
-  const nextManifestPath = extractLineValue(nextPackResult.stdout, "Wrote manifest");
+  const nextManifestPath = extractLineValue(
+    nextPackResult.stdout,
+    "Wrote manifest",
+  );
   const nextPack = await readFile(nextPackPath, "utf-8");
-  const finalSessionState = JSON.parse(await readFile(sessionStatePath, "utf-8"));
+  const finalSessionState = JSON.parse(
+    await readFile(sessionStatePath, "utf-8"),
+  );
   assert.match(nextPack, /src\/config\.ts|src\\config\.ts/);
   assert.equal(finalSessionState.turns.length, 2);
   assert.equal(finalSessionState.status, "WAITING_FOR_COACH");
-  assert.equal(JSON.parse(await readFile(nextManifestPath, "utf-8")).task.includes("src/config.ts"), true);
+  assert.equal(
+    JSON.parse(await readFile(nextManifestPath, "utf-8")).task.includes(
+      "src/config.ts",
+    ),
+    true,
+  );
 
   let deniedError: Error | undefined;
   try {
@@ -841,7 +849,10 @@ try {
     { path: ".gitignore" },
   ]);
   assert.deepEqual(reorderedSummary.verificationCommands, ["rtk npm test"]);
-  assert.equal(JSON.parse(await readFile(orderedOutPath, "utf-8")).referencedFiles.length, 4);
+  assert.equal(
+    JSON.parse(await readFile(orderedOutPath, "utf-8")).referencedFiles.length,
+    4,
+  );
 } finally {
   await rm(root, { recursive: true, force: true });
 }

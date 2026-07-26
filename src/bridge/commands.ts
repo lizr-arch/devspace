@@ -14,7 +14,9 @@ export async function runCoachPackCommand(args: string[]): Promise<void> {
   const task = requireOption(args, "--task");
   const outPath = resolve(requireOption(args, "--out"));
   const budgetValue = getOption(args, "--budget");
-  const budget = budgetValue ? parsePositiveInteger(budgetValue, "--budget") : undefined;
+  const budget = budgetValue
+    ? parsePositiveInteger(budgetValue, "--budget")
+    : undefined;
 
   const result = await buildCoachPack({
     repoPath,
@@ -25,19 +27,27 @@ export async function runCoachPackCommand(args: string[]): Promise<void> {
   const manifestPath = deriveManifestPath(outPath);
   await mkdir(dirname(outPath), { recursive: true });
   await writeFile(outPath, result.pack, "utf-8");
-  await writeFile(manifestPath, JSON.stringify(result.manifest, null, 2), "utf-8");
+  await writeFile(
+    manifestPath,
+    JSON.stringify(result.manifest, null, 2),
+    "utf-8",
+  );
 
   console.log(`Wrote coach pack: ${outPath}`);
   console.log(`Wrote manifest: ${manifestPath}`);
   if (result.manifest.requiresExpansionApproval) {
-    console.log("Pack hit a default ceiling; narrow the task or approve expansion.");
+    console.log(
+      "Pack hit a default ceiling; narrow the task or approve expansion.",
+    );
   }
 }
 
 export async function runCoachIngestCommand(args: string[]): Promise<void> {
   const replyPath = extractReplyPath(args, ["--out"]);
   if (!replyPath) {
-    throw new Error("Missing coach reply path. Use: devspace coach-ingest <reply.md>");
+    throw new Error(
+      "Missing coach reply path. Use: devspace coach-ingest <reply.md>",
+    );
   }
 
   const outPath = getOption(args, "--out");
@@ -104,7 +114,9 @@ async function runCoachSessionStart(args: string[]): Promise<void> {
   const task = requireOption(args, "--task");
   const outPath = getOption(args, "--out");
   const budgetValue = getOption(args, "--budget");
-  const budget = budgetValue ? parsePositiveInteger(budgetValue, "--budget") : undefined;
+  const budget = budgetValue
+    ? parsePositiveInteger(budgetValue, "--budget")
+    : undefined;
   const result = await startCoachSession({
     repoPath,
     task,
@@ -118,7 +130,9 @@ async function runCoachSessionStart(args: string[]): Promise<void> {
   console.log(`Wrote manifest: ${result.manifestPath}`);
   await emitCoachPack(result.pack, outPath, result.packPath);
   if (result.requiresExpansionApproval) {
-    console.log("Pack hit a default ceiling; narrow the task or approve expansion.");
+    console.log(
+      "Pack hit a default ceiling; narrow the task or approve expansion.",
+    );
   }
 }
 
@@ -150,7 +164,9 @@ async function runCoachSessionIngest(args: string[]): Promise<void> {
     );
     console.log(`Wrote reply summary: ${absoluteOutPath}`);
   } else {
-    console.log("Reply summary not persisted by default. Pass --out <file> to save it.");
+    console.log(
+      "Reply summary not persisted by default. Pass --out <file> to save it.",
+    );
   }
 }
 
@@ -159,7 +175,9 @@ async function runCoachSessionNextPack(args: string[]): Promise<void> {
   const task = getOption(args, "--task");
   const outPath = getOption(args, "--out");
   const budgetValue = getOption(args, "--budget");
-  const budget = budgetValue ? parsePositiveInteger(budgetValue, "--budget") : undefined;
+  const budget = budgetValue
+    ? parsePositiveInteger(budgetValue, "--budget")
+    : undefined;
   const result = await createNextCoachSessionPack({
     session,
     task,
@@ -172,7 +190,9 @@ async function runCoachSessionNextPack(args: string[]): Promise<void> {
   console.log(`Wrote manifest: ${result.manifestPath}`);
   await emitCoachPack(result.pack, outPath, result.packPath);
   if (result.requiresExpansionApproval) {
-    console.log("Pack hit a default ceiling; narrow the task or approve expansion.");
+    console.log(
+      "Pack hit a default ceiling; narrow the task or approve expansion.",
+    );
   }
 }
 
@@ -230,7 +250,9 @@ async function emitCoachPack(
     return;
   }
 
-  console.log("Pack is not persisted by default. Copy the pack below or pass --out <file>.");
+  console.log(
+    "Pack is not persisted by default. Copy the pack below or pass --out <file>.",
+  );
   console.log(`Suggested pack path: ${defaultPackPath}`);
   process.stdout.write("----- BEGIN COACH PACK -----\n");
   process.stdout.write(pack);

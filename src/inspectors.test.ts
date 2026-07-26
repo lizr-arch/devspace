@@ -142,6 +142,9 @@ bpy.ops.export_scene.gltf(filepath=glb_path, export_format="GLB")
   assert.equal(preview.width, 256);
   assert.equal(preview.height, 192);
   assert.match(preview.sha256, /^[0-9a-f]{64}$/);
+  const glbBefore = digest(
+    await readFile(join(root, "fixtures", "known-model.glb")),
+  );
   const modelPreview = await manager.renderModelPreview({
     workspaceRoot: root,
     path: "fixtures/known-model.glb",
@@ -152,7 +155,7 @@ bpy.ops.export_scene.gltf(filepath=glb_path, export_format="GLB")
   assert.ok(modelPreview.bytes > 100);
   assert.equal(
     digest(await readFile(join(root, "fixtures", "known-model.glb"))),
-    digest(await readFile(join(root, "fixtures", "known-model.glb"))),
+    glbBefore,
   );
   console.log("inspector tests passed");
 } finally {
