@@ -70,6 +70,8 @@ export interface PublicExternalClientProbe {
   toolNames?: string[];
   safeGitToolDefinitions?: Record<string, Record<string, unknown>>;
   safeGitStructuredErrorCode?: string;
+  safeGitMergeCheckoutErrorCode?: string;
+  safeGitPushCheckoutErrorCode?: string;
   safeGitUnknownFieldRejected?: boolean;
   runnerNames?: string[];
   schemaFingerprint?: string;
@@ -282,6 +284,8 @@ export async function probePublicExternalClientFlow(
   let safeGitToolDefinitions:
     Record<string, Record<string, unknown>> | undefined;
   let safeGitStructuredErrorCode: string | undefined;
+  let safeGitMergeCheckoutErrorCode: string | undefined;
+  let safeGitPushCheckoutErrorCode: string | undefined;
   let safeGitUnknownFieldRejected: boolean | undefined;
   let runnerNames: string[] | undefined;
   let schemaFingerprint: string | undefined;
@@ -865,6 +869,60 @@ export async function probePublicExternalClientFlow(
             "code",
           );
 
+          const checkoutGitCalls = await Promise.all([
+            postMcpJsonRpc(
+              info.publicMcpUrl,
+              accessToken,
+              {
+                jsonrpc: "2.0",
+                id: 33,
+                method: "tools/call",
+                params: {
+                  name: "git_merge",
+                  arguments: {
+                    workspaceId,
+                    sourceRef: "HEAD",
+                    mode: "ff_only",
+                    expectedHeadSha: "0".repeat(40),
+                  },
+                },
+              },
+              sessionId,
+            ),
+            postMcpJsonRpc(
+              info.publicMcpUrl,
+              accessToken,
+              {
+                jsonrpc: "2.0",
+                id: 34,
+                method: "tools/call",
+                params: {
+                  name: "git_push",
+                  arguments: {
+                    workspaceId,
+                    destinationBranch: "main",
+                    expectedLocalSha: "0".repeat(40),
+                    expectedRemoteSha: "0".repeat(40),
+                  },
+                },
+              },
+              sessionId,
+            ),
+          ]);
+          const checkoutErrorCode = (
+            response: (typeof checkoutGitCalls)[0],
+          ) => {
+            const result = asRecord(
+              asRecord(parseMcpResponseJson(response.text))?.result,
+            );
+            const structured = asRecord(result?.structuredContent);
+            return stringField(asRecord(structured?.error), "code");
+          };
+          safeGitMergeCheckoutErrorCode = checkoutErrorCode(
+            checkoutGitCalls[0],
+          );
+          safeGitPushCheckoutErrorCode = checkoutErrorCode(checkoutGitCalls[1]);
+
           const unknownField = await postMcpJsonRpc(
             info.publicMcpUrl,
             accessToken,
@@ -1374,6 +1432,8 @@ export async function probePublicExternalClientFlow(
     toolNames,
     safeGitToolDefinitions,
     safeGitStructuredErrorCode,
+    safeGitMergeCheckoutErrorCode,
+    safeGitPushCheckoutErrorCode,
     safeGitUnknownFieldRejected,
     runnerNames,
     schemaFingerprint,

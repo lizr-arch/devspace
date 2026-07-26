@@ -76,8 +76,10 @@ index, tracked files, untracked files, and conflict state must be unchanged.
 }
 ```
 
-The workspace root must equal the Git root, be attached to a branch, and be
-fully clean, including untracked files. Expected SHAs are optimistic locks.
+The workspace must be a DevSpace-managed worktree whose root equals the Git
+root, be attached to its generated branch, and be fully clean, including
+untracked files. Its source repository must match the exact operator-approved
+repository policy. Expected SHAs are optimistic locks.
 Source refs accept only a full object ID, `HEAD`, or a strict ref name; revision
 ranges, reflog selectors, path specifications, URLs, leading options, and shell
 syntax are rejected.
@@ -107,9 +109,11 @@ reported as restored.
 }
 ```
 
-The source must resolve to the clean workspace HEAD. DevSpace fetches the exact
-approved remote, compares its destination with `expectedRemoteSha`, and verifies
-that the expected remote commit is an ancestor of `expectedLocalSha`.
+The workspace must pass the same managed, attached, clean, and exact repository
+policy checks as merge. The source must resolve to that workspace's HEAD.
+DevSpace fetches the exact approved remote, compares its destination with
+`expectedRemoteSha`, and verifies that the expected remote commit is an
+ancestor of `expectedLocalSha`.
 
 Git has no ordinary-push option that atomically compares a previously observed
 remote SHA. DevSpace therefore generates an internal exact
@@ -157,8 +161,10 @@ merges the drift, or forces a history update.
 
 Git uses argument arrays, fixed timeouts and output limits, no shell, no
 terminal prompt, an empty trusted hooks directory, signing disabled, and
-dangerous inherited Git/SSH execution variables removed. Repository-local
-credential helpers, SSH commands, upload/receive-pack overrides, URL rewrites,
-filters, and merge drivers are rejected. Production remotes are exact
-operator-approved HTTPS URLs; local `file://` URLs require an equally exact
-operator binding and are intended for isolated tests.
+dangerous inherited Git/SSH execution variables removed. On macOS and other
+POSIX hosts, each Git call runs in a separate process group so a timeout kills
+Git and its local descendants before the repository mutex is released.
+Repository-local credential helpers, SSH commands, upload/receive-pack
+overrides, URL rewrites, filters, and merge drivers are rejected. Production
+remotes are exact operator-approved HTTPS URLs; local `file://` URLs require an
+equally exact operator binding and are intended for isolated tests.

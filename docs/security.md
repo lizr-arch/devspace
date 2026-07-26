@@ -157,6 +157,12 @@ Managed worktrees use a unique attached `devspace/integration/...` branch so a
 bounded merge can run without touching a dirty source checkout. Merge never
 auto-stashes, cleans, resets, or ignores untracked files.
 
+`git_merge` and `git_push` enforce this workflow boundary: ordinary checkout,
+detached, unmanaged, or unapproved-source workspaces are rejected before a Git
+mutation runs. Remote Git calls use a separate POSIX process group so timeout
+termination also stops local Git descendants before the repository lock is
+released.
+
 ## Logs
 
 By default, DevSpace logs requests and tool calls. Shell command previews are

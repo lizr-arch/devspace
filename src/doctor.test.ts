@@ -376,6 +376,14 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.toolNames?.includes("git_merge"), true);
     assert.equal(probe.toolNames?.includes("git_push"), true);
     assert.equal(probe.safeGitStructuredErrorCode, "GIT_REMOTE_URL_MISMATCH");
+    assert.equal(
+      probe.safeGitMergeCheckoutErrorCode,
+      "GIT_MANAGED_WORKTREE_REQUIRED",
+    );
+    assert.equal(
+      probe.safeGitPushCheckoutErrorCode,
+      "GIT_MANAGED_WORKTREE_REQUIRED",
+    );
     assert.equal(probe.safeGitUnknownFieldRejected, true);
     const safeGitDefinitions = probe.safeGitToolDefinitions ?? {};
     assert.deepEqual(Object.keys(safeGitDefinitions).sort(), [

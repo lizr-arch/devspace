@@ -109,6 +109,7 @@ import { createWorkspaceStore } from "./workspace-store.js";
 import {
   formatAgentsPath,
   WorkspaceRegistry,
+  type Workspace,
   type WorkspaceContext,
 } from "./workspaces.js";
 
@@ -929,6 +930,23 @@ function gitRemotePolicyForWorkspace(
     approvedDestinationBranches:
       config.gitRemoteWrite.approvedDestinationBranches,
   };
+}
+
+function assertManagedAttachedGitWorkspace(workspace: Workspace): void {
+  if (
+    workspace.mode !== "worktree" ||
+    workspace.worktree?.managed !== true ||
+    workspace.worktree.path !== workspace.root
+  ) {
+    throw new Error(
+      "GIT_MANAGED_WORKTREE_REQUIRED: Operation requires a DevSpace-managed worktree.",
+    );
+  }
+  if (workspace.worktree.detached || !workspace.worktree.branch) {
+    throw new Error(
+      "GIT_DETACHED_HEAD: Operation requires an attached managed worktree branch.",
+    );
+  }
 }
 
 function gitRemoteWriteSummary(config: ServerConfig) {
@@ -2552,6 +2570,8 @@ function createMcpServer(
           projectMemoryReceiptId,
         );
         try {
+          assertManagedAttachedGitWorkspace(workspace);
+          gitRemotePolicyForWorkspace(config, workspace);
           const merge = await mergeGit({
             workspaceRoot: workspace.root,
             sourceRef,
@@ -2631,6 +2651,7 @@ function createMcpServer(
             projectMemoryReceiptId,
           );
           try {
+            assertManagedAttachedGitWorkspace(workspace);
             const policy = gitRemotePolicyForWorkspace(config, workspace);
             const push = await pushGit({
               workspaceRoot: workspace.root,

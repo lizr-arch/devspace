@@ -865,6 +865,37 @@ test("git_push times out a delayed remote rejection without updating the remote"
   }
 });
 
+test("git_push kills a delayed accepting remote process group on timeout", async () => {
+  const fixture = await createRemoteFixture("push-timeout-accept");
+  try {
+    const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+    const localSha = await commitFile(
+      fixture.client,
+      "client.txt",
+      "client update\n",
+      "client update",
+    );
+    await installRemoteHook(fixture, "#!/bin/sh\nsleep 1\nexit 0\n");
+
+    await expectCode(
+      pushGit({
+        workspaceRoot: fixture.client,
+        approvedRemotes: ["origin"],
+        approvedDestinationBranches: ["main"],
+        destinationBranch: "main",
+        expectedLocalSha: localSha,
+        expectedRemoteSha: remoteSha,
+        timeoutMs: 100,
+      }),
+      "GIT_TIMEOUT",
+    );
+    await delay(1_200);
+    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("remote operations in linked worktrees are serialized by their common Git directory", async () => {
   const fixture = await createRemoteFixture("common-dir-mutex");
   try {

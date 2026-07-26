@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmodSync, mkdtempSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { normalizeWorkspaceRelativePath } from "./workspace-paths.js";
 
-const execFileAsync = promisify(execFile);
 const MAX_DIFF_BYTES = 1024 * 1024;
 const MAX_GIT_PATHS = 100;
 const LOCAL_GIT_TIMEOUT_MS = 30_000;
@@ -716,9 +714,9 @@ async function runGit(
 ): Promise<{ stdout: string; stderr: string }> {
   try {
     const env = safeGitEnvironment();
-    const result = await execFileAsync(
-      "git",
-      [
+    return await spawnGitProcessGroup({
+      cwd,
+      args: [
         "-c",
         `core.hooksPath=${getEmptyHooksPath()}`,
         "-c",
@@ -739,16 +737,10 @@ async function runGit(
         "protocol.ext.allow=never",
         ...args,
       ],
-      {
-        cwd,
-        encoding: "utf8",
-        maxBuffer,
-        timeout: timeoutMs,
-        killSignal: "SIGKILL",
-        env,
-      },
-    );
-    return { stdout: result.stdout, stderr: result.stderr };
+      env,
+      maxBuffer,
+      timeoutMs,
+    });
   } catch (error) {
     const failure = error as Error & {
       stderr?: string;
@@ -756,8 +748,9 @@ async function runGit(
       code?: number | string;
       killed?: boolean;
       signal?: string;
+      timedOut?: boolean;
     };
-    const timedOut = Boolean(failure.killed && failure.signal === "SIGKILL");
+    const timedOut = failure.timedOut === true;
     const detail = sanitizeGitOutput(
       String(failure.stderr || failure.stdout || failure.message || ""),
     );
@@ -771,6 +764,104 @@ async function runGit(
       timedOut,
     });
   }
+}
+
+function spawnGitProcessGroup(input: {
+  cwd: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  maxBuffer: number;
+  timeoutMs: number;
+}): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const detached = process.platform !== "win32";
+    const child = spawn("git", input.args, {
+      cwd: input.cwd,
+      env: input.env,
+      detached,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let outputLimitExceeded = false;
+    let settled = false;
+
+    const terminateProcessGroup = () => {
+      if (child.pid && detached) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+          return;
+        } catch {
+          // Fall back to killing the direct child if the process group exited.
+        }
+      }
+      child.kill("SIGKILL");
+    };
+
+    const capture = (target: Buffer[], chunk: Buffer, isStdout: boolean) => {
+      const currentBytes = isStdout ? stdoutBytes : stderrBytes;
+      const remaining = Math.max(0, input.maxBuffer - currentBytes);
+      if (remaining > 0) target.push(chunk.subarray(0, remaining));
+      if (isStdout) stdoutBytes += chunk.byteLength;
+      else stderrBytes += chunk.byteLength;
+      if (
+        !outputLimitExceeded &&
+        (stdoutBytes > input.maxBuffer || stderrBytes > input.maxBuffer)
+      ) {
+        outputLimitExceeded = true;
+        terminateProcessGroup();
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk, true));
+    child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk, false));
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminateProcessGroup();
+    }, input.timeoutMs);
+    timer.unref();
+
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const result = {
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      };
+      if (code === 0 && !timedOut && !outputLimitExceeded) {
+        resolve(result);
+        return;
+      }
+      const error = Object.assign(
+        new Error(
+          outputLimitExceeded
+            ? "Git command output exceeded the configured limit."
+            : timedOut
+              ? "Git command timed out."
+              : `Git command failed with exit code ${String(code)}.`,
+        ),
+        {
+          ...result,
+          code: code ?? undefined,
+          killed: timedOut || outputLimitExceeded,
+          signal: signal ?? undefined,
+          timedOut,
+        },
+      );
+      reject(error);
+    });
+  });
 }
 
 async function assertNoExecutableGitFilters(root: string): Promise<void> {
