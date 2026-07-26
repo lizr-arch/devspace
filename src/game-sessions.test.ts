@@ -95,6 +95,7 @@ try {
   assert.match(started.sessionId, /^session_/);
   assert.ok(started.engineVersion);
   assert.equal(started.viewport.width, 320);
+  assert.equal("processToken" in started, false);
 
   await assert.rejects(
     manager.start({
@@ -132,6 +133,14 @@ try {
       frames: 2,
     }),
     { accepted: true },
+  );
+  await assert.rejects(
+    manager.sendInput("ws_game_fixture", started.sessionId, {
+      kind: "action",
+      action: "not_registered",
+      operation: "tap",
+    }),
+    /GAME_SESSION_ACTION_UNKNOWN/,
   );
   await manager.sendInput("ws_game_fixture", started.sessionId, {
     kind: "click",
@@ -180,10 +189,18 @@ try {
       join(stateDir, "game-sessions", `${started.sessionId}.json`),
       "utf8",
     ),
-  ) as { status: string; dirtyDiffSha256: string; statusSha256: string };
+  ) as {
+    status: string;
+    dirtyDiffSha256: string;
+    statusSha256: string;
+    workspaceRoot: string;
+    processToken?: string;
+  };
   assert.equal(persisted.status, "stopped");
   assert.match(persisted.dirtyDiffSha256, /^[0-9a-f]{64}$/);
   assert.match(persisted.statusSha256, /^[0-9a-f]{64}$/);
+  assert.equal(persisted.workspaceRoot, root);
+  assert.match(persisted.processToken ?? "", /^[0-9a-f-]{36}$/);
 
   const crash = await manager.start({
     workspaceId: "ws_crash_fixture",

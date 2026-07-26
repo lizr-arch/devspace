@@ -40,10 +40,7 @@ func _process(_delta: float) -> bool:
 
 func _read_messages() -> void:
 	while socket.get_available_bytes() > 0:
-		var packet = socket.get_partial_data(min(socket.get_available_bytes(), 65536))
-		if packet[0] != OK:
-			return
-		receive_buffer += packet[1].get_string_from_utf8()
+		receive_buffer += socket.get_utf8_string(min(socket.get_available_bytes(), 65536))
 		if receive_buffer.length() > 1048576:
 			push_error("GAME_SESSION_PROTOCOL_TOO_LARGE")
 			quit(93)
@@ -65,13 +62,16 @@ func _handle_message(line: String) -> void:
 		"inspect":
 			_reply(request_id, {"nodes": _limited_tree()})
 		"action":
-			_inject_action(message)
-			_reply(request_id, {"accepted": true})
+			if not InputMap.has_action(str(message.get("action", ""))):
+				_reply(request_id, {}, "GAME_SESSION_ACTION_UNKNOWN")
+			else:
+				_inject_action(message)
+				_reply(request_id, {"accepted": true})
 		"click":
 			_inject_click(message)
 			_reply(request_id, {"accepted": true})
 		"capture":
-			_capture.call_deferred(request_id, str(message.get("path", "")))
+			_capture(request_id, str(message.get("path", "")))
 		"quit":
 			_reply(request_id, {"stopping": true})
 			quit()
@@ -109,7 +109,6 @@ func _inject_click(message: Dictionary) -> void:
 	Input.parse_input_event(event)
 
 func _capture(request_id: String, output_path: String) -> void:
-	await RenderingServer.frame_post_draw
 	var image = root.get_texture().get_image()
 	var error = image.save_png(output_path)
 	if error != OK:

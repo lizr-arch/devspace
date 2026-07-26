@@ -56,7 +56,6 @@ export interface GameSessionSnapshot {
   untrackedCount: number;
   processId?: number;
   processGroupId?: number;
-  processToken?: string;
   lastHeartbeatAt?: string;
   exitCode?: number;
   signal?: string;
@@ -66,6 +65,7 @@ export interface GameSessionSnapshot {
 
 interface LiveSession extends GameSessionSnapshot {
   workspaceRoot: string;
+  processToken?: string;
   child?: ChildProcessByStdio<null, Readable, Readable>;
   bridgeServer?: Server;
   socket?: Socket;
@@ -361,6 +361,22 @@ export class GameSessionManager {
         "GAME_SESSION_INTERRUPTED: DevSpace stopped during the session.";
       this.terminate(session, "SIGTERM");
       this.persist(session);
+      const killHandle = setTimeout(() => {
+        if (
+          session.processGroupId &&
+          session.processToken &&
+          processGroupContainsToken(
+            session.processGroupId,
+            session.processToken,
+          )
+        ) {
+          this.terminate(session, "SIGKILL");
+        }
+      }, STOP_GRACE_MS);
+      killHandle.unref();
+      session.child?.stdout.removeAllListeners();
+      session.child?.stderr.removeAllListeners();
+      session.child?.removeAllListeners();
     }
   }
 
@@ -384,6 +400,11 @@ export class GameSessionManager {
           parsed.error =
             "GAME_SESSION_INTERRUPTED: DevSpace restarted during the session.";
           terminatePersistedProcess(parsed);
+          const killHandle = setTimeout(
+            () => terminatePersistedProcess(parsed, "SIGKILL"),
+            STOP_GRACE_MS,
+          );
+          killHandle.unref();
         }
         this.sessions.set(parsed.sessionId, parsed);
         this.persist(parsed);
@@ -449,7 +470,6 @@ export class GameSessionManager {
     const child = spawn(
       executable,
       [
-        "--headless",
         "--path",
         projectRoot,
         "--resolution",
@@ -676,7 +696,11 @@ export class GameSessionManager {
 
   private persist(session: LiveSession): void {
     mkdirSync(this.sessionsDir, { recursive: true, mode: 0o700 });
-    const persisted = publicSnapshot(session);
+    const persisted = {
+      ...publicSnapshot(session),
+      workspaceRoot: session.workspaceRoot,
+      processToken: session.processToken,
+    };
     writeFileSync(
       join(this.sessionsDir, `${session.sessionId}.json`),
       JSON.stringify(persisted, null, 2) + "\n",
@@ -752,7 +776,6 @@ function publicSnapshot(session: LiveSession): GameSessionSnapshot {
     untrackedCount: session.untrackedCount,
     processId: session.processId,
     processGroupId: session.processGroupId,
-    processToken: session.processToken,
     lastHeartbeatAt: session.lastHeartbeatAt,
     exitCode: session.exitCode,
     signal: session.signal,
@@ -841,7 +864,10 @@ function waitForExit(
   });
 }
 
-function terminatePersistedProcess(session: LiveSession): void {
+function terminatePersistedProcess(
+  session: LiveSession,
+  signal: NodeJS.Signals = "SIGTERM",
+): void {
   if (
     process.platform === "win32" ||
     !session.processGroupId ||
@@ -851,7 +877,7 @@ function terminatePersistedProcess(session: LiveSession): void {
     return;
   }
   try {
-    process.kill(-session.processGroupId, "SIGTERM");
+    process.kill(-session.processGroupId, signal);
   } catch {
     // Already exited.
   }
