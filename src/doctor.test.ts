@@ -316,6 +316,9 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "devspace_info",
       "list_workspaces",
       "list_artifacts",
+      "inspect_artifact",
+      "git_status",
+      "git_diff",
       "resume_workspace",
       "open_workspace",
       "project_memory_preflight",
@@ -405,8 +408,8 @@ async function testProjectMemoryHttpMcpFlow(): Promise<void> {
     assert.equal(probe.projectMemoryDecision, "observe_would_deny");
     assert.equal(probe.projectMemoryReceiptReadOutcome, "receipt_match");
     assert.equal(probe.projectMemoryMissingReadOutcome, "receipt_missing");
-    assert.equal(probe.projectMemoryMissingShellOutcome, "receipt_missing");
-    assert.equal(probe.projectMemoryShellSucceeded, true);
+    assert.equal(probe.projectMemoryMissingShellOutcome, undefined);
+    assert.equal(probe.projectMemoryShellSucceeded, undefined);
   } finally {
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => (error ? reject(error) : resolve()));

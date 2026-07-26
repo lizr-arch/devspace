@@ -1,0 +1,99 @@
+import assert from "node:assert/strict";
+import {
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  copyWorkspacePath,
+  createWorkspaceDirectory,
+  moveWorkspacePath,
+  moveWorkspacePathToTrash,
+} from "./workspace-files.js";
+
+const root = await mkdtemp(join(tmpdir(), "devspace-files-"));
+const stateDir = await mkdtemp(join(tmpdir(), "devspace-files-state-"));
+try {
+  assert.equal(
+    (await createWorkspaceDirectory(root, "assets/raw")).created,
+    true,
+  );
+  assert.equal(
+    (await createWorkspaceDirectory(root, "assets/raw")).created,
+    false,
+  );
+  await writeFile(join(root, "assets/raw/a.txt"), "alpha");
+  const copied = await copyWorkspacePath({
+    workspaceRoot: root,
+    sourcePath: "assets/raw/a.txt",
+    destinationPath: "assets/copy.txt",
+  });
+  assert.equal(copied.bytes, 5);
+  assert.equal(await readFile(join(root, "assets/copy.txt"), "utf8"), "alpha");
+  await assert.rejects(
+    copyWorkspacePath({
+      workspaceRoot: root,
+      sourcePath: "assets/raw/a.txt",
+      destinationPath: "assets/copy.txt",
+    }),
+    /PATH_EXISTS/,
+  );
+  const outside = await mkdtemp(join(tmpdir(), "devspace-files-outside-"));
+  try {
+    await symlink(outside, join(root, "assets", "escape"));
+    await assert.rejects(
+      copyWorkspacePath({
+        workspaceRoot: root,
+        sourcePath: "assets/raw/a.txt",
+        destinationPath: "assets/escape/a.txt",
+      }),
+      /WORKSPACE_ESCAPE/,
+    );
+  } finally {
+    await rm(outside, { recursive: true, force: true });
+  }
+  const moved = await moveWorkspacePath({
+    workspaceRoot: root,
+    stateDir,
+    workspaceId: "ws_files",
+    sourcePath: "assets/copy.txt",
+    destinationPath: "assets/moved.txt",
+  });
+  assert.equal(moved.destinationPath, "assets/moved.txt");
+  const trash = await moveWorkspacePathToTrash({
+    workspaceRoot: root,
+    stateDir,
+    workspaceId: "ws_files",
+    path: "assets/moved.txt",
+  });
+  assert.match(trash.trashId, /^trash_/);
+  await assert.rejects(lstat(join(root, "assets/moved.txt")));
+  assert.equal(
+    await readFile(
+      join(stateDir, "trash", "ws_files", trash.trashId, "payload"),
+      "utf8",
+    ),
+    "alpha",
+  );
+  await mkdir(join(root, "tree"), { recursive: true });
+  await writeFile(join(root, "tree", "x.txt"), "x");
+  await symlink(join(root, "tree", "x.txt"), join(root, "tree", "link.txt"));
+  await assert.rejects(
+    copyWorkspacePath({
+      workspaceRoot: root,
+      sourcePath: "tree",
+      destinationPath: "tree-copy",
+    }),
+    /symbolic.?link/i,
+  );
+  console.log("workspace file tests passed");
+} finally {
+  await rm(root, { recursive: true, force: true });
+  await rm(stateDir, { recursive: true, force: true });
+}

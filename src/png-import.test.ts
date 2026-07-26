@@ -35,7 +35,7 @@ try {
       workspaceRoot: root,
       base64Data: PNG.toString("base64"),
     }),
-    /already exists/,
+    /PATH_EXISTS/,
   );
 
   const replacement = Buffer.concat([PNG, Buffer.from("replacement")]);
@@ -53,7 +53,7 @@ try {
       workspaceRoot: root,
       base64Data: Buffer.from("not png").toString("base64"),
     }),
-    /not a PNG/,
+    /ASSET_FORMAT_REJECTED/,
   );
 
   await assert.rejects(
@@ -62,7 +62,7 @@ try {
       workspaceRoot: root,
       base64Data: PNG.toString("base64"),
     }),
-    /ending in .png/,
+    /ASSET_FORMAT_REJECTED/,
   );
 
   await assert.rejects(
@@ -72,7 +72,7 @@ try {
       base64Data: PNG.toString("base64"),
       expectedSha256: "0".repeat(64),
     }),
-    /SHA-256 mismatch/,
+    /ASSET_HASH_MISMATCH/,
   );
 
   const outside = await mkdtemp(join(tmpdir(), "devspace-png-outside-"));
@@ -85,7 +85,7 @@ try {
         workspaceRoot: root,
         base64Data: PNG.toString("base64"),
       }),
-      /outside the workspace root/,
+      /WORKSPACE_ESCAPE/,
     );
   } finally {
     await rm(outside, { recursive: true, force: true });
@@ -103,7 +103,7 @@ try {
       base64Data: PNG.toString("base64"),
       overwrite: true,
     }),
-    /symbolic-link/,
+    /symbolic.?link/i,
   );
 
   console.log("png import tests passed");

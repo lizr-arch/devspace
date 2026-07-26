@@ -204,6 +204,42 @@ try {
   });
   assert.match(large.errors[0] ?? "", /ARTIFACT_TOO_LARGE/);
 
+  const legacyWorkspaceId = "ws_legacy";
+  const legacyPath = join(workspaceRoot, "legacy.png");
+  writeFileSync(legacyPath, png);
+  const legacyLedgerDir = join(stateDir, "artifacts", legacyWorkspaceId);
+  mkdirSync(legacyLedgerDir, { recursive: true });
+  writeFileSync(
+    join(legacyLedgerDir, "ledger.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      workspaceId: legacyWorkspaceId,
+      artifacts: [
+        {
+          artifactId: "artifact_77777777-7777-7777-7777-777777777777",
+          relativePath: "legacy.png",
+          artifactType: "image",
+          mimeType: "image/png",
+          format: "PNG",
+          size: png.length,
+          sha256: createHash("sha256").update(png).digest("hex"),
+          change: "created",
+          completion: "complete",
+          jobId: "job_77777777-7777-7777-7777-777777777777",
+          runner: "blender",
+          workspaceId: legacyWorkspaceId,
+          createdAt: new Date().toISOString(),
+          gitStatus: "untracked",
+        },
+      ],
+    }),
+  );
+  const migrated = await new ArtifactLedger(stateDir).listArtifacts({
+    workspaceId: legacyWorkspaceId,
+    workspaceRoot,
+  });
+  assert.equal(migrated[0]?.origin.kind, "job");
+
   console.log("artifact ledger tests passed");
 } finally {
   rmSync(root, { recursive: true, force: true });

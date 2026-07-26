@@ -41,7 +41,7 @@ npx @waishnav/devspace config set toolMode full
 | `DEVSPACE_TOOL_MODE` | `minimal` (default) or `full`; full exposes dedicated grep, glob, and ls tools. |
 | `DEVSPACE_TRUST_PROXY` | Set to `1` only when DevSpace is behind one local tunnel/reverse-proxy hop. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
-| `DEVSPACE_READ_ONLY` | Set to `1` to expose a read-only MCP surface with no write, edit, or shell tools. |
+| `DEVSPACE_READ_ONLY` | Set to `1` to expose a read-only MCP surface with no mutation, publication, Runner, or game-session tools. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
 | `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
 
@@ -93,7 +93,8 @@ Leave it false when clients connect directly.
 
 `DEVSPACE_READ_ONLY=1` switches DevSpace into a read-only profile. In that
 mode, DevSpace exposes diagnostics, workspace discovery/recovery,
-`open_workspace`, `read`, `grep`, `glob`, and `ls`, and disables file mutation,
+`open_workspace`, `read`, `grep`, `glob`, `ls`, artifact inspection, and local
+Git inspection, and disables file mutation,
 shell, and background-job tools. Dedicated read/search tools stay enabled even
 when `DEVSPACE_TOOL_MODE=minimal`, because the shell fallback is intentionally
 unavailable in read-only mode.
