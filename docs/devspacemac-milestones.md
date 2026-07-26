@@ -22,9 +22,10 @@ quarantine under the DevSpace state directory; the caller cannot select its
 destination.
 
 The primary DevSpaceMac surface does not expose arbitrary shell commands.
-Builds and tests use named Runner Registry entries. Git tools do not implement
-merge, rebase, reset, fetch, pull, push, tag, force, amend, remote tracking, or
-branch deletion.
+Builds and tests use named Runner Registry entries. M4 adds separately bounded
+fetch, merge, and guarded push tools; Git tools still do not implement pull,
+rebase, reset, squash, cherry-pick, tags, history-forcing updates, amend, remote
+URL mutation, caller refspecs, or branch deletion.
 
 Artifact Ledger schema v2 records either a Job or Import origin and reads
 existing v1 Job ledgers without rewriting them. Audio records support WAV and
@@ -59,8 +60,10 @@ file mutation, Git mutation, Runner, capture, or game-session tools.
 - M2 adds DevSpace-owned, Runtime-Bridge Godot sessions and input limited to
   those sessions.
 - M3 adds fixed BLEND, GLB, and audio inspectors plus bounded model previews.
-- M4 remains deferred: capability enforcement, permanent deletion, trash
-  restore, merge/push, release/export, arbitrary Python, and desktop control.
+- M4 safe Git integration is documented in
+  [Safe Git Integration](safe-git-integration.md). Capability enforcement,
+  permanent deletion, trash restore, release/export, arbitrary Python, and
+  desktop control remain deferred.
 
 ## M2: Godot game sessions
 

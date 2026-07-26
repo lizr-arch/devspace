@@ -4,7 +4,9 @@ import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import { loadConfig } from "./config.js";
+import { databasePath } from "./db/client.js";
 import { GitWorktreeError } from "./git-worktrees.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
@@ -13,6 +15,8 @@ const execFileAsync = promisify(execFile);
 const root = await mkdtemp(join(tmpdir(), "devspace-workspace-test-"));
 
 try {
+  await testLegacyWorkspaceMigration(join(root, ".legacy-state"));
+
   const agentDir = join(root, ".pi", "agent");
   await mkdir(agentDir, { recursive: true });
   await writeFile(join(agentDir, "AGENTS.md"), "global instructions\n");
@@ -184,4 +188,50 @@ try {
 
 async function git(cwd: string, args: string[]): Promise<void> {
   await execFileAsync("git", args, { cwd });
+}
+
+async function testLegacyWorkspaceMigration(stateDir: string): Promise<void> {
+  await mkdir(stateDir, { recursive: true });
+  const sqlite = new Database(databasePath(stateDir));
+  sqlite.exec(`
+    create table devspace_schema_migrations (
+      version integer primary key,
+      name text not null,
+      applied_at text not null
+    );
+    insert into devspace_schema_migrations (version, name, applied_at) values
+      (1, 'workspace-state', '2026-07-26T00:00:00.000Z'),
+      (2, 'oauth-state', '2026-07-26T00:00:00.000Z'),
+      (3, 'project-memory-shadow-state', '2026-07-26T00:00:00.000Z');
+    create table workspace_sessions (
+      id text primary key,
+      root text not null,
+      status text not null default 'active',
+      mode text not null default 'checkout',
+      source_root text,
+      base_ref text,
+      base_sha text,
+      managed text not null default 'false',
+      created_at text not null,
+      last_used_at text not null
+    );
+  `);
+  sqlite.close();
+
+  const store = new SqliteWorkspaceStore(stateDir);
+  const migrated = store.createSession({
+    id: "legacy-migration-worktree",
+    root: "/tmp/legacy-migration-worktree",
+    mode: "worktree",
+    managed: true,
+    detached: false,
+    branch: "devspace/integration/legacy",
+  });
+  assert.equal(migrated.detached, false);
+  assert.equal(migrated.branch, "devspace/integration/legacy");
+  assert.equal(
+    store.getSession(migrated.id)?.branch,
+    "devspace/integration/legacy",
+  );
+  store.close();
 }

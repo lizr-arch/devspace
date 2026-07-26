@@ -344,6 +344,12 @@ registration, Owner password approval, token exchange, MCP initialization,
 `tools/list`, Workspace App resources and assets, and a real workspace call
 through the public hostname.
 
+For the safe Git integration release, `devspace_info` must report schema
+`devspacemac-m4-safe-git-integration.2026-07-27`, a new Boot ID, the
+non-sensitive Git policy summary, and 44 tools. The authenticated public
+`tools/list` response must contain `git_fetch`, `git_merge`, and `git_push`.
+Source code or a local build alone is not deployment evidence.
+
 After a restart, also confirm recovery rather than checking only steady-state
 health:
 

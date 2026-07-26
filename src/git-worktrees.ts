@@ -31,6 +31,7 @@ export interface ManagedWorktree {
   dirtySource: boolean;
   detached: boolean;
   managed: boolean;
+  branch: string;
 }
 
 export async function createManagedWorktree(input: {
@@ -71,13 +72,14 @@ export async function createManagedWorktree(input: {
     worktreeRoot: input.config.worktreeRoot,
     repoRoot: sourceRoot,
   });
+  const branch = managedWorktreeBranch(sourceRoot, worktreePath);
 
   await mkdir(input.config.worktreeRoot, { recursive: true });
   assertAllowedPath(worktreePath, [input.config.worktreeRoot]);
 
   try {
     await git(
-      ["worktree", "add", "--detach", worktreePath, baseSha],
+      ["worktree", "add", "-b", branch, worktreePath, baseSha],
       sourceRoot,
     );
   } catch (error) {
@@ -95,8 +97,9 @@ export async function createManagedWorktree(input: {
     baseRef,
     baseSha,
     dirtySource,
-    detached: true,
+    detached: false,
     managed: true,
+    branch,
   };
 }
 
@@ -182,6 +185,12 @@ function managedWorktreePath(input: {
   const repoName = sanitizePathSegment(basename(input.repoRoot)) || "repo";
   const worktreeId = randomBytes(4).toString("hex");
   return join(input.worktreeRoot, `${repoName}-${worktreeId}`);
+}
+
+function managedWorktreeBranch(repoRoot: string, worktreePath: string): string {
+  const repoName = sanitizePathSegment(basename(repoRoot)) || "repo";
+  const worktreeName = sanitizePathSegment(basename(worktreePath));
+  return `devspace/integration/${repoName}-${worktreeName}`;
 }
 
 function sanitizePathSegment(value: string): string {
