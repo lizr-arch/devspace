@@ -2,10 +2,15 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
+  createReadStream,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -18,6 +23,19 @@ const MAX_ITEMS = 500;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_PREVIEW_DIMENSION = 2048;
 const PROCESS_TIMEOUT_MS = 120_000;
+const PROCESS_KILL_GRACE_MS = 1_000;
+export const MAX_GLB_INSPECT_BYTES = 512 * 1024 * 1024;
+export const MAX_AUDIO_INSPECT_BYTES = 256 * 1024 * 1024;
+export const MAX_BLEND_INSPECT_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_GLB_JSON_BYTES = 64 * 1024 * 1024;
+const MAX_AUDIO_DURATION_SECONDS = 30 * 60;
+const MAX_DECODED_AUDIO_SAMPLES = 100_000_000;
+
+export interface InspectAudioOptions {
+  ffmpegPath?: string;
+  timeoutMs?: number;
+  maxDecodedSamples?: number;
+}
 
 export interface InspectorResult {
   path: string;
@@ -32,32 +50,49 @@ export function inspectGlb(
   path: string,
 ): InspectorResult {
   const source = resolveExistingWorkspacePath(workspaceRoot, path, "file");
-  const bytes = readFileSync(source.absolutePath);
-  if (
-    bytes.length < 20 ||
-    bytes.toString("ascii", 0, 4) !== "glTF" ||
-    bytes.readUInt32LE(4) !== 2 ||
-    bytes.readUInt32LE(8) !== bytes.length
-  ) {
-    throw new Error("INSPECTOR_CONTAINER_INVALID: Invalid GLB v2 header.");
-  }
-  const jsonLength = bytes.readUInt32LE(12);
-  const jsonType = bytes.readUInt32LE(16);
-  if (
-    jsonType !== 0x4e4f534a ||
-    jsonLength < 2 ||
-    20 + jsonLength > bytes.length
-  ) {
-    throw new Error("INSPECTOR_CONTAINER_INVALID: Missing GLB JSON chunk.");
+  const fileSize = assertInspectorFileSize(
+    source.absolutePath,
+    MAX_GLB_INSPECT_BYTES,
+    "GLB",
+  );
+  const handle = openSync(source.absolutePath, "r");
+  let jsonBytes: Buffer;
+  let fileSha256: string;
+  try {
+    const header = readExactly(handle, 20, 0);
+    if (
+      fileSize < 20 ||
+      header.toString("ascii", 0, 4) !== "glTF" ||
+      header.readUInt32LE(4) !== 2 ||
+      header.readUInt32LE(8) !== fileSize
+    ) {
+      throw new Error("INSPECTOR_CONTAINER_INVALID: Invalid GLB v2 header.");
+    }
+    const jsonLength = header.readUInt32LE(12);
+    const jsonType = header.readUInt32LE(16);
+    if (jsonLength > MAX_GLB_JSON_BYTES) {
+      throw new Error(
+        `INSPECTOR_INPUT_TOO_LARGE: GLB JSON chunk exceeds ${MAX_GLB_JSON_BYTES} bytes.`,
+      );
+    }
+    if (
+      jsonType !== 0x4e4f534a ||
+      jsonLength < 2 ||
+      20 + jsonLength > fileSize
+    ) {
+      throw new Error("INSPECTOR_CONTAINER_INVALID: Missing GLB JSON chunk.");
+    }
+    jsonBytes = readExactly(handle, jsonLength, 20);
+    fileSha256 = sha256FileDescriptor(handle, fileSize);
+  } finally {
+    closeSync(handle);
   }
   let document: Record<string, unknown>;
   try {
-    document = JSON.parse(
-      bytes
-        .subarray(20, 20 + jsonLength)
-        .toString("utf8")
-        .trim(),
-    ) as Record<string, unknown>;
+    document = JSON.parse(jsonBytes.toString("utf8").trim()) as Record<
+      string,
+      unknown
+    >;
   } catch {
     throw new Error("INSPECTOR_CONTAINER_INVALID: Malformed GLB JSON.");
   }
@@ -116,8 +151,8 @@ export function inspectGlb(
   });
   return boundedResult({
     path: source.relativePath,
-    sha256: sha256(bytes),
-    size: bytes.length,
+    sha256: fileSha256,
+    size: fileSize,
     version: 2,
     nodeCount: nodes.length,
     meshCount: meshes.length,
@@ -164,13 +199,25 @@ export function inspectGlb(
 export async function inspectAudio(
   workspaceRoot: string,
   path: string,
+  options: InspectAudioOptions = {},
 ): Promise<InspectorResult> {
   const source = resolveExistingWorkspacePath(workspaceRoot, path, "file");
   const extension = extname(source.relativePath).toLowerCase();
   if (![".wav", ".ogg"].includes(extension)) {
     throw new Error("INSPECTOR_FORMAT_REJECTED: Audio must be WAV or OGG.");
   }
-  const header = readFileSync(source.absolutePath).subarray(0, 12);
+  const fileSize = assertInspectorFileSize(
+    source.absolutePath,
+    MAX_AUDIO_INSPECT_BYTES,
+    "audio",
+  );
+  const handle = openSync(source.absolutePath, "r");
+  let header: Buffer;
+  try {
+    header = readExactly(handle, 12, 0);
+  } finally {
+    closeSync(handle);
+  }
   if (
     (extension === ".wav" &&
       !(
@@ -182,12 +229,19 @@ export async function inspectAudio(
     throw new Error("INSPECTOR_CONTAINER_INVALID: Audio signature mismatch.");
   }
   const metadata = await parseFile(source.absolutePath, { duration: true });
-  const analysis = await decodeAudio(source.absolutePath);
-  const bytes = readFileSync(source.absolutePath);
+  if (
+    metadata.format.duration !== undefined &&
+    metadata.format.duration > MAX_AUDIO_DURATION_SECONDS
+  ) {
+    throw new Error(
+      `INSPECTOR_INPUT_TOO_LARGE: Audio duration exceeds ${MAX_AUDIO_DURATION_SECONDS} seconds.`,
+    );
+  }
+  const analysis = await decodeAudio(source.absolutePath, options);
   return boundedResult({
     path: source.relativePath,
-    sha256: sha256(bytes),
-    size: bytes.length,
+    sha256: await sha256File(source.absolutePath),
+    size: fileSize,
     format: extension.slice(1),
     durationSeconds: metadata.format.duration,
     sampleRate: metadata.format.sampleRate,
@@ -218,7 +272,12 @@ export class ExternalInspectorManager {
     if (extname(source.relativePath).toLowerCase() !== ".blend") {
       throw new Error("INSPECTOR_FORMAT_REJECTED: Expected a BLEND file.");
     }
-    const original = readFileSync(source.absolutePath);
+    const size = assertInspectorFileSize(
+      source.absolutePath,
+      MAX_BLEND_INSPECT_BYTES,
+      "BLEND",
+    );
+    const originalSha256 = await sha256File(source.absolutePath);
     const output = this.privateOutput("blend-inspection", ".json");
     const script = this.writeScript("inspect_blend.py", BLEND_INSPECTOR);
     const runner = await this.runners
@@ -247,14 +306,13 @@ export class ExternalInspectorManager {
       string,
       unknown
     >;
-    const after = readFileSync(source.absolutePath);
-    if (sha256(original) !== sha256(after)) {
+    if ((await sha256File(source.absolutePath)) !== originalSha256) {
       throw new Error("INSPECTOR_SOURCE_MUTATED");
     }
     return boundedResult({
       path: source.relativePath,
-      sha256: sha256(original),
-      size: original.length,
+      sha256: originalSha256,
+      size,
       ...data,
     });
   }
@@ -287,7 +345,12 @@ export class ExternalInspectorManager {
     const height = previewDimension(input.height ?? 512);
     const view = input.view ?? "perspective";
     const output = this.privateOutput("model-preview", ".png");
-    const sourceBefore = sha256(readFileSync(source.absolutePath));
+    assertInspectorFileSize(
+      source.absolutePath,
+      extension === ".glb" ? MAX_GLB_INSPECT_BYTES : MAX_BLEND_INSPECT_BYTES,
+      extension === ".glb" ? "GLB" : "BLEND",
+    );
+    const sourceBefore = await sha256File(source.absolutePath);
     if (extension === ".glb") {
       await this.renderGlbWithGodot(
         source.absolutePath,
@@ -322,7 +385,7 @@ export class ExternalInspectorManager {
         this.stateDir,
       );
     }
-    if (sha256(readFileSync(source.absolutePath)) !== sourceBefore) {
+    if ((await sha256File(source.absolutePath)) !== sourceBefore) {
       throw new Error("INSPECTOR_SOURCE_MUTATED");
     }
     const bytes = readFileSync(output);
@@ -402,15 +465,31 @@ export class ExternalInspectorManager {
   }
 }
 
-async function decodeAudio(path: string): Promise<{
+async function decodeAudio(
+  path: string,
+  options: InspectAudioOptions,
+): Promise<{
   absolutePeak: number;
   peakDbfs: number | null;
   fullScaleSamples: number;
   clippingRatio: number;
   analyzedSamples: number;
 }> {
-  const ffmpeg = locateFfmpeg();
+  const ffmpeg = options.ffmpegPath ?? locateFfmpeg();
   if (!ffmpeg) unavailable("ffmpeg");
+  const timeoutMs = options.timeoutMs ?? PROCESS_TIMEOUT_MS;
+  const maxDecodedSamples =
+    options.maxDecodedSamples ?? MAX_DECODED_AUDIO_SAMPLES;
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > PROCESS_TIMEOUT_MS ||
+    !Number.isInteger(maxDecodedSamples) ||
+    maxDecodedSamples < 1 ||
+    maxDecodedSamples > MAX_DECODED_AUDIO_SAMPLES
+  ) {
+    throw new Error("INSPECTOR_INPUT_INVALID: Invalid audio decode limits.");
+  }
   return await new Promise((resolve, reject) => {
     const child = spawn(
       ffmpeg,
@@ -428,14 +507,31 @@ async function decodeAudio(path: string): Promise<{
         "pcm_f32le",
         "-",
       ],
-      { shell: false, stdio: ["ignore", "pipe", "pipe"] },
+      {
+        detached: process.platform !== "win32",
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     let carry = Buffer.alloc(0);
     let peak = 0;
     let samples = 0;
     let fullScale = 0;
     let errorOutput = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      fail(new Error("INSPECTOR_TIMEOUT"));
+    }, timeoutMs);
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout.pause();
+      terminateInspectorProcess(child);
+      reject(error);
+    };
     child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) return;
       const data = Buffer.concat([carry, chunk]);
       const length = data.length - (data.length % 4);
       for (let offset = 0; offset < length; offset += 4) {
@@ -443,6 +539,14 @@ async function decodeAudio(path: string): Promise<{
         if (!Number.isFinite(value)) continue;
         peak = Math.max(peak, value);
         samples++;
+        if (samples > maxDecodedSamples) {
+          fail(
+            new Error(
+              `INSPECTOR_DECODE_LIMIT: Audio exceeds ${maxDecodedSamples} decoded samples.`,
+            ),
+          );
+          return;
+        }
         if (value >= 1) fullScale++;
       }
       carry = data.subarray(length);
@@ -450,8 +554,11 @@ async function decodeAudio(path: string): Promise<{
     child.stderr.on("data", (chunk) => {
       errorOutput = (errorOutput + chunk.toString()).slice(-16_384);
     });
-    child.once("error", () => reject(unavailable("ffmpeg")));
+    child.once("error", () => fail(unavailable("ffmpeg")));
     child.once("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (code !== 0) {
         reject(
           new Error(
@@ -469,6 +576,23 @@ async function decodeAudio(path: string): Promise<{
       });
     });
   });
+}
+
+function terminateInspectorProcess(child: ReturnType<typeof spawn>): void {
+  const signal = (value: NodeJS.Signals): void => {
+    try {
+      if (process.platform !== "win32" && child.pid) {
+        process.kill(-child.pid, value);
+      } else {
+        child.kill(value);
+      }
+    } catch {
+      // Already exited.
+    }
+  };
+  signal("SIGTERM");
+  const killHandle = setTimeout(() => signal("SIGKILL"), PROCESS_KILL_GRACE_MS);
+  killHandle.unref();
 }
 
 function locateFfmpeg(): string | undefined {
@@ -529,6 +653,75 @@ function boundedResult(value: Record<string, unknown>): InspectorResult {
     throw new Error("INSPECTOR_OUTPUT_TOO_LARGE");
   }
   return result;
+}
+
+function assertInspectorFileSize(
+  path: string,
+  maxBytes: number,
+  label: string,
+): number {
+  const info = statSync(path);
+  if (!info.isFile()) {
+    throw new Error("INSPECTOR_FORMAT_REJECTED: Expected a regular file.");
+  }
+  if (info.size > maxBytes) {
+    throw new Error(
+      `INSPECTOR_INPUT_TOO_LARGE: ${label} exceeds ${maxBytes} bytes.`,
+    );
+  }
+  return info.size;
+}
+
+function readExactly(
+  fileDescriptor: number,
+  length: number,
+  position: number,
+): Buffer {
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const read = readSync(
+      fileDescriptor,
+      bytes,
+      offset,
+      length - offset,
+      position + offset,
+    );
+    if (read === 0) {
+      throw new Error("INSPECTOR_CONTAINER_INVALID: Unexpected end of file.");
+    }
+    offset += read;
+  }
+  return bytes;
+}
+
+function sha256FileDescriptor(fileDescriptor: number, size: number): string {
+  const hash = createHash("sha256");
+  const chunk = Buffer.allocUnsafe(1024 * 1024);
+  let position = 0;
+  while (position < size) {
+    const read = readSync(
+      fileDescriptor,
+      chunk,
+      0,
+      Math.min(chunk.length, size - position),
+      position,
+    );
+    if (read === 0) {
+      throw new Error("INSPECTOR_CONTAINER_INVALID: Unexpected end of file.");
+    }
+    hash.update(chunk.subarray(0, read));
+    position += read;
+  }
+  return hash.digest("hex");
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
 }
 
 function arrayOfRecords(value: unknown): Record<string, unknown>[] {

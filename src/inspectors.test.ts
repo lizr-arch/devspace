@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  open,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ExternalInspectorManager,
+  MAX_AUDIO_INSPECT_BYTES,
+  MAX_GLB_INSPECT_BYTES,
   inspectAudio,
   inspectGlb,
 } from "./inspectors.js";
@@ -39,6 +49,7 @@ try {
   });
   await writeFile(join(root, "fixtures", "minimal.glb"), minimalGlb);
   const glb = inspectGlb(root, "fixtures/minimal.glb");
+  assert.equal(glb.sha256, digest(minimalGlb));
   assert.equal(glb.nodeCount, 1);
   assert.equal(glb.meshCount, 1);
   assert.equal(glb.triangleCount, 1);
@@ -58,6 +69,17 @@ try {
     () => inspectGlb(root, "fixtures/broken.glb"),
     /INSPECTOR_CONTAINER_INVALID/,
   );
+  const oversizedGlbPath = join(root, "fixtures", "oversized.glb");
+  const oversizedGlb = await open(oversizedGlbPath, "w");
+  try {
+    await oversizedGlb.truncate(MAX_GLB_INSPECT_BYTES + 1);
+  } finally {
+    await oversizedGlb.close();
+  }
+  assert.throws(
+    () => inspectGlb(root, "fixtures/oversized.glb"),
+    /INSPECTOR_INPUT_TOO_LARGE/,
+  );
 
   const wav = makeWav([0, 0.5, 1, -1, 0.25, -0.25], 8000);
   await writeFile(join(root, "fixtures", "known.wav"), wav);
@@ -74,6 +96,54 @@ try {
   const ogg = await inspectAudio(root, "fixtures/known.ogg");
   assert.equal(ogg.format, "ogg");
   assert.ok(Number(ogg.durationSeconds) > 0);
+  const oversizedWavPath = join(root, "fixtures", "oversized.wav");
+  const oversizedWav = await open(oversizedWavPath, "w");
+  try {
+    await oversizedWav.write(wav.subarray(0, 12), 0, 12, 0);
+    await oversizedWav.truncate(MAX_AUDIO_INSPECT_BYTES + 1);
+  } finally {
+    await oversizedWav.close();
+  }
+  await assert.rejects(
+    inspectAudio(root, "fixtures/oversized.wav"),
+    /INSPECTOR_INPUT_TOO_LARGE/,
+  );
+
+  const sampleLimitFfmpeg = join(stateDir, "sample-limit-ffmpeg");
+  await writeFile(
+    sampleLimitFfmpeg,
+    "#!/usr/bin/env node\nprocess.stdout.write(Buffer.alloc(4096));\n",
+  );
+  await chmod(sampleLimitFfmpeg, 0o755);
+  await assert.rejects(
+    inspectAudio(root, "fixtures/known.wav", {
+      ffmpegPath: sampleLimitFfmpeg,
+      maxDecodedSamples: 10,
+    }),
+    /INSPECTOR_DECODE_LIMIT/,
+  );
+
+  const timeoutPidPath = join(stateDir, "timeout-ffmpeg.pid");
+  const timeoutFfmpeg = join(stateDir, "timeout-ffmpeg");
+  await writeFile(
+    timeoutFfmpeg,
+    `#!/usr/bin/env node
+require("node:fs").writeFileSync(${JSON.stringify(timeoutPidPath)}, String(process.pid));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1_000);
+`,
+  );
+  await chmod(timeoutFfmpeg, 0o755);
+  await assert.rejects(
+    inspectAudio(root, "fixtures/known.wav", {
+      ffmpegPath: timeoutFfmpeg,
+      timeoutMs: 500,
+    }),
+    /INSPECTOR_TIMEOUT/,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  const timeoutPid = Number(await readFile(timeoutPidPath, "utf8"));
+  assert.equal(isProcessAlive(timeoutPid), false);
 
   const runners = new RunnerRegistry();
   const blender = await runners.resolve("blender");
@@ -142,6 +212,10 @@ bpy.ops.export_scene.gltf(filepath=glb_path, export_format="GLB")
   assert.equal(preview.width, 256);
   assert.equal(preview.height, 192);
   assert.match(preview.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(pngDimensions(Buffer.from(preview.data, "base64")), {
+    width: 256,
+    height: 192,
+  });
   const glbBefore = digest(
     await readFile(join(root, "fixtures", "known-model.glb")),
   );
@@ -153,6 +227,10 @@ bpy.ops.export_scene.gltf(filepath=glb_path, export_format="GLB")
     height: 128,
   });
   assert.ok(modelPreview.bytes > 100);
+  assert.deepEqual(pngDimensions(Buffer.from(modelPreview.data, "base64")), {
+    width: 128,
+    height: 128,
+  });
   assert.equal(
     digest(await readFile(join(root, "fixtures", "known-model.glb"))),
     glbBefore,
@@ -225,4 +303,22 @@ function run(executable: string, args: string[]): Promise<void> {
 
 function digest(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function pngDimensions(bytes: Buffer): { width: number; height: number } {
+  assert.equal(bytes.toString("hex", 0, 8), "89504e470d0a1a0a");
+  assert.equal(bytes.toString("ascii", 12, 16), "IHDR");
+  return {
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20),
+  };
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
