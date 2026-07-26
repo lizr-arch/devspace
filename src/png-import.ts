@@ -9,6 +9,7 @@ export interface ImportPngInput {
   base64Data?: string;
   expectedSha256?: string;
   overwrite?: boolean;
+  beforeCommit?: () => Promise<void>;
 }
 
 export interface ImportPngResult {

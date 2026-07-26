@@ -38,6 +38,7 @@ export interface ImportAssetInput {
   base64Data?: string;
   expectedSha256?: string;
   overwrite?: boolean;
+  beforeCommit?: () => Promise<void>;
 }
 
 export interface ImportAssetResult {
@@ -93,6 +94,7 @@ export async function importAsset(
     workspaceRoot: input.workspaceRoot,
     data: source.data,
     overwrite: input.overwrite ?? false,
+    beforeCommit: input.beforeCommit,
   });
   return {
     path: workspaceRelativeFromAbsolute(input.workspaceRoot, input.destination),
@@ -246,6 +248,7 @@ async function writeAtomicAsset(input: {
   workspaceRoot: string;
   data: Buffer;
   overwrite: boolean;
+  beforeCommit?: () => Promise<void>;
 }): Promise<void> {
   const relativeDestination = isAbsolute(input.destination)
     ? workspaceRelativeFromAbsolute(input.workspaceRoot, input.destination)
@@ -282,6 +285,7 @@ async function writeAtomicAsset(input: {
     await handle.close();
   }
   try {
+    await input.beforeCommit?.();
     if (input.overwrite) {
       await rename(temporary, resolved.absolutePath);
     } else {

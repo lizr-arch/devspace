@@ -72,6 +72,8 @@ import {
   createWorkspaceDirectory,
   moveWorkspacePath,
   moveWorkspacePathToTrash,
+  restoreWorkspaceFileFromTrash,
+  snapshotWorkspaceFileToTrash,
 } from "./workspace-files.js";
 import {
   resolveExistingWorkspacePath,
@@ -153,6 +155,39 @@ interface ServiceRuntime {
   tools: string[];
   schemaFingerprint: string;
   requiredCapabilities: Record<string, ToolCapability>;
+}
+
+async function rollbackImportedAsset(input: {
+  workspaceRoot: string;
+  stateDir: string;
+  workspaceId: string;
+  path: string;
+  displacedTrashId?: string;
+}): Promise<void> {
+  try {
+    if (input.displacedTrashId) {
+      await restoreWorkspaceFileFromTrash({
+        workspaceRoot: input.workspaceRoot,
+        stateDir: input.stateDir,
+        workspaceId: input.workspaceId,
+        trashId: input.displacedTrashId,
+        path: input.path,
+      });
+      return;
+    }
+    await moveWorkspacePathToTrash({
+      workspaceRoot: input.workspaceRoot,
+      stateDir: input.stateDir,
+      workspaceId: input.workspaceId,
+      path: input.path,
+    });
+  } catch (error) {
+    throw new Error(
+      `ASSET_ROLLBACK_FAILED: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 type ToolCapability =
@@ -1749,32 +1784,47 @@ function createMcpServer(
         );
         const destination = resolveWorkspacePath(workspace.root, path);
         let displacedTrashId: string | undefined;
-        if (overwrite && existsSync(destination.absolutePath)) {
-          const displaced = await moveWorkspacePathToTrash({
-            workspaceRoot: workspace.root,
-            stateDir: config.stateDir,
-            workspaceId,
-            path: destination.relativePath,
-          });
-          displacedTrashId = displaced.trashId;
-        }
         const imported = await importAsset({
           destination: destination.absolutePath,
           workspaceRoot: workspace.root,
           sourceUrl,
           base64Data,
           expectedSha256,
-          overwrite: false,
+          overwrite: overwrite ?? false,
+          beforeCommit:
+            overwrite && existsSync(destination.absolutePath)
+              ? async () => {
+                  const snapshot = await snapshotWorkspaceFileToTrash({
+                    workspaceRoot: workspace.root,
+                    stateDir: config.stateDir,
+                    workspaceId,
+                    path: destination.relativePath,
+                  });
+                  displacedTrashId = snapshot.trashId;
+                }
+              : undefined,
         });
         const importId = `import_${randomUUID()}`;
-        const artifact = await artifacts.registerImport({
-          workspaceId,
-          workspaceRoot: workspace.root,
-          relativePath: imported.path,
-          importId,
-          source: imported.source,
-          sourceHost: imported.sourceHost,
-        });
+        let artifact;
+        try {
+          artifact = await artifacts.registerImport({
+            workspaceId,
+            workspaceRoot: workspace.root,
+            relativePath: imported.path,
+            importId,
+            source: imported.source,
+            sourceHost: imported.sourceHost,
+          });
+        } catch (error) {
+          await rollbackImportedAsset({
+            workspaceRoot: workspace.root,
+            stateDir: config.stateDir,
+            workspaceId,
+            path: imported.path,
+            displacedTrashId,
+          });
+          throw error;
+        }
         const result = `Imported ${imported.format} ${imported.path} (${imported.bytes} bytes, sha256 ${imported.sha256}) as ${artifact.artifactId}.`;
         logToolCall(config, {
           tool: "import_asset",
@@ -2651,31 +2701,45 @@ function createMcpServer(
         const destination = workspaces.resolvePath(workspace, path);
         try {
           let displacedTrashId: string | undefined;
-          if (overwrite && existsSync(destination)) {
-            const displaced = await moveWorkspacePathToTrash({
-              workspaceRoot: workspace.root,
-              stateDir: config.stateDir,
-              workspaceId,
-              path,
-            });
-            displacedTrashId = displaced.trashId;
-          }
           const imported = await importPng({
             destination,
             workspaceRoot: workspace.root,
             sourceUrl,
             base64Data,
             expectedSha256,
-            overwrite: false,
+            overwrite: overwrite ?? false,
+            beforeCommit:
+              overwrite && existsSync(destination)
+                ? async () => {
+                    const snapshot = await snapshotWorkspaceFileToTrash({
+                      workspaceRoot: workspace.root,
+                      stateDir: config.stateDir,
+                      workspaceId,
+                      path,
+                    });
+                    displacedTrashId = snapshot.trashId;
+                  }
+                : undefined,
           });
-          await artifacts.registerImport({
-            workspaceId,
-            workspaceRoot: workspace.root,
-            relativePath: path,
-            importId: `import_${randomUUID()}`,
-            source: imported.source,
-            sourceHost: imported.sourceHost,
-          });
+          try {
+            await artifacts.registerImport({
+              workspaceId,
+              workspaceRoot: workspace.root,
+              relativePath: path,
+              importId: `import_${randomUUID()}`,
+              source: imported.source,
+              sourceHost: imported.sourceHost,
+            });
+          } catch (error) {
+            await rollbackImportedAsset({
+              workspaceRoot: workspace.root,
+              stateDir: config.stateDir,
+              workspaceId,
+              path,
+              displacedTrashId,
+            });
+            throw error;
+          }
           const result = `Imported ${path} (${imported.bytes} bytes, sha256 ${imported.sha256}).`;
           logToolCall(config, {
             tool: "import_png",

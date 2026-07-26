@@ -49,10 +49,17 @@ try {
   status = await unstageGitPaths(root, ["other.txt"]);
 
   const marker = join(root, "hook-ran");
+  const postCommitMarker = join(root, "post-commit-hook-ran");
   const hook = join(root, ".git", "hooks", "pre-commit");
+  const postCommitHook = join(root, ".git", "hooks", "post-commit");
   await mkdir(join(root, ".git", "hooks"), { recursive: true });
   await writeFile(hook, `#!/bin/sh\nprintf bad > '${marker}'\nexit 1\n`);
+  await writeFile(
+    postCommitHook,
+    `#!/bin/sh\nprintf bad > '${postCommitMarker}'\n`,
+  );
   await chmod(hook, 0o755);
+  await chmod(postCommitHook, 0o755);
   const committed = await commitGit({
     workspaceRoot: root,
     message: "safe local commit",
@@ -60,6 +67,27 @@ try {
   });
   assert.match(committed.headSha, /^[0-9a-f]{40,64}$/);
   await assert.rejects(readFile(marker));
+  await assert.rejects(readFile(postCommitMarker));
+
+  const configuredHooks = join(root, "configured-hooks");
+  const configuredMarker = join(root, "configured-post-commit-ran");
+  await mkdir(configuredHooks);
+  await writeFile(
+    join(configuredHooks, "post-commit"),
+    `#!/bin/sh\nprintf bad > '${configuredMarker}'\n`,
+  );
+  await chmod(join(configuredHooks, "post-commit"), 0o755);
+  await git(["config", "core.hooksPath", configuredHooks]);
+  await writeFile(join(root, "tracked.txt"), "three\n");
+  const configuredStatus = await stageGitPaths(root, ["tracked.txt"]);
+  await commitGit({
+    workspaceRoot: root,
+    message: "configured hooks remain disabled",
+    expectedStagedDiffSha256: configuredStatus.stagedDiffSha256,
+  });
+  await assert.rejects(readFile(configuredMarker));
+  await git(["config", "--unset", "core.hooksPath"]);
+  await rm(configuredHooks, { recursive: true });
 
   const branches = await manageGitBranch({
     workspaceRoot: root,

@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { chmodSync, mkdtempSync } from "node:fs";
 import { realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { normalizeWorkspaceRelativePath } from "./workspace-paths.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_DIFF_BYTES = 1024 * 1024;
 const MAX_GIT_PATHS = 100;
+let emptyHooksPath: string | undefined;
 
 export interface GitWorkspaceStatus {
   headSha: string;
@@ -307,16 +311,20 @@ async function runGit(
   maxBuffer = 16 * 1024 * 1024,
 ): Promise<{ stdout: string; stderr: string }> {
   try {
-    const result = await execFileAsync("git", args, {
-      cwd,
-      encoding: "utf8",
-      maxBuffer,
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_TERMINAL_PROMPT: "0",
+    const result = await execFileAsync(
+      "git",
+      ["-c", `core.hooksPath=${getEmptyHooksPath()}`, ...args],
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer,
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_TERMINAL_PROMPT: "0",
+        },
       },
-    });
+    );
     return { stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     const detail =
@@ -327,6 +335,13 @@ async function runGit(
           : String(error);
     throw new Error(`GIT_COMMAND_FAILED: ${detail || "Git command failed."}`);
   }
+}
+
+function getEmptyHooksPath(): string {
+  if (emptyHooksPath) return emptyHooksPath;
+  emptyHooksPath = mkdtempSync(join(tmpdir(), "devspace-empty-git-hooks-"));
+  chmodSync(emptyHooksPath, 0o700);
+  return emptyHooksPath;
 }
 
 function sha256(value: string): string {

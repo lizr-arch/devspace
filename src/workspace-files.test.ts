@@ -15,6 +15,8 @@ import {
   createWorkspaceDirectory,
   moveWorkspacePath,
   moveWorkspacePathToTrash,
+  restoreWorkspaceFileFromTrash,
+  snapshotWorkspaceFileToTrash,
 } from "./workspace-files.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-files-"));
@@ -110,6 +112,23 @@ try {
     ),
     "replacement",
   );
+  await writeFile(join(root, "snapshot.txt"), "before");
+  const snapshot = await snapshotWorkspaceFileToTrash({
+    workspaceRoot: root,
+    stateDir,
+    workspaceId: "ws_files",
+    path: "snapshot.txt",
+  });
+  assert.equal(await readFile(join(root, "snapshot.txt"), "utf8"), "before");
+  await writeFile(join(root, "snapshot.txt"), "after");
+  await restoreWorkspaceFileFromTrash({
+    workspaceRoot: root,
+    stateDir,
+    workspaceId: "ws_files",
+    trashId: snapshot.trashId,
+    path: "snapshot.txt",
+  });
+  assert.equal(await readFile(join(root, "snapshot.txt"), "utf8"), "before");
   await mkdir(join(root, "tree"), { recursive: true });
   await writeFile(join(root, "tree", "x.txt"), "x");
   await symlink(join(root, "tree", "x.txt"), join(root, "tree", "link.txt"));

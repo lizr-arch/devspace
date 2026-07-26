@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importAsset } from "./asset-import.js";
@@ -82,6 +82,38 @@ try {
     }),
     /ASSET_HASH_MISMATCH/,
   );
+  const preserved = join(root, "assets", "preserved.png");
+  const original = Buffer.concat([PNG, Buffer.from("original")]);
+  await writeFile(preserved, original);
+  let beforeCommitCalled = false;
+  await assert.rejects(
+    importAsset({
+      workspaceRoot: root,
+      destination: preserved,
+      base64Data: PNG.toString("base64"),
+      expectedSha256: "0".repeat(64),
+      overwrite: true,
+      beforeCommit: async () => {
+        beforeCommitCalled = true;
+      },
+    }),
+    /ASSET_HASH_MISMATCH/,
+  );
+  assert.equal(beforeCommitCalled, false);
+  assert.deepEqual(await readFile(preserved), original);
+  await assert.rejects(
+    importAsset({
+      workspaceRoot: root,
+      destination: preserved,
+      base64Data: PNG.toString("base64"),
+      overwrite: true,
+      beforeCommit: async () => {
+        throw new Error("snapshot failed");
+      },
+    }),
+    /snapshot failed/,
+  );
+  assert.deepEqual(await readFile(preserved), original);
   console.log("asset import tests passed");
 } finally {
   await rm(root, { recursive: true, force: true });
