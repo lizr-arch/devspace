@@ -242,6 +242,7 @@ type WorkspaceAppManifest = Record<string, WorkspaceAppManifestEntry>;
 
 export interface WorkspaceAppBuild {
   entry: WorkspaceAppManifestEntry;
+  uiDirectoryPath: string;
   resourceUri: string;
   buildFingerprint: string;
   manifestSha256: string;
@@ -1029,6 +1030,7 @@ export function resolveWorkspaceAppBuild(
 
   return {
     entry,
+    uiDirectoryPath: fileURLToPath(uiDirectoryUrl),
     manifestSha256,
     buildFingerprint,
     resourceUri: `ui://devspace/workspace-app-${buildFingerprint.slice(0, 16)}.html`,
@@ -1078,10 +1080,6 @@ function appCsp(config: ServerConfig): {
     resourceDomains: [publicBaseUrl],
     connectDomains: [publicBaseUrl],
   };
-}
-
-function uiBuildDirectory(): string {
-  return fileURLToPath(new URL("../dist/ui", import.meta.url));
 }
 
 function setAssetHeaders(res: Response): void {
@@ -4325,20 +4323,22 @@ export function createServer(
     }),
   );
 
-  app.options("/mcp-app-assets/{*asset}", (_req, res) => {
-    setAssetHeaders(res);
-    res.sendStatus(204);
-  });
+  if (workspaceApp) {
+    app.options("/mcp-app-assets/{*asset}", (_req, res) => {
+      setAssetHeaders(res);
+      res.sendStatus(204);
+    });
 
-  app.use(
-    "/mcp-app-assets",
-    express.static(uiBuildDirectory(), {
-      immutable: true,
-      maxAge: "1y",
-      fallthrough: false,
-      setHeaders: setAssetHeaders,
-    }),
-  );
+    app.use(
+      "/mcp-app-assets",
+      express.static(workspaceApp.uiDirectoryPath, {
+        immutable: true,
+        maxAge: "1y",
+        fallthrough: false,
+        setHeaders: setAssetHeaders,
+      }),
+    );
+  }
 
   app.get("/healthz", (_req, res) => {
     res.json({

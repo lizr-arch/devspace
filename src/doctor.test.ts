@@ -16,6 +16,7 @@ import {
 } from "./doctor.js";
 
 const tempRoot = mkdtempSync(join(tmpdir(), "devspace-doctor-test-"));
+const testWorkspaceAppBuild = createWorkspaceAppFixture("shared");
 
 try {
   await testWorkspaceAppBuildResolution();
@@ -30,6 +31,38 @@ try {
   await testPublicProbeExplainsInvalidHost();
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
+}
+
+function createWorkspaceAppFixture(prefix: string): {
+  manifestUrl: URL;
+  uiDirectoryUrl: URL;
+} {
+  const uiDirectory = mkdtempSync(
+    join(tempRoot, `workspace-app-${prefix}-build-`),
+  );
+  const manifestDirectory = join(uiDirectory, ".vite");
+  const assetsDirectory = join(uiDirectory, "assets");
+  mkdirSync(manifestDirectory, { recursive: true });
+  mkdirSync(assetsDirectory, { recursive: true });
+  writeFileSync(join(assetsDirectory, "workspace-app-test.js"), "export {};\n");
+  writeFileSync(
+    join(assetsDirectory, "workspace-app-test.css"),
+    "body { color: black; }\n",
+  );
+  const manifestPath = join(manifestDirectory, "manifest.json");
+  writeFileSync(
+    manifestPath,
+    JSON.stringify({
+      "workspace-app.html": {
+        file: "assets/workspace-app-test.js",
+        css: ["assets/workspace-app-test.css"],
+      },
+    }),
+  );
+  return {
+    manifestUrl: pathToFileURL(manifestPath),
+    uiDirectoryUrl: pathToFileURL(`${uiDirectory}${sep}`),
+  };
 }
 
 async function testWorkspaceAppBuildResolution(): Promise<void> {
@@ -192,7 +225,9 @@ async function testLiveChatGptProbe(): Promise<void> {
     PORT: String(port),
   });
 
-  const { app, close } = createServer(config);
+  const { app, close } = createServer(config, {
+    workspaceAppBuild: testWorkspaceAppBuild,
+  });
   const httpServer = await new Promise<import("node:http").Server>(
     (resolve) => {
       const server = app.listen(config.port, config.host, () =>
@@ -237,7 +272,9 @@ async function testPublicChatGptProbe(): Promise<void> {
     PORT: String(port),
   });
 
-  const { app, close } = createServer(config);
+  const { app, close } = createServer(config, {
+    workspaceAppBuild: testWorkspaceAppBuild,
+  });
   const httpServer = await new Promise<import("node:http").Server>(
     (resolve) => {
       const server = app.listen(config.port, config.host, () =>
@@ -293,7 +330,9 @@ async function testPublicExternalClientProbe(): Promise<void> {
     PORT: String(port),
   });
 
-  const { app, close } = createServer(config);
+  const { app, close } = createServer(config, {
+    workspaceAppBuild: testWorkspaceAppBuild,
+  });
   const httpServer = await new Promise<import("node:http").Server>(
     (resolve) => {
       const server = app.listen(config.port, config.host, () =>
@@ -500,6 +539,7 @@ async function testProjectMemoryHttpMcpFlow(): Promise<void> {
   });
   const task = "HTTP Project Memory SHADOW task";
   const { app, close } = createServer(config, {
+    workspaceAppBuild: testWorkspaceAppBuild,
     projectMemoryRunner: async (_repository, receivedTask) => {
       assert.equal(receivedTask, task);
       return fakeProjectMemoryPreflight(receivedTask);
@@ -555,7 +595,9 @@ async function testPublicProbeExplainsInvalidHost(): Promise<void> {
     PORT: String(serverPort),
   });
 
-  const { app, close } = createServer(config);
+  const { app, close } = createServer(config, {
+    workspaceAppBuild: testWorkspaceAppBuild,
+  });
   const httpServer = await new Promise<import("node:http").Server>(
     (resolve) => {
       const server = app.listen(config.port, config.host, () =>
