@@ -35,7 +35,13 @@ export const MAX_HASHABLE_ARTIFACT_BYTES = 512 * 1024 * 1024;
 export const MAX_LIST_ARTIFACTS = 100;
 const MAX_JSON_VALIDATION_BYTES = 4 * 1024 * 1024;
 
-export type ArtifactType = "blend" | "glb" | "image" | "json" | "text";
+export type ArtifactType =
+  | "blend"
+  | "glb"
+  | "image"
+  | "audio"
+  | "json"
+  | "text";
 export type ArtifactChange = "created" | "modified";
 export type ArtifactCompletion = "complete" | "incomplete";
 export type ArtifactPresence =
@@ -63,9 +69,22 @@ export interface ArtifactRecord {
   sha256: string;
   change: ArtifactChange;
   completion: ArtifactCompletion;
-  jobId: string;
-  runner: JobRunner;
+  jobId?: string;
+  runner?: JobRunner;
   runnerVersion?: string;
+  origin:
+    | {
+        kind: "job";
+        jobId: string;
+        runner: JobRunner;
+        runnerVersion?: string;
+      }
+    | {
+        kind: "import";
+        importId: string;
+        source: "https" | "base64";
+        sourceHost?: string;
+      };
   workspaceId: string;
   createdAt: string;
   gitStatus: ArtifactGitStatus;
@@ -107,7 +126,7 @@ export interface ListArtifactsInput {
 }
 
 interface PersistedLedger {
-  schemaVersion: 1;
+  schemaVersion: 2;
   workspaceId: string;
   artifacts: ArtifactRecord[];
 }
@@ -138,6 +157,8 @@ const ARTIFACT_FORMATS: Record<
   ".jpg": { artifactType: "image", mimeType: "image/jpeg", format: "JPEG" },
   ".jpeg": { artifactType: "image", mimeType: "image/jpeg", format: "JPEG" },
   ".webp": { artifactType: "image", mimeType: "image/webp", format: "WEBP" },
+  ".wav": { artifactType: "audio", mimeType: "audio/wav", format: "WAV" },
+  ".ogg": { artifactType: "audio", mimeType: "audio/ogg", format: "OGG" },
   ".json": {
     artifactType: "json",
     mimeType: "application/json",
@@ -230,6 +251,12 @@ export class ArtifactLedger {
           jobId: context.jobId,
           runner: context.runner,
           runnerVersion: context.runnerVersion,
+          origin: {
+            kind: "job",
+            jobId: context.jobId,
+            runner: context.runner,
+            runnerVersion: context.runnerVersion,
+          },
           workspaceId: context.workspaceId,
           createdAt: new Date().toISOString(),
           gitStatus: inspectGitStatus(context.workspaceRoot, file.relativePath),
@@ -241,6 +268,53 @@ export class ArtifactLedger {
 
     this.appendRecords(context.workspaceId, artifacts);
     return { artifacts, errors, completion };
+  }
+
+  async registerImport(input: {
+    workspaceId: string;
+    workspaceRoot: string;
+    relativePath: string;
+    importId: string;
+    source: "https" | "base64";
+    sourceHost?: string;
+  }): Promise<ArtifactRecord> {
+    validateWorkspaceId(input.workspaceId);
+    const relativePath = normalizeRelativePath(input.relativePath);
+    const absolutePath = resolve(input.workspaceRoot, relativePath);
+    const info = statSync(absolutePath);
+    const format = artifactFormat(relativePath);
+    if (!format) {
+      throw new Error("ARTIFACT_MIME_REJECTED: Imported format is not supported.");
+    }
+    if (info.size > MAX_HASHABLE_ARTIFACT_BYTES) {
+      throw new Error(
+        `ARTIFACT_TOO_LARGE: ${relativePath} exceeds ${MAX_HASHABLE_ARTIFACT_BYTES} bytes.`,
+      );
+    }
+    assertArtifactFileSafe(input.workspaceRoot, absolutePath, relativePath);
+    validateArtifactSignature(absolutePath, format.format, info.size);
+    const artifact: ArtifactRecord = {
+      artifactId: `artifact_${randomUUID()}`,
+      relativePath,
+      artifactType: format.artifactType,
+      mimeType: format.mimeType,
+      format: format.format,
+      size: info.size,
+      sha256: await sha256File(absolutePath),
+      change: "created",
+      completion: "complete",
+      origin: {
+        kind: "import",
+        importId: input.importId,
+        source: input.source,
+        sourceHost: input.sourceHost,
+      },
+      workspaceId: input.workspaceId,
+      createdAt: new Date().toISOString(),
+      gitStatus: inspectGitStatus(input.workspaceRoot, relativePath),
+    };
+    this.appendRecords(input.workspaceId, [artifact]);
+    return artifact;
   }
 
   async listArtifacts(input: ListArtifactsInput): Promise<ListedArtifact[]> {
@@ -257,7 +331,7 @@ export class ArtifactLedger {
     const selected = [...ledger.artifacts]
       .reverse()
       .filter((artifact) =>
-        input.jobId ? artifact.jobId === input.jobId : true,
+        input.jobId ? artifact.origin.kind === "job" && artifact.origin.jobId === input.jobId : true,
       )
       .filter((artifact) =>
         pathPrefix ? artifact.relativePath.startsWith(pathPrefix) : true,
@@ -350,17 +424,39 @@ export class ArtifactLedger {
     validateWorkspaceId(workspaceId);
     const path = this.ledgerPath(workspaceId);
     if (!existsSync(path)) {
-      return { schemaVersion: 1, workspaceId, artifacts: [] };
+      return { schemaVersion: 2, workspaceId, artifacts: [] };
     }
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as PersistedLedger;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      schemaVersion: 1 | 2;
+      workspaceId: string;
+      artifacts: Array<ArtifactRecord & { origin?: ArtifactRecord["origin"] }>;
+    };
     if (
-      parsed.schemaVersion !== 1 ||
+      (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) ||
       parsed.workspaceId !== workspaceId ||
       !Array.isArray(parsed.artifacts)
     ) {
       throw new Error("Artifact ledger is malformed.");
     }
-    return parsed;
+    return {
+      schemaVersion: 2,
+      workspaceId,
+      artifacts: parsed.artifacts.map((artifact) => {
+        if (artifact.origin) return artifact;
+        if (!artifact.jobId || !artifact.runner) {
+          throw new Error("Artifact ledger v1 record is malformed.");
+        }
+        return {
+          ...artifact,
+          origin: {
+            kind: "job" as const,
+            jobId: artifact.jobId,
+            runner: artifact.runner,
+            runnerVersion: artifact.runnerVersion,
+          },
+        };
+      }),
+    };
   }
 
   private writeLedger(ledger: PersistedLedger): void {
@@ -608,6 +704,22 @@ function validateArtifactSignature(
   ) {
     throw new Error(
       `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not WEBP.`,
+    );
+  }
+  if (
+    format === "WAV" &&
+    !(
+      header.subarray(0, 4).toString("ascii") === "RIFF" &&
+      header.subarray(8, 12).toString("ascii") === "WAVE"
+    )
+  ) {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not WAV.`,
+    );
+  }
+  if (format === "OGG" && header.subarray(0, 4).toString("ascii") !== "OggS") {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not OGG.`,
     );
   }
   if (format === "JSON") {

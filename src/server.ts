@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,7 +17,7 @@ import {
 } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import {
   registerAppResource,
-  registerAppTool,
+  registerAppTool as registerMcpAppTool,
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import express from "express";
@@ -65,6 +65,26 @@ import {
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { importPng, MAX_PNG_IMPORT_BYTES } from "./png-import.js";
+import { importAsset, MAX_IMPORT_BYTES } from "./asset-import.js";
+import { inspectArtifact } from "./artifact-inspector.js";
+import {
+  copyWorkspacePath,
+  createWorkspaceDirectory,
+  moveWorkspacePath,
+  moveWorkspacePathToTrash,
+} from "./workspace-files.js";
+import {
+  resolveExistingWorkspacePath,
+  resolveWorkspacePath,
+} from "./workspace-paths.js";
+import {
+  commitGit,
+  inspectGitDiff,
+  inspectGitStatus,
+  manageGitBranch,
+  stageGitPaths,
+  unstageGitPaths,
+} from "./git-tools.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import {
   ProjectMemoryController,
@@ -84,7 +104,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "game-art-v1.review-fixes.2026-07-25";
+const TOOL_SCHEMA_REVISION = "devspacemac-m1.2026-07-26";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -123,7 +143,42 @@ interface ServiceRuntime {
   startedAt: string;
   tools: string[];
   schemaFingerprint: string;
+  requiredCapabilities: Record<string, ToolCapability>;
 }
+
+type ToolCapability =
+  | "workspace.read"
+  | "workspace.write"
+  | "artifact.inspect"
+  | "artifact.publish"
+  | "runner.execute"
+  | "git.read"
+  | "git.write"
+  | "game.control";
+
+const EXPOSE_LEGACY_SHELL = false;
+
+const registerAppTool: typeof registerMcpAppTool = ((
+  server: Parameters<typeof registerMcpAppTool>[0],
+  name: Parameters<typeof registerMcpAppTool>[1],
+  definition: Parameters<typeof registerMcpAppTool>[2],
+  handler: Parameters<typeof registerMcpAppTool>[3],
+) => {
+  const capability = requiredCapabilityForTool(String(name));
+  const meta = (definition as { _meta?: Record<string, unknown> })._meta ?? {};
+  return registerMcpAppTool(
+    server,
+    name,
+    {
+      ...definition,
+      _meta: {
+        ...meta,
+        devspace: { requiredCapability: capability },
+      },
+    },
+    handler,
+  );
+}) as typeof registerMcpAppTool;
 
 type ToolContent =
   | { type: "text"; text: string }
@@ -259,6 +314,9 @@ function exposedToolNames(
     "devspace_info",
     "list_workspaces",
     "list_artifacts",
+    "inspect_artifact",
+    "git_status",
+    "git_diff",
     "resume_workspace",
     "open_workspace",
     "project_memory_preflight",
@@ -266,7 +324,21 @@ function exposedToolNames(
   ];
   if (!config.readOnly) {
     tools.splice(3, 0, "publish_artifact");
-    tools.push(toolNames.write, "import_png", toolNames.edit);
+    tools.push(
+      toolNames.write,
+      "import_asset",
+      "import_png",
+      toolNames.edit,
+      "preview_artifact",
+      "mkdir",
+      "copy",
+      "move",
+      "move_to_trash",
+      "git_stage_paths",
+      "git_unstage_paths",
+      "git_commit",
+      "git_branch",
+    );
   }
   if (config.widgets === "changes") tools.push("show_changes");
   if (exposeDedicatedReadTools(config)) {
@@ -274,7 +346,6 @@ function exposedToolNames(
   }
   if (!config.readOnly) {
     tools.push(
-      toolNames.shell,
       "start_job",
       "start_capture",
       "poll_job",
@@ -286,6 +357,9 @@ function exposedToolNames(
 
 function createServiceRuntime(config: ServerConfig): ServiceRuntime {
   const tools = exposedToolNames(config, toolNamesFor(config));
+  const requiredCapabilities = Object.fromEntries(
+    tools.map((tool) => [tool, requiredCapabilityForTool(tool)]),
+  ) as Record<string, ToolCapability>;
   const schemaFingerprint = createHash("sha256")
     .update(
       JSON.stringify({
@@ -296,6 +370,7 @@ function createServiceRuntime(config: ServerConfig): ServiceRuntime {
         minimalTools: config.minimalTools,
         widgets: config.widgets,
         toolNaming: config.toolNaming,
+        requiredCapabilities,
       }),
     )
     .digest("hex");
@@ -304,7 +379,57 @@ function createServiceRuntime(config: ServerConfig): ServiceRuntime {
     startedAt: new Date().toISOString(),
     tools,
     schemaFingerprint,
+    requiredCapabilities,
   };
+}
+
+function requiredCapabilityForTool(tool: string): ToolCapability {
+  if (
+    [
+      "write",
+      "write_file",
+      "edit",
+      "edit_file",
+      "import_asset",
+      "import_png",
+      "mkdir",
+      "copy",
+      "move",
+      "move_to_trash",
+    ].includes(tool)
+  ) {
+    return "workspace.write";
+  }
+  if (["inspect_artifact", "list_artifacts"].includes(tool)) {
+    return "artifact.inspect";
+  }
+  if (["publish_artifact", "preview_artifact"].includes(tool)) {
+    return "artifact.publish";
+  }
+  if (["git_status", "git_diff"].includes(tool)) return "git.read";
+  if (
+    ["git_stage_paths", "git_unstage_paths", "git_commit", "git_branch"].includes(
+      tool,
+    )
+  ) {
+    return "git.write";
+  }
+  if (
+    [
+      "start_job",
+      "start_capture",
+      "poll_job",
+      "cancel_job",
+      "bash",
+      "run_shell",
+    ].includes(tool)
+  ) {
+    return "runner.execute";
+  }
+  if (tool.includes("game_session") || tool.includes("game_input")) {
+    return "game.control";
+  }
+  return "workspace.read";
 }
 
 function serverInstructions(
@@ -335,7 +460,7 @@ function serverInstructions(
     return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.${projectMemory}`;
   }
 
-  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, job, capture, and artifact tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or complete text rewrites, import_png for original PNG bytes from an HTTPS result URL or Base64 data, ${toolNames.shell} for bounded foreground commands, start_job/poll_job/cancel_job for long-running validation commands, start_capture for a validated project capture profile, list_artifacts for persistent SHA-256 records, and publish_artifact only when a short-lived review/download URL is needed. Do not create, download, or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChanges}${projectMemory}`;
+  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, job, capture, artifact, and Git tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or explicit complete rewrites, import_asset for binary asset intake, start_job/poll_job/cancel_job for named validation runners, start_capture for a validated project capture profile, inspect_artifact and list_artifacts for evidence, and preview_artifact or publish_artifact for short-lived review URLs. Arbitrary shell command execution is not exposed.${showChanges}${projectMemory}`;
 }
 
 export interface CreateServerOptions {
@@ -469,7 +594,14 @@ const jobSnapshotOutputSchema = z.object({
   nextOutputOffsetBytes: z.number().int().optional(),
 });
 
-const artifactTypeSchema = z.enum(["blend", "glb", "image", "json", "text"]);
+const artifactTypeSchema = z.enum([
+  "blend",
+  "glb",
+  "image",
+  "audio",
+  "json",
+  "text",
+]);
 
 const artifactOutputSchema = z.object({
   artifactId: z.string(),
@@ -481,9 +613,23 @@ const artifactOutputSchema = z.object({
   sha256: z.string(),
   change: z.enum(["created", "modified"]),
   completion: z.enum(["complete", "incomplete"]),
-  jobId: z.string(),
-  runner: z.enum(JOB_RUNNERS),
+  jobId: z.string().optional(),
+  runner: z.enum(JOB_RUNNERS).optional(),
   runnerVersion: z.string().optional(),
+  origin: z.union([
+    z.object({
+      kind: z.literal("job"),
+      jobId: z.string(),
+      runner: z.enum(JOB_RUNNERS),
+      runnerVersion: z.string().optional(),
+    }),
+    z.object({
+      kind: z.literal("import"),
+      importId: z.string(),
+      source: z.enum(["https", "base64"]),
+      sourceHost: z.string().optional(),
+    }),
+  ]),
   workspaceId: z.string(),
   createdAt: z.string(),
   gitStatus: z.enum(["tracked", "untracked", "ignored", "unknown"]),
@@ -969,6 +1115,7 @@ function createMcpServer(
         schemaRevision: z.string(),
         schemaFingerprint: z.string(),
         tools: z.array(z.string()),
+        requiredCapabilities: z.record(z.string(), z.string()),
         readOnly: z.boolean(),
         toolMode: z.enum(["minimal", "full"]),
         toolNaming: z.enum(["legacy", "short"]),
@@ -1042,6 +1189,7 @@ function createMcpServer(
         schemaRevision: TOOL_SCHEMA_REVISION,
         schemaFingerprint: runtime.schemaFingerprint,
         tools: runtime.tools,
+        requiredCapabilities: runtime.requiredCapabilities,
         readOnly: config.readOnly,
         toolMode: config.minimalTools
           ? ("minimal" as const)
@@ -1069,6 +1217,8 @@ function createMcpServer(
             "PNG",
             "JPEG",
             "WEBP",
+            "WAV",
+            "OGG",
             "JSON",
             "TXT",
             "LOG",
@@ -1247,6 +1397,166 @@ function createMcpServer(
     },
   );
 
+  registerAppTool(
+    server,
+    "inspect_artifact",
+    {
+      title: "Inspect artifact",
+      description:
+        "Inspect one workspace-local artifact by registered artifactId or path. Returns a SHA-256 snapshot and bounded container metadata without executing the file.",
+      inputSchema: {
+        workspaceId: z.string(),
+        artifactId: z
+          .string()
+          .regex(/^artifact_[0-9a-f-]{36}$/)
+          .optional(),
+        path: z.string().max(512).optional(),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+      },
+      outputSchema: resultOutputSchema({ inspection: z.unknown() }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({
+      workspaceId,
+      artifactId,
+      path,
+      projectMemoryReceiptId,
+    }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const projectMemory = workspaces.observeProjectMemoryAccess(
+        workspaceId,
+        "inspect_artifact",
+        projectMemoryReceiptId,
+      );
+      const inspection = await inspectArtifact({
+        ledger: artifacts,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        artifactId,
+        path,
+      });
+      const result = `${inspection.format} | ${inspection.size} bytes | sha256 ${inspection.sha256} | ${inspection.path}`;
+      logToolCall(config, {
+        tool: "inspect_artifact",
+        workspaceId,
+        path: inspection.path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        _meta: { tool: "inspect_artifact", projectMemory },
+        structuredContent: { result, inspection },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "git_status",
+    {
+      title: "Git status",
+      description:
+        "Inspect local Git status for a workspace whose root exactly equals the Git root.",
+      inputSchema: {
+        workspaceId: z.string(),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+      },
+      outputSchema: resultOutputSchema({ status: z.unknown() }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ workspaceId, projectMemoryReceiptId }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const projectMemory = workspaces.observeProjectMemoryAccess(
+        workspaceId,
+        "git_status",
+        projectMemoryReceiptId,
+      );
+      const status = await inspectGitStatus(workspace.root);
+      const result = `${status.branch ?? "(detached)"} @ ${status.headSha} | ${status.clean ? "clean" : "dirty"} | staged ${status.staged.length}, unstaged ${status.unstaged.length}, untracked ${status.untracked.length}, conflicts ${status.conflicts.length}`;
+      logToolCall(config, {
+        tool: "git_status",
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        _meta: { tool: "git_status", projectMemory },
+        structuredContent: { result, status },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "git_diff",
+    {
+      title: "Git diff",
+      description:
+        "Read a bounded local Git patch and its full SHA-256. Does not invoke external diff tools.",
+      inputSchema: {
+        workspaceId: z.string(),
+        scope: z.enum(["head", "staged", "unstaged"]).optional(),
+        paths: z.array(z.string().max(512)).max(100).optional(),
+        contextLines: z.number().int().min(0).max(20).optional(),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+      },
+      outputSchema: resultOutputSchema({ diff: z.unknown() }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({
+      workspaceId,
+      scope,
+      paths,
+      contextLines,
+      projectMemoryReceiptId,
+    }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const projectMemory = workspaces.observeProjectMemoryAccess(
+        workspaceId,
+        "git_diff",
+        projectMemoryReceiptId,
+      );
+      const diff = await inspectGitDiff({
+        workspaceRoot: workspace.root,
+        scope,
+        paths,
+        contextLines,
+      });
+      const result = diff.patch || "No matching Git changes.";
+      logToolCall(config, {
+        tool: "git_diff",
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        _meta: { tool: "git_diff", projectMemory },
+        structuredContent: { result, diff },
+      };
+    },
+  );
+
   if (!config.readOnly) {
     registerAppTool(
       server,
@@ -1293,7 +1603,7 @@ function createMcpServer(
           contentType: z.string(),
           size: z.number().int().nonnegative(),
           sha256: z.string(),
-          previewType: z.enum(["image", "text", "json", "download"]),
+          previewType: z.enum(["image", "audio", "text", "json", "download"]),
         }),
         _meta: {},
         annotations: {
@@ -1358,6 +1668,491 @@ function createMcpServer(
             },
           },
           structuredContent: { result, ...publication },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "import_asset",
+      {
+        title: "Import asset",
+        description:
+          "Import PNG, JPEG, WEBP, GLB, WAV, or OGG bytes from one public HTTPS URL or standard Base64 source. Validates path, signature, size, hash, and overwrite policy, then registers the immutable version in the Artifact Ledger.",
+        inputSchema: {
+          workspaceId: z.string(),
+          path: z.string().max(512),
+          sourceUrl: z.string().url().optional(),
+          base64Data: z.string().optional(),
+          expectedSha256: z
+            .string()
+            .regex(/^[0-9a-fA-F]{64}$/)
+            .optional(),
+          overwrite: z.boolean().optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          importId: z.string(),
+          imported: z.unknown(),
+          artifact: z.unknown(),
+        }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+      },
+      async ({
+        workspaceId,
+        path,
+        sourceUrl,
+        base64Data,
+        expectedSha256,
+        overwrite,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "import_asset",
+          projectMemoryReceiptId,
+        );
+        const destination = resolveWorkspacePath(workspace.root, path);
+        const imported = await importAsset({
+          destination: destination.absolutePath,
+          workspaceRoot: workspace.root,
+          sourceUrl,
+          base64Data,
+          expectedSha256,
+          overwrite,
+        });
+        const importId = `import_${randomUUID()}`;
+        const artifact = await artifacts.registerImport({
+          workspaceId,
+          workspaceRoot: workspace.root,
+          relativePath: imported.path,
+          importId,
+          source: imported.source,
+          sourceHost: imported.sourceHost,
+        });
+        const result = `Imported ${imported.format} ${imported.path} (${imported.bytes} bytes, sha256 ${imported.sha256}) as ${artifact.artifactId}.`;
+        logToolCall(config, {
+          tool: "import_asset",
+          workspaceId,
+          path: imported.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "import_asset", projectMemory },
+          structuredContent: {
+            result,
+            importId,
+            imported,
+            artifact: { ...artifact, presence: "present" as const },
+          },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "preview_artifact",
+      {
+        title: "Preview artifact",
+        description:
+          "Create a ten-minute, hash-bound preview for a PNG, JPEG, WEBP, WAV, or OGG artifact. Unregistered paths are not added to the formal Artifact Ledger.",
+        inputSchema: {
+          workspaceId: z.string(),
+          artifactId: z
+            .string()
+            .regex(/^artifact_[0-9a-f-]{36}$/)
+            .optional(),
+          path: z.string().max(512).optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ preview: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+      },
+      async ({
+        workspaceId,
+        artifactId,
+        path,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "preview_artifact",
+          projectMemoryReceiptId,
+        );
+        const preview = await publisher.preview({
+          workspaceId,
+          workspaceRoot: workspace.root,
+          artifactId,
+          path,
+        });
+        const content: ToolContent[] = [
+          textBlock(
+            `Preview ${preview.path}\nURL: ${preview.url}\nExpires: ${preview.expiresAt}\nSHA-256: ${preview.sha256}`,
+          ),
+        ];
+        if (preview.previewType === "image" && preview.size <= 8 * 1024 * 1024) {
+          const resolved = resolveExistingWorkspacePath(
+            workspace.root,
+            preview.path,
+            "file",
+          );
+          content.push({
+            type: "image",
+            data: readFileSync(resolved.absolutePath).toString("base64"),
+            mimeType: preview.contentType,
+          });
+        }
+        logToolCall(config, {
+          tool: "preview_artifact",
+          workspaceId,
+          path: preview.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content,
+          _meta: { tool: "preview_artifact", projectMemory },
+          structuredContent: {
+            result: contentText(content),
+            preview,
+          },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "mkdir",
+      {
+        title: "Create directory",
+        description:
+          "Create a real nested directory inside the workspace. Existing real directories are idempotent.",
+        inputSchema: {
+          workspaceId: z.string(),
+          path: z.string().max(512),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ operation: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({ workspaceId, path, projectMemoryReceiptId }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "mkdir",
+          projectMemoryReceiptId,
+        );
+        const operation = await createWorkspaceDirectory(workspace.root, path);
+        const result = `${operation.created ? "Created" : "Exists"}: ${operation.path}`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "mkdir", projectMemory },
+          structuredContent: { result, operation },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "copy",
+      {
+        title: "Copy path",
+        description:
+          "Copy a regular file or symlink-free directory tree inside the workspace. Directory merge and replacement are prohibited.",
+        inputSchema: {
+          workspaceId: z.string(),
+          sourcePath: z.string().max(512),
+          destinationPath: z.string().max(512),
+          overwrite: z.boolean().optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ operation: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        sourcePath,
+        destinationPath,
+        overwrite,
+        projectMemoryReceiptId,
+      }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "copy",
+          projectMemoryReceiptId,
+        );
+        const operation = await copyWorkspacePath({
+          workspaceRoot: workspace.root,
+          sourcePath,
+          destinationPath,
+          overwrite,
+        });
+        const result = `Copied ${operation.sourcePath} to ${operation.destinationPath}.`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "copy", projectMemory },
+          structuredContent: { result, operation },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "move",
+      {
+        title: "Move path",
+        description:
+          "Atomically move a regular file or real directory inside the workspace. Cross-device moves and directory replacement are prohibited.",
+        inputSchema: {
+          workspaceId: z.string(),
+          sourcePath: z.string().max(512),
+          destinationPath: z.string().max(512),
+          overwrite: z.boolean().optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ operation: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        sourcePath,
+        destinationPath,
+        overwrite,
+        projectMemoryReceiptId,
+      }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "move",
+          projectMemoryReceiptId,
+        );
+        const operation = await moveWorkspacePath({
+          workspaceRoot: workspace.root,
+          stateDir: config.stateDir,
+          workspaceId,
+          sourcePath,
+          destinationPath,
+          overwrite,
+        });
+        const result = `Moved ${operation.sourcePath} to ${operation.destinationPath}.`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "move", projectMemory },
+          structuredContent: { result, operation },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "move_to_trash",
+      {
+        title: "Move to trash",
+        description:
+          "Move a workspace-local file or directory into the private DevSpace quarantine. No permanent deletion is performed.",
+        inputSchema: {
+          workspaceId: z.string(),
+          path: z.string().max(512),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ trash: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({ workspaceId, path, projectMemoryReceiptId }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "move_to_trash",
+          projectMemoryReceiptId,
+        );
+        const trash = await moveWorkspacePathToTrash({
+          workspaceRoot: workspace.root,
+          stateDir: config.stateDir,
+          workspaceId,
+          path,
+        });
+        const result = `Moved ${trash.originalPath} to quarantine as ${trash.trashId}.`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "move_to_trash", projectMemory },
+          structuredContent: { result, trash },
+        };
+      },
+    );
+
+    for (const tool of ["git_stage_paths", "git_unstage_paths"] as const) {
+      registerAppTool(
+        server,
+        tool,
+        {
+          title: tool === "git_stage_paths" ? "Stage Git paths" : "Unstage Git paths",
+          description:
+            "Change the local Git index for an explicit, bounded list of workspace-relative paths.",
+          inputSchema: {
+            workspaceId: z.string(),
+            paths: z.array(z.string().max(512)).min(1).max(100),
+            projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+          },
+          outputSchema: resultOutputSchema({ status: z.unknown() }),
+          _meta: {},
+          annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: false,
+          },
+        },
+        async ({ workspaceId, paths, projectMemoryReceiptId }) => {
+          const workspace = workspaces.getWorkspace(workspaceId);
+          const projectMemory = workspaces.observeProjectMemoryAccess(
+            workspaceId,
+            tool,
+            projectMemoryReceiptId,
+          );
+          const status =
+            tool === "git_stage_paths"
+              ? await stageGitPaths(workspace.root, paths)
+              : await unstageGitPaths(workspace.root, paths);
+          const result = `${tool === "git_stage_paths" ? "Staged" : "Unstaged"} ${paths.length} path(s). Index sha256 ${status.stagedDiffSha256}.`;
+          return {
+            content: [textBlock(result)],
+            _meta: { tool, projectMemory },
+            structuredContent: { result, status },
+          };
+        },
+      );
+    }
+
+    registerAppTool(
+      server,
+      "git_commit",
+      {
+        title: "Commit local Git changes",
+        description:
+          "Create one local commit only when the reviewed staged diff SHA-256 still matches. Hooks and GPG signing are disabled.",
+        inputSchema: {
+          workspaceId: z.string(),
+          message: z.string().min(1).max(10_000),
+          expectedStagedDiffSha256: z.string().regex(/^[0-9a-f]{64}$/),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ commit: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        message,
+        expectedStagedDiffSha256,
+        projectMemoryReceiptId,
+      }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "git_commit",
+          projectMemoryReceiptId,
+        );
+        const commit = await commitGit({
+          workspaceRoot: workspace.root,
+          message,
+          expectedStagedDiffSha256,
+        });
+        const result = `Created local commit ${commit.headSha}.`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "git_commit", projectMemory },
+          structuredContent: { result, commit },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "git_branch",
+      {
+        title: "Manage local Git branch",
+        description:
+          "List, create from HEAD, or switch to an existing local branch. Switching requires a clean workspace; deletion, force, merge, and remote operations are unsupported.",
+        inputSchema: {
+          workspaceId: z.string(),
+          action: z.enum(["list", "create", "switch"]),
+          name: z.string().max(255).optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ branch: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({ workspaceId, action, name, projectMemoryReceiptId }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "git_branch",
+          projectMemoryReceiptId,
+        );
+        const branch = await manageGitBranch({
+          workspaceRoot: workspace.root,
+          action,
+          name,
+        });
+        const result = `Current branch: ${branch.current ?? "(detached)"}; local branches: ${branch.branches.join(", ")}.`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "git_branch", projectMemory },
+          structuredContent: { result, branch },
         };
       },
     );
@@ -1639,7 +2434,7 @@ function createMcpServer(
       toolNames.write,
       {
         title: "Write file",
-        description: `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
+        description: `Create a file inside an open workspace. Existing files are rejected unless overwrite=true; prefer ${toolNames.edit} for targeted changes. Call open_workspace first and pass workspaceId.`,
         inputSchema: {
           workspaceId: z
             .string()
@@ -1648,6 +2443,12 @@ function createMcpServer(
             .string()
             .describe("File path to write, relative to the workspace root."),
           content: z.string().describe("Complete new file content."),
+          overwrite: z
+            .boolean()
+            .optional()
+            .describe(
+              "Defaults to false. Set true only for an intentional complete rewrite.",
+            ),
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
@@ -1662,7 +2463,20 @@ function createMcpServer(
           toolNames.write,
           projectMemoryReceiptId,
         );
-        workspaces.resolvePath(workspace, input.path);
+        const destination = resolveWorkspacePath(workspace.root, input.path);
+        if (existsSync(destination.absolutePath)) {
+          const target = lstatSync(destination.absolutePath);
+          if (target.isSymbolicLink() || !target.isFile()) {
+            throw new Error(
+              "PATH_TYPE_REJECTED: Write destination must be a regular file.",
+            );
+          }
+          if (!input.overwrite) {
+            throw new Error(
+              "PATH_EXISTS: Destination exists; set overwrite=true or use edit.",
+            );
+          }
+        }
         const response = await writeFileTool(input, {
           cwd: workspace.root,
           root: workspace.root,
@@ -1797,6 +2611,14 @@ function createMcpServer(
             base64Data,
             expectedSha256,
             overwrite,
+          });
+          await artifacts.registerImport({
+            workspaceId,
+            workspaceRoot: workspace.root,
+            relativePath: path,
+            importId: `import_${randomUUID()}`,
+            source: imported.source,
+            sourceHost: imported.sourceHost,
           });
           const result = `Imported ${path} (${imported.bytes} bytes, sha256 ${imported.sha256}).`;
           logToolCall(config, {
@@ -2267,7 +3089,8 @@ function createMcpServer(
   }
 
   if (!config.readOnly) {
-    registerAppTool(
+    if (EXPOSE_LEGACY_SHELL) {
+      registerAppTool(
       server,
       toolNames.shell,
       {
@@ -2372,7 +3195,8 @@ function createMcpServer(
           },
         };
       },
-    );
+      );
+    }
 
     registerAppTool(
       server,

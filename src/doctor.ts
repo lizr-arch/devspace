@@ -940,8 +940,7 @@ export async function probePublicExternalClientFlow(
           input.verifyProjectMemoryShadowTools &&
           workspaceId &&
           projectMemoryReceiptId &&
-          toolNames.includes(readToolName) &&
-          toolNames.includes(shellToolName)
+          toolNames.includes(readToolName)
         ) {
           const receiptRead = await postMcpJsonRpc(
             info.publicMcpUrl,
@@ -986,27 +985,29 @@ export async function probePublicExternalClientFlow(
             missingRead.text,
           );
 
-          const missingShell = await postMcpJsonRpc(
-            info.publicMcpUrl,
-            accessToken,
-            {
-              jsonrpc: "2.0",
-              id: 6,
-              method: "tools/call",
-              params: {
-                name: shellToolName,
-                arguments: {
-                  workspaceId,
-                  command: "git --version",
+          if (toolNames.includes(shellToolName)) {
+            const missingShell = await postMcpJsonRpc(
+              info.publicMcpUrl,
+              accessToken,
+              {
+                jsonrpc: "2.0",
+                id: 6,
+                method: "tools/call",
+                params: {
+                  name: shellToolName,
+                  arguments: {
+                    workspaceId,
+                    command: "git --version",
+                  },
                 },
               },
-            },
-            sessionId,
-          );
-          projectMemoryMissingShellOutcome = projectMemoryOutcome(
-            missingShell.text,
-          );
-          projectMemoryShellSucceeded = mcpToolCallSucceeded(missingShell);
+              sessionId,
+            );
+            projectMemoryMissingShellOutcome = projectMemoryOutcome(
+              missingShell.text,
+            );
+            projectMemoryShellSucceeded = mcpToolCallSucceeded(missingShell);
+          }
         }
       }
     }

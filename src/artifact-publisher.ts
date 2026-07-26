@@ -15,6 +15,7 @@ import {
   type ArtifactRecord,
   type ListedArtifact,
 } from "./artifact-ledger.js";
+import { resolveExistingWorkspacePath } from "./workspace-paths.js";
 
 export const DEFAULT_ARTIFACT_TTL_SECONDS = 10 * 60;
 export const MIN_ARTIFACT_TTL_SECONDS = 30;
@@ -23,7 +24,12 @@ export const MAX_IMAGE_PUBLISH_BYTES = 32 * 1024 * 1024;
 export const MAX_TEXT_PUBLISH_BYTES = 4 * 1024 * 1024;
 export const MAX_BINARY_PUBLISH_BYTES = 128 * 1024 * 1024;
 
-export type ArtifactPreviewType = "image" | "text" | "json" | "download";
+export type ArtifactPreviewType =
+  | "image"
+  | "audio"
+  | "text"
+  | "json"
+  | "download";
 
 export interface ArtifactPublication {
   artifact: ListedArtifact;
@@ -49,10 +55,13 @@ export interface ArtifactPublicationAudit {
 
 interface PublicationGrant {
   tokenHash: string;
-  artifactId: string;
+  artifactId?: string;
   workspaceId: string;
   workspaceRoot: string;
   relativePath: string;
+  expectedSize: number;
+  expectedSha256: string;
+  mimeType: string;
   expiresAtMs: number;
   previewType: ArtifactPreviewType;
   purpose: "review" | "download" | "inspection";
@@ -112,6 +121,9 @@ export class ArtifactPublisher {
       workspaceId: input.workspaceId,
       workspaceRoot: input.workspaceRoot,
       relativePath: verified.artifact.relativePath,
+      expectedSize: verified.artifact.size,
+      expectedSha256: verified.artifact.sha256,
+      mimeType: verified.artifact.mimeType,
       expiresAtMs,
       previewType,
       purpose,
@@ -137,6 +149,108 @@ export class ArtifactPublisher {
       size: verified.artifact.size,
       sha256: verified.artifact.sha256,
       previewType,
+    };
+  }
+
+  async preview(input: {
+    workspaceId: string;
+    workspaceRoot: string;
+    artifactId?: string;
+    path?: string;
+    ttlSeconds?: number;
+  }): Promise<
+    Omit<ArtifactPublication, "artifact"> & { artifact?: ListedArtifact; path: string }
+  > {
+    if (input.artifactId) {
+      const published = await this.publish({
+        ...input,
+        purpose: "inspection",
+      });
+      if (!["image", "audio"].includes(published.previewType)) {
+        throw new Error(
+          "PREVIEW_UNAVAILABLE: Only images and audio can be previewed in M1.",
+        );
+      }
+      return {
+        artifact: published.artifact,
+        path: published.artifact.relativePath,
+        url: published.url,
+        expiresAt: published.expiresAt,
+        contentType: published.contentType,
+        size: published.size,
+        sha256: published.sha256,
+        previewType: published.previewType,
+      };
+    }
+    if (!input.path) {
+      throw new Error(
+        "ASSET_INPUT_INVALID: Provide exactly one of artifactId or path.",
+      );
+    }
+    const resolved = resolveExistingWorkspacePath(
+      input.workspaceRoot,
+      input.path,
+      "file",
+    );
+    const format = previewFormat(resolved.relativePath);
+    const descriptor = openSync(
+      resolved.absolutePath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    let digest: string;
+    let size: number;
+    try {
+      const info = fstatSync(descriptor);
+      size = info.size;
+      assertPreviewSize(format.previewType, size);
+      digest = sha256Descriptor(descriptor, size);
+    } finally {
+      closeSync(descriptor);
+    }
+    const ttlSeconds = input.ttlSeconds ?? DEFAULT_ARTIFACT_TTL_SECONDS;
+    if (
+      !Number.isInteger(ttlSeconds) ||
+      ttlSeconds < MIN_ARTIFACT_TTL_SECONDS ||
+      ttlSeconds > MAX_ARTIFACT_TTL_SECONDS
+    ) {
+      throw new Error(
+        `ttlSeconds must be from ${MIN_ARTIFACT_TTL_SECONDS} to ${MAX_ARTIFACT_TTL_SECONDS}.`,
+      );
+    }
+    const token = randomBytes(32).toString("base64url");
+    const tokenHash = hashToken(token);
+    const expiresAtMs = this.now() + ttlSeconds * 1000;
+    this.grants.set(tokenHash, {
+      tokenHash,
+      workspaceId: input.workspaceId,
+      workspaceRoot: input.workspaceRoot,
+      relativePath: resolved.relativePath,
+      expectedSize: size,
+      expectedSha256: digest,
+      mimeType: format.mimeType,
+      expiresAtMs,
+      previewType: format.previewType,
+      purpose: "inspection",
+    });
+    this.audit({
+      event: "artifact_published",
+      workspaceId: input.workspaceId,
+      relativePath: resolved.relativePath,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      tokenHashPrefix: tokenHash.slice(0, 12),
+      purpose: "inspection",
+    });
+    return {
+      path: resolved.relativePath,
+      url: new URL(
+        `/artifacts/${encodeURIComponent(token)}`,
+        this.publicBaseUrl,
+      ).toString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      contentType: format.mimeType,
+      size,
+      sha256: digest,
+      previewType: format.previewType,
     };
   }
 
@@ -171,24 +285,32 @@ export class ArtifactPublisher {
 
     let descriptor: number | undefined;
     try {
-      const record = this.ledger.getArtifact(
-        grant.workspaceId,
-        grant.artifactId,
-      );
-      if (!record || record.relativePath !== grant.relativePath) {
+      const record = grant.artifactId
+        ? this.ledger.getArtifact(grant.workspaceId, grant.artifactId)
+        : undefined;
+      if (
+        grant.artifactId &&
+        (!record || record.relativePath !== grant.relativePath)
+      ) {
         throw new Error("ARTIFACT_NOT_FOUND: Artifact grant is stale.");
       }
-      const verified = await verifyArtifactRecord(grant.workspaceRoot, record);
-      assertPublishableSize(verified.artifact);
+      const absolutePath = record
+        ? (await verifyArtifactRecord(grant.workspaceRoot, record)).absolutePath
+        : resolveExistingWorkspacePath(
+            grant.workspaceRoot,
+            grant.relativePath,
+            "file",
+          ).absolutePath;
+      if (record) assertPublishableSize(record);
       descriptor = openSync(
-        verified.absolutePath,
+        absolutePath,
         fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
       );
       const info = fstatSync(descriptor);
       if (
         !info.isFile() ||
-        info.size !== record.size ||
-        sha256Descriptor(descriptor, info.size) !== record.sha256
+        info.size !== grant.expectedSize ||
+        sha256Descriptor(descriptor, info.size) !== grant.expectedSha256
       ) {
         throw new Error(
           "ARTIFACT_NOT_FOUND: Artifact changed before publication.",
@@ -196,8 +318,8 @@ export class ArtifactPublisher {
       }
 
       response.status(200);
-      response.setHeader("Content-Type", record.mimeType);
-      response.setHeader("Content-Length", String(record.size));
+      response.setHeader("Content-Type", grant.mimeType);
+      response.setHeader("Content-Length", String(grant.expectedSize));
       response.setHeader("X-Content-Type-Options", "nosniff");
       response.setHeader("Cache-Control", "private, no-store, max-age=0");
       response.setHeader("Pragma", "no-cache");
@@ -208,10 +330,10 @@ export class ArtifactPublisher {
       );
       response.setHeader(
         "Content-Disposition",
-        `${grant.previewType === "image" ? "inline" : "attachment"}; filename="${safeFilename(record.relativePath)}"`,
+        `${grant.previewType === "image" || grant.previewType === "audio" ? "inline" : "attachment"}; filename="${safeFilename(grant.relativePath)}"`,
       );
 
-      const stream = createReadStream(verified.absolutePath, {
+      const stream = createReadStream(absolutePath, {
         fd: descriptor,
         autoClose: true,
         start: 0,
@@ -227,9 +349,9 @@ export class ArtifactPublisher {
       stream.pipe(response);
       this.audit({
         event: "artifact_accessed",
-        artifactId: record.artifactId,
-        workspaceId: record.workspaceId,
-        relativePath: record.relativePath,
+        artifactId: record?.artifactId,
+        workspaceId: grant.workspaceId,
+        relativePath: grant.relativePath,
         tokenHashPrefix: tokenHash.slice(0, 12),
         purpose: grant.purpose,
       });
@@ -300,9 +422,49 @@ function assertPublishableSize(artifact: ArtifactRecord): void {
 
 function previewTypeFor(artifact: ArtifactRecord): ArtifactPreviewType {
   if (artifact.artifactType === "image") return "image";
+  if (artifact.artifactType === "audio") return "audio";
   if (artifact.artifactType === "json") return "json";
   if (artifact.artifactType === "text") return "text";
   return "download";
+}
+
+function previewFormat(relativePath: string): {
+  previewType: Extract<ArtifactPreviewType, "image" | "audio">;
+  mimeType: string;
+} {
+  const extension = relativePath.toLowerCase().split(".").pop();
+  switch (extension) {
+    case "png":
+      return { previewType: "image", mimeType: "image/png" };
+    case "jpg":
+    case "jpeg":
+      return { previewType: "image", mimeType: "image/jpeg" };
+    case "webp":
+      return { previewType: "image", mimeType: "image/webp" };
+    case "wav":
+      return { previewType: "audio", mimeType: "audio/wav" };
+    case "ogg":
+      return { previewType: "audio", mimeType: "audio/ogg" };
+    default:
+      throw new Error(
+        "PREVIEW_UNAVAILABLE: Only PNG, JPEG, WEBP, WAV, and OGG can be previewed in M1.",
+      );
+  }
+}
+
+function assertPreviewSize(
+  previewType: Extract<ArtifactPreviewType, "image" | "audio">,
+  size: number,
+): void {
+  const maximum =
+    previewType === "image"
+      ? MAX_IMAGE_PUBLISH_BYTES
+      : MAX_BINARY_PUBLISH_BYTES;
+  if (size > maximum) {
+    throw new Error(
+      `ARTIFACT_TOO_LARGE: Preview exceeds its ${maximum}-byte limit.`,
+    );
+  }
 }
 
 function safeFilename(relativePath: string): string {
