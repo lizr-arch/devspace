@@ -336,6 +336,40 @@ test("git_merge ff_only fast-forwards cleanly", async () => {
   }
 });
 
+test("git_merge resolves repository state paths against the target repository", async () => {
+  const fixture = await createLocalFixture("merge-state-path-root");
+  const unrelatedCwd = await mkdtemp(
+    join(tmpdir(), "devspace-unrelated-merge-state-"),
+  );
+  const originalCwd = process.cwd();
+  try {
+    await mkdir(join(unrelatedCwd, ".git"));
+    for (const name of [
+      "MERGE_HEAD",
+      "MERGE_MSG",
+      "MERGE_MODE",
+      "AUTO_MERGE",
+    ]) {
+      await writeFile(join(unrelatedCwd, ".git", name), "unrelated\n");
+    }
+    const head = await revParse(fixture.root, "HEAD");
+    process.chdir(unrelatedCwd);
+    const result = await mergeGit({
+      workspaceRoot: fixture.root,
+      sourceRef: "HEAD",
+      mode: "ff_only",
+      expectedHeadSha: head,
+      expectedSourceSha: head,
+    });
+    assert.equal(result.headBefore, head);
+    assert.equal(result.headAfter, head);
+  } finally {
+    process.chdir(originalCwd);
+    await rm(unrelatedCwd, { recursive: true, force: true });
+    await fixture.cleanup();
+  }
+});
+
 test("git_merge ff_only rejects diverged history without changing the repository", async () => {
   const fixture = await createDivergedFixture("merge-ff-reject");
   try {
