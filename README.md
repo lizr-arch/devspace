@@ -200,6 +200,42 @@ devspace doctor --public
 If the tunnel hostname changes, restart DevSpace with the exact new public base
 URL. Otherwise DevSpace may reject requests with `Invalid Host`.
 
+For ngrok, point the upstream at the IPv4 loopback address explicitly:
+
+```bash
+ngrok http http://127.0.0.1:7676
+```
+
+Avoid `localhost:7676` when DevSpace listens only on IPv4. Some tunnel clients
+resolve `localhost` to `::1` first, which produces intermittent private-leg
+connection failures during startup or restart.
+
+If an ngrok-backed MCP connection drops while DevSpace remains healthy, inspect
+the ngrok agent log before restarting DevSpace:
+
+- `failed to open private leg` means ngrok could not reach the local DevSpace
+  listener.
+- `heartbeat timeout, terminating session` means the long-lived connection
+  between the ngrok agent and ngrok's edge became unhealthy. That reset also
+  closes active MCP streaming connections.
+- An isolated `ECONNRESET` without an agent reconnect can be a single public
+  edge request failure rather than a DevSpace process failure.
+
+Prefer a stable network path to the automatically selected ngrok region. Some
+ngrok agent versions still accept a temporary region override such as
+`--region=ap`, but the flag is deprecated and may be removed; measure the
+candidate region first and check your installed agent's help output. Restarting
+only ngrok does not require a DevSpace restart while the public hostname remains
+unchanged, although connected MCP clients may need to reconnect.
+
+After changing tunnel routing, verify both the public endpoint and the complete
+MCP/OAuth path:
+
+```bash
+devspace doctor --public
+devspace doctor --public --full-loop
+```
+
 If you use Pinggy over SSH on Windows, prefer:
 
 ```bash
