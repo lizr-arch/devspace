@@ -200,6 +200,20 @@ devspace doctor --public
 If the tunnel hostname changes, restart DevSpace with the exact new public base
 URL. Otherwise DevSpace may reject requests with `Invalid Host`.
 
+For a stable hostname that survives connector restarts, use a Cloudflare Named
+Tunnel with a domain you control. Keep DevSpace on `127.0.0.1`, route a dedicated
+subdomain such as `mcp-mac.example.com` to `http://127.0.0.1:7676`, and configure
+the MCP client with:
+
+```text
+https://mcp-mac.example.com/mcp
+```
+
+Use one hostname and one tunnel per independently operated DevSpace machine.
+See the [Cloudflare Named Tunnel Guide](./docs/cloudflare-named-tunnel.md) for
+token handling, macOS startup, migration, multi-machine updates, network
+diagnostics, and full OAuth/MCP verification.
+
 For ngrok, point the upstream at the IPv4 loopback address explicitly:
 
 ```bash
@@ -315,6 +329,7 @@ devspace doctor
 ## Documentation
 
 - [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
+- [Cloudflare Named Tunnel](./docs/cloudflare-named-tunnel.md)
 - [ChatGPT Web Connection Path](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-web-connection.md)
 - [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
 - [Local Coach Bridge](https://github.com/Waishnav/devspace/blob/main/docs/local-coach-bridge.md)
