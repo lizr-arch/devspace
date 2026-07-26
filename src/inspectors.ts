@@ -1,0 +1,581 @@
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { extname, join } from "node:path";
+import { parseFile } from "music-metadata";
+import { resolveExistingWorkspacePath } from "./workspace-paths.js";
+import { RunnerRegistry } from "./runner-registry.js";
+
+const MAX_ITEMS = 500;
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_PREVIEW_DIMENSION = 2048;
+const PROCESS_TIMEOUT_MS = 120_000;
+
+export interface InspectorResult {
+  path: string;
+  sha256: string;
+  size: number;
+  truncated: boolean;
+  [key: string]: unknown;
+}
+
+export function inspectGlb(
+  workspaceRoot: string,
+  path: string,
+): InspectorResult {
+  const source = resolveExistingWorkspacePath(workspaceRoot, path, "file");
+  const bytes = readFileSync(source.absolutePath);
+  if (
+    bytes.length < 20 ||
+    bytes.toString("ascii", 0, 4) !== "glTF" ||
+    bytes.readUInt32LE(4) !== 2 ||
+    bytes.readUInt32LE(8) !== bytes.length
+  ) {
+    throw new Error("INSPECTOR_CONTAINER_INVALID: Invalid GLB v2 header.");
+  }
+  const jsonLength = bytes.readUInt32LE(12);
+  const jsonType = bytes.readUInt32LE(16);
+  if (
+    jsonType !== 0x4e4f534a ||
+    jsonLength < 2 ||
+    20 + jsonLength > bytes.length
+  ) {
+    throw new Error("INSPECTOR_CONTAINER_INVALID: Missing GLB JSON chunk.");
+  }
+  let document: Record<string, unknown>;
+  try {
+    document = JSON.parse(
+      bytes
+        .subarray(20, 20 + jsonLength)
+        .toString("utf8")
+        .trim(),
+    ) as Record<string, unknown>;
+  } catch {
+    throw new Error("INSPECTOR_CONTAINER_INVALID: Malformed GLB JSON.");
+  }
+  const nodes = arrayOfRecords(document.nodes);
+  const meshes = arrayOfRecords(document.meshes);
+  const accessors = arrayOfRecords(document.accessors);
+  const materials = arrayOfRecords(document.materials);
+  const textures = arrayOfRecords(document.textures);
+  const images = arrayOfRecords(document.images);
+  const skins = arrayOfRecords(document.skins);
+  const animations = arrayOfRecords(document.animations);
+  let primitiveCount = 0;
+  let triangleCount = 0;
+  for (const mesh of meshes) {
+    for (const primitive of arrayOfRecords(mesh.primitives)) {
+      primitiveCount++;
+      const mode = numberValue(primitive.mode, 4);
+      const index = numberValue(primitive.indices, -1);
+      const attributes = recordValue(primitive.attributes);
+      const position = numberValue(attributes.POSITION, -1);
+      const count =
+        index >= 0
+          ? numberValue(accessors[index]?.count, 0)
+          : numberValue(accessors[position]?.count, 0);
+      if (mode === 4) triangleCount += Math.floor(count / 3);
+      if (mode === 5 || mode === 6) triangleCount += Math.max(0, count - 2);
+    }
+  }
+  const dependencies = [
+    ...arrayOfRecords(document.buffers).map((entry) => entry.uri),
+    ...images.map((entry) => entry.uri),
+  ]
+    .filter((uri): uri is string => typeof uri === "string")
+    .map((uri) => ({
+      uri: uri.slice(0, 2048),
+      absolute: /^([A-Za-z]:[\\/]|\/)/.test(uri),
+      dataUri: uri.startsWith("data:"),
+    }));
+  const animationSummaries = animations.map((animation) => {
+    let durationSeconds = 0;
+    for (const sampler of arrayOfRecords(animation.samplers)) {
+      const accessor = accessors[numberValue(sampler.input, -1)];
+      const maximum = Array.isArray(accessor?.max) ? accessor.max : [];
+      durationSeconds = Math.max(
+        durationSeconds,
+        ...maximum.filter(
+          (value): value is number => typeof value === "number",
+        ),
+      );
+    }
+    return {
+      name: stringValue(animation.name),
+      channels: arrayOfRecords(animation.channels).length,
+      durationSeconds,
+    };
+  });
+  return boundedResult({
+    path: source.relativePath,
+    sha256: sha256(bytes),
+    size: bytes.length,
+    version: 2,
+    nodeCount: nodes.length,
+    meshCount: meshes.length,
+    primitiveCount,
+    triangleCount,
+    materialCount: materials.length,
+    textureCount: textures.length,
+    skinCount: skins.length,
+    nodes: nodes.map((node, index) => ({
+      index,
+      name: stringValue(node.name),
+      mesh: integerOrNull(node.mesh),
+      skin: integerOrNull(node.skin),
+      children: Array.isArray(node.children) ? node.children.length : 0,
+    })),
+    meshes: meshes.map((mesh, index) => ({
+      index,
+      name: stringValue(mesh.name),
+      primitives: arrayOfRecords(mesh.primitives).length,
+    })),
+    accessorBounds: accessors
+      .map((accessor, index) => ({
+        index,
+        count: numberValue(accessor.count, 0),
+        type: stringValue(accessor.type),
+        min: numericArray(accessor.min),
+        max: numericArray(accessor.max),
+      }))
+      .filter((entry) => entry.min.length || entry.max.length),
+    materials: materials.map((material, index) => ({
+      index,
+      name: stringValue(material.name),
+    })),
+    skins: skins.map((skin, index) => ({
+      index,
+      name: stringValue(skin.name),
+      joints: Array.isArray(skin.joints) ? skin.joints.length : 0,
+    })),
+    animations: animationSummaries,
+    dependencies,
+  });
+}
+
+export async function inspectAudio(
+  workspaceRoot: string,
+  path: string,
+): Promise<InspectorResult> {
+  const source = resolveExistingWorkspacePath(workspaceRoot, path, "file");
+  const extension = extname(source.relativePath).toLowerCase();
+  if (![".wav", ".ogg"].includes(extension)) {
+    throw new Error("INSPECTOR_FORMAT_REJECTED: Audio must be WAV or OGG.");
+  }
+  const header = readFileSync(source.absolutePath).subarray(0, 12);
+  if (
+    (extension === ".wav" &&
+      !(
+        header.toString("ascii", 0, 4) === "RIFF" &&
+        header.toString("ascii", 8, 12) === "WAVE"
+      )) ||
+    (extension === ".ogg" && header.toString("ascii", 0, 4) !== "OggS")
+  ) {
+    throw new Error("INSPECTOR_CONTAINER_INVALID: Audio signature mismatch.");
+  }
+  const metadata = await parseFile(source.absolutePath, { duration: true });
+  const analysis = await decodeAudio(source.absolutePath);
+  const bytes = readFileSync(source.absolutePath);
+  return boundedResult({
+    path: source.relativePath,
+    sha256: sha256(bytes),
+    size: bytes.length,
+    format: extension.slice(1),
+    durationSeconds: metadata.format.duration,
+    sampleRate: metadata.format.sampleRate,
+    channels: metadata.format.numberOfChannels,
+    codec: metadata.format.codec,
+    bitrate: metadata.format.bitrate,
+    ...analysis,
+  });
+}
+
+export class ExternalInspectorManager {
+  private readonly evidenceDir: string;
+  private readonly scriptDir: string;
+
+  constructor(
+    private readonly stateDir: string,
+    private readonly runners = new RunnerRegistry(),
+  ) {
+    this.evidenceDir = join(stateDir, "inspector-evidence");
+    this.scriptDir = join(stateDir, "inspectors");
+  }
+
+  async inspectBlend(
+    workspaceRoot: string,
+    path: string,
+  ): Promise<InspectorResult> {
+    const source = resolveExistingWorkspacePath(workspaceRoot, path, "file");
+    if (extname(source.relativePath).toLowerCase() !== ".blend") {
+      throw new Error("INSPECTOR_FORMAT_REJECTED: Expected a BLEND file.");
+    }
+    const original = readFileSync(source.absolutePath);
+    const output = this.privateOutput("blend-inspection", ".json");
+    const script = this.writeScript("inspect_blend.py", BLEND_INSPECTOR);
+    const runner = await this.runners
+      .resolve("blender")
+      .catch(() => unavailable("Blender"));
+    await runFixed(
+      runner.executable,
+      [
+        "--background",
+        source.absolutePath,
+        "--disable-autoexec",
+        "--offline-mode",
+        "--python-exit-code",
+        "23",
+        "--python",
+        script,
+        "--",
+        output,
+      ],
+      this.stateDir,
+    );
+    if (!existsSync(output)) {
+      throw new Error("INSPECTOR_FAILED: Blender returned no inspection.");
+    }
+    const data = JSON.parse(readFileSync(output, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const after = readFileSync(source.absolutePath);
+    if (sha256(original) !== sha256(after)) {
+      throw new Error("INSPECTOR_SOURCE_MUTATED");
+    }
+    return boundedResult({
+      path: source.relativePath,
+      sha256: sha256(original),
+      size: original.length,
+      ...data,
+    });
+  }
+
+  async renderModelPreview(input: {
+    workspaceRoot: string;
+    path: string;
+    view?: "perspective" | "front" | "right" | "top";
+    width?: number;
+    height?: number;
+  }): Promise<{
+    path: string;
+    view: string;
+    width: number;
+    height: number;
+    sha256: string;
+    bytes: number;
+    data: string;
+  }> {
+    const source = resolveExistingWorkspacePath(
+      input.workspaceRoot,
+      input.path,
+      "file",
+    );
+    const extension = extname(source.relativePath).toLowerCase();
+    if (![".blend", ".glb"].includes(extension)) {
+      throw new Error("INSPECTOR_FORMAT_REJECTED: Expected BLEND or GLB.");
+    }
+    const width = previewDimension(input.width ?? 512);
+    const height = previewDimension(input.height ?? 512);
+    const view = input.view ?? "perspective";
+    const output = this.privateOutput("model-preview", ".png");
+    const script = this.writeScript("render_model.py", MODEL_RENDERER);
+    const runner = await this.runners
+      .resolve("blender")
+      .catch(() => unavailable("Blender"));
+    await runFixed(
+      runner.executable,
+      [
+        "--background",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--offline-mode",
+        "--python-exit-code",
+        "23",
+        "--python",
+        script,
+        "--",
+        source.absolutePath,
+        output,
+        view,
+        String(width),
+        String(height),
+      ],
+      this.stateDir,
+    );
+    const bytes = readFileSync(output);
+    if (
+      bytes.length < 8 ||
+      bytes.toString("hex", 0, 8) !== "89504e470d0a1a0a"
+    ) {
+      throw new Error("INSPECTOR_PREVIEW_FAILED");
+    }
+    return {
+      path: source.relativePath,
+      view,
+      width,
+      height,
+      sha256: sha256(bytes),
+      bytes: bytes.length,
+      data: bytes.toString("base64"),
+    };
+  }
+
+  private writeScript(name: string, content: string): string {
+    mkdirSync(this.scriptDir, { recursive: true, mode: 0o700 });
+    const path = join(this.scriptDir, name);
+    writeFileSync(path, content, { mode: 0o600 });
+    return path;
+  }
+
+  private privateOutput(prefix: string, extension: string): string {
+    mkdirSync(this.evidenceDir, { recursive: true, mode: 0o700 });
+    chmodSync(this.evidenceDir, 0o700);
+    return join(this.evidenceDir, `${prefix}_${randomUUID()}${extension}`);
+  }
+}
+
+async function decodeAudio(path: string): Promise<{
+  absolutePeak: number;
+  peakDbfs: number | null;
+  fullScaleSamples: number;
+  clippingRatio: number;
+  analyzedSamples: number;
+}> {
+  const ffmpeg = locateFfmpeg();
+  if (!ffmpeg) unavailable("ffmpeg");
+  return await new Promise((resolve, reject) => {
+    const child = spawn(
+      ffmpeg,
+      [
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        path,
+        "-map_metadata",
+        "-1",
+        "-f",
+        "f32le",
+        "-acodec",
+        "pcm_f32le",
+        "-",
+      ],
+      { shell: false, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let carry = Buffer.alloc(0);
+    let peak = 0;
+    let samples = 0;
+    let fullScale = 0;
+    let errorOutput = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      const data = Buffer.concat([carry, chunk]);
+      const length = data.length - (data.length % 4);
+      for (let offset = 0; offset < length; offset += 4) {
+        const value = Math.abs(data.readFloatLE(offset));
+        if (!Number.isFinite(value)) continue;
+        peak = Math.max(peak, value);
+        samples++;
+        if (value >= 1) fullScale++;
+      }
+      carry = data.subarray(length);
+    });
+    child.stderr.on("data", (chunk) => {
+      errorOutput = (errorOutput + chunk.toString()).slice(-16_384);
+    });
+    child.once("error", () => reject(unavailable("ffmpeg")));
+    child.once("exit", (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(
+            `INSPECTOR_DECODE_FAILED: ${errorOutput || `ffmpeg exit ${code}`}`,
+          ),
+        );
+        return;
+      }
+      resolve({
+        absolutePeak: peak,
+        peakDbfs: peak > 0 ? 20 * Math.log10(peak) : null,
+        fullScaleSamples: fullScale,
+        clippingRatio: samples ? fullScale / samples : 0,
+        analyzedSamples: samples,
+      });
+    });
+  });
+}
+
+function locateFfmpeg(): string | undefined {
+  const candidates = [
+    join(homedir(), ".local", "bin", "ffmpeg"),
+    "/opt/homebrew/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+    "/usr/bin/ffmpeg",
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function runFixed(
+  executable: string,
+  args: string[],
+  cwd: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("INSPECTOR_TIMEOUT"));
+    }, PROCESS_TIMEOUT_MS);
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.on("data", (chunk) => {
+        output = (output + chunk.toString()).slice(-64 * 1024);
+      });
+    }
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(new Error(`INSPECTOR_FAILED: ${error.message}`));
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`INSPECTOR_FAILED: ${output || `exit ${code}`}`));
+    });
+  });
+}
+
+function boundedResult(value: Record<string, unknown>): InspectorResult {
+  let truncated = false;
+  for (const [key, entry] of Object.entries(value)) {
+    if (Array.isArray(entry) && entry.length > MAX_ITEMS) {
+      value[key] = entry.slice(0, MAX_ITEMS);
+      truncated = true;
+    }
+  }
+  const result = { ...value, truncated } as InspectorResult;
+  if (Buffer.byteLength(JSON.stringify(result)) > MAX_OUTPUT_BYTES) {
+    throw new Error("INSPECTOR_OUTPUT_TOO_LARGE");
+  }
+  return result;
+}
+
+function arrayOfRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (entry): entry is Record<string, unknown> =>
+          Boolean(entry) && typeof entry === "object" && !Array.isArray(entry),
+      )
+    : [];
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function numericArray(value: unknown): number[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is number => typeof entry === "number")
+    : [];
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value.slice(0, 1024) : undefined;
+}
+
+function numberValue(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function integerOrNull(value: unknown): number | null {
+  return Number.isInteger(value) ? (value as number) : null;
+}
+
+function previewDimension(value: number): number {
+  if (!Number.isInteger(value) || value < 64 || value > MAX_PREVIEW_DIMENSION) {
+    throw new Error("INSPECTOR_PREVIEW_SIZE_INVALID");
+  }
+  return value;
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function unavailable(name: string): never {
+  throw new Error(`INSPECTOR_UNAVAILABLE: ${name} is unavailable.`);
+}
+
+const BLEND_INSPECTOR = String.raw`import bpy, json, math, os, sys
+from mathutils import Vector
+output = sys.argv[sys.argv.index("--") + 1]
+objects = []
+absolute_paths = []
+missing = []
+for obj in bpy.data.objects:
+    bound = [list(obj.matrix_world @ Vector(corner)) for corner in obj.bound_box] if obj.type == "MESH" else []
+    scale = list(obj.scale)
+    objects.append({"name": obj.name, "type": obj.type, "scale": scale, "bounds": bound[:8],
+        "warning": "extreme_scale" if min(abs(v) for v in scale) < 0.0001 or max(abs(v) for v in scale) > 10000 else
+        "non_uniform_scale" if min(abs(v) for v in scale) > 0 and max(abs(v) for v in scale) / min(abs(v) for v in scale) > 100 else None})
+for image in bpy.data.images:
+    path = bpy.path.abspath(image.filepath) if image.filepath else ""
+    if path and os.path.isabs(image.filepath): absolute_paths.append(image.filepath)
+    if path and not os.path.exists(path): missing.append(image.filepath)
+meshes = [{"name": m.name, "vertices": len(m.vertices), "polygons": len(m.polygons),
+    "triangles": sum(max(0, len(p.vertices)-2) for p in m.polygons)} for m in bpy.data.meshes]
+actions = [{"name": a.name, "durationFrames": a.frame_range[1]-a.frame_range[0],
+    "durationSeconds": (a.frame_range[1]-a.frame_range[0]) / max(1, bpy.context.scene.render.fps)} for a in bpy.data.actions]
+result = {"blenderVersion": bpy.app.version_string, "objectCount": len(bpy.data.objects),
+ "collectionCount": len(bpy.data.collections), "meshCount": len(bpy.data.meshes),
+ "materialCount": len(bpy.data.materials), "imageCount": len(bpy.data.images),
+ "armatureCount": len(bpy.data.armatures), "boneCount": sum(len(a.bones) for a in bpy.data.armatures),
+ "objects": objects[:500], "meshes": meshes[:500], "collections": [c.name for c in bpy.data.collections][:500],
+ "materials": [m.name for m in bpy.data.materials][:500], "images": [i.filepath for i in bpy.data.images][:500],
+ "absolutePaths": absolute_paths[:500], "missingTextures": missing[:500], "actions": actions[:500],
+ "truncated": any(len(x)>500 for x in [bpy.data.objects,bpy.data.meshes,bpy.data.collections,bpy.data.materials,bpy.data.images,bpy.data.actions])}
+with open(output, "w", encoding="utf8") as f: json.dump(result, f)
+`;
+
+const MODEL_RENDERER = String.raw`import bpy, math, os, sys
+from mathutils import Vector
+source, output, view, width, height = sys.argv[sys.argv.index("--")+1:sys.argv.index("--")+6]
+if source.lower().endswith(".glb"):
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=source)
+meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
+if not meshes: raise RuntimeError("No mesh objects")
+points = [o.matrix_world @ Vector(c) for o in meshes for c in o.bound_box]
+minimum = Vector((min(p.x for p in points), min(p.y for p in points), min(p.z for p in points)))
+maximum = Vector((max(p.x for p in points), max(p.y for p in points), max(p.z for p in points)))
+center = (minimum + maximum) / 2
+radius = max((maximum-minimum).length / 2, 0.01)
+bpy.ops.object.camera_add()
+camera = bpy.context.object
+directions = {"front": Vector((0,-1,0)), "right": Vector((1,0,0)), "top": Vector((0,0,1)), "perspective": Vector((1,-1,0.75)).normalized()}
+camera.location = center + directions[view] * radius * 3
+camera.rotation_euler = (center-camera.location).to_track_quat("-Z","Y").to_euler()
+camera.data.type = "ORTHO" if view != "perspective" else "PERSP"
+camera.data.ortho_scale = radius * 2.5
+bpy.context.scene.camera = camera
+for direction, energy in [((4,-4,6),1200),((-3,2,2),500)]:
+    bpy.ops.object.light_add(type="AREA", location=center+Vector(direction)*radius)
+    bpy.context.object.data.energy=energy; bpy.context.object.data.shape="DISK"; bpy.context.object.data.size=radius*2
+bpy.context.scene.world.color=(0.035,0.035,0.05)
+scene=bpy.context.scene
+scene.render.engine="BLENDER_EEVEE_NEXT"
+scene.render.resolution_x=int(width); scene.render.resolution_y=int(height); scene.render.resolution_percentage=100
+scene.render.image_settings.file_format="PNG"; scene.render.filepath=output; scene.render.film_transparent=False
+bpy.ops.render.render(write_still=True)
+`;
