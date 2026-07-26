@@ -131,6 +131,7 @@ export async function stageGitPaths(
 ): Promise<GitWorkspaceStatus> {
   const root = await assertWorkspaceGitRoot(workspaceRoot);
   const normalized = normalizeRequiredGitPaths(paths);
+  await assertNoExecutableGitFilters(root);
   await runGit(root, ["add", "-A", "--", ...normalized]);
   return inspectGitStatus(root);
 }
@@ -210,6 +211,7 @@ export async function manageGitBranch(input: {
           "GIT_DIRTY: Switching branches requires a clean workspace.",
         );
       }
+      await assertNoExecutableGitFilters(root);
       await runGit(root, ["show-ref", "--verify", `refs/heads/${input.name}`]);
       await runGit(root, ["switch", "--", input.name]);
     }
@@ -277,6 +279,7 @@ async function rawGitDiff(
   const args = [
     "diff",
     "--no-ext-diff",
+    "--no-textconv",
     "--binary",
     `--unified=${contextLines}`,
   ];
@@ -313,7 +316,13 @@ async function runGit(
   try {
     const result = await execFileAsync(
       "git",
-      ["-c", `core.hooksPath=${getEmptyHooksPath()}`, ...args],
+      [
+        "-c",
+        `core.hooksPath=${getEmptyHooksPath()}`,
+        "-c",
+        "core.fsmonitor=false",
+        ...args,
+      ],
       {
         cwd,
         encoding: "utf8",
@@ -334,6 +343,19 @@ async function runGit(
           ? error.message
           : String(error);
     throw new Error(`GIT_COMMAND_FAILED: ${detail || "Git command failed."}`);
+  }
+}
+
+async function assertNoExecutableGitFilters(root: string): Promise<void> {
+  const configured = await runGit(root, [
+    "config",
+    "--get-regexp",
+    "^filter\\..*\\.(clean|smudge|process)$",
+  ]).catch(() => undefined);
+  if (configured?.stdout.trim()) {
+    throw new Error(
+      "GIT_FILTER_REJECTED: Git content filters are not supported by safe write tools.",
+    );
   }
 }
 

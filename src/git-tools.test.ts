@@ -89,6 +89,36 @@ try {
   await git(["config", "--unset", "core.hooksPath"]);
   await rm(configuredHooks, { recursive: true });
 
+  const fsmonitorMarker = join(root, "fsmonitor-ran");
+  const fsmonitor = join(root, "fsmonitor");
+  await writeFile(
+    fsmonitor,
+    `#!/bin/sh\nprintf bad > '${fsmonitorMarker}'\nexit 1\n`,
+  );
+  await chmod(fsmonitor, 0o755);
+  await git(["config", "core.fsmonitor", fsmonitor]);
+  await inspectGitStatus(root);
+  await assert.rejects(readFile(fsmonitorMarker));
+  await git(["config", "--unset", "core.fsmonitor"]);
+  await rm(fsmonitor);
+
+  const filterMarker = join(root, "filter-ran");
+  const filter = join(root, "filter");
+  await writeFile(filter, `#!/bin/sh\nprintf bad > '${filterMarker}'\ncat\n`);
+  await chmod(filter, 0o755);
+  await writeFile(join(root, ".gitattributes"), "tracked.txt filter=unsafe\n");
+  await git(["config", "filter.unsafe.clean", filter]);
+  await writeFile(join(root, "tracked.txt"), "filter attempt\n");
+  await assert.rejects(
+    stageGitPaths(root, ["tracked.txt"]),
+    /GIT_FILTER_REJECTED/,
+  );
+  await assert.rejects(readFile(filterMarker));
+  await git(["config", "--unset", "filter.unsafe.clean"]);
+  await rm(filter);
+  await rm(join(root, ".gitattributes"));
+  await git(["restore", "tracked.txt"]);
+
   const branches = await manageGitBranch({
     workspaceRoot: root,
     action: "create",
