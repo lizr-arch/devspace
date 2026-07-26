@@ -4,23 +4,25 @@ import {
   applyHostFonts,
   applyHostStyleVariables,
 } from "@modelcontextprotocol/ext-apps";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  genericPayloadText,
   isEditTool,
   isExpandableCard,
+  isJobTool,
+  isProjectMemoryTool,
   isReadTool,
   isReviewTool,
   isSearchTool,
   isShellTool,
   isToolName,
-  isToolResultCard,
+  isWorkspaceTool,
   isWriteTool,
   payloadText,
   summaryNumber,
   type HostContext,
-  type ToolName,
   type ToolResultCard,
 } from "./card-types.js";
+import { normalizeToolResult } from "./normalize-tool-result.js";
 import "./workspace-app.css";
 
 interface ToolDisplay {
@@ -70,23 +72,7 @@ async function boot(): Promise<void> {
   );
 
   app.ontoolresult = (result) => {
-    const structuredContent = getStructuredContent<Partial<ToolResultCard>>(result);
-    const metaCard = cardFromMeta(result);
-    const structured = metaCard
-      ? { ...structuredContent, ...metaCard }
-      : structuredContent;
-    const tool = toolNameFromMeta(result);
-
-    if (!tool || !isToolResultCard(structured)) {
-      card = null;
-      expanded = false;
-      reviewFilesExpanded = false;
-      errorMessage = "No result card is available for this tool result.";
-      render();
-      return;
-    }
-
-    card = { ...structured, tool };
+    card = normalizeToolResult(result);
     expanded = false;
     reviewFilesExpanded = false;
     errorMessage = null;
@@ -225,7 +211,7 @@ async function renderPayloadIfNeeded(): Promise<void> {
     return;
   }
 
-  if (card.tool === "open_workspace") {
+  if (isWorkspaceTool(card.tool)) {
     renderPrePayload(target, workspacePayloadText(card), "open_workspace");
     return;
   }
@@ -285,7 +271,9 @@ async function renderPayloadIfNeeded(): Promise<void> {
     return;
   }
 
-  const text = payloadText(card.payload);
+  const text = isToolName(card.tool)
+    ? payloadText(card.payload)
+    : genericPayloadText(card);
   if (!text) {
     renderStatus(target, "No details available.");
     return;
@@ -350,7 +338,7 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
     return stats;
   }
 
-  if (card.tool === "open_workspace") {
+  if (isWorkspaceTool(card.tool)) {
     const agentsFiles = summaryNumber(summary, "agentsFiles") ?? 0;
     const skills = summaryNumber(summary, "skills") ?? 0;
     const group = element("span", { className: "badge-group" });
@@ -370,6 +358,27 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
 
   if (isShellTool(card.tool)) {
     return element("span", { className: "badge", text: `ran · ${String(summary.lines ?? 0)} lines` });
+  }
+
+  if (isJobTool(card.tool)) {
+    return element("span", {
+      className: `badge ${summary.status === "succeeded" ? "success" : ""}`,
+      text: String(summary.status ?? "job"),
+    });
+  }
+
+  if (isProjectMemoryTool(card.tool)) {
+    return element("span", {
+      className: `badge ${card.success === false ? "" : "success"}`,
+      text: card.success === false ? "failed" : "SHADOW",
+    });
+  }
+
+  if (!isToolName(card.tool)) {
+    return element("span", {
+      className: `badge ${card.success === false ? "" : "success"}`,
+      text: card.success === false ? "failed" : "succeeded",
+    });
   }
 
   if (isSearchTool(card.tool)) {
@@ -491,7 +500,15 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
 
   switch (card.tool) {
     case "open_workspace":
+    case "resume_workspace":
       return { icon: folderIcon(), title: "Workspace", label, tone: "workspace" };
+    case "project_memory_preflight":
+      return {
+        icon: projectMemoryIcon(),
+        title: "Project Memory",
+        label,
+        tone: "project-memory",
+      };
     case "read_file":
     case "read":
       return { icon: fileIcon(), title: "Read File", label, tone: "read" };
@@ -515,6 +532,18 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
       return { icon: terminalIcon(), title: "Bash", label, tone: "shell" };
     case "show_changes":
       return { icon: reviewIcon(), title: "Show Changes", label, tone: "review" };
+    case "start_job":
+    case "start_capture":
+    case "poll_job":
+    case "cancel_job":
+      return { icon: jobIcon(), title: "Job", label, tone: "job" };
+    default:
+      return {
+        icon: genericResultIcon(),
+        title: "Tool Result",
+        label,
+        tone: card.success === false ? "error" : "generic",
+      };
   }
 }
 
@@ -526,6 +555,15 @@ function getToolLabel(card: ToolResultCard): string {
     const count = Number(card.summary?.files ?? card.files?.length ?? 0);
     return count === 0 ? "No changes since last review" : `${count} changed ${count === 1 ? "file" : "files"}`;
   }
+  if (isJobTool(card.tool)) {
+    const jobId = card.summary?.jobId;
+    const status = card.summary?.status;
+    if (jobId && status) return `${String(jobId)} · ${String(status)}`;
+    if (jobId) return String(jobId);
+  }
+  if (isProjectMemoryTool(card.tool)) {
+    return card.workspaceId ?? card.tool;
+  }
   if (card.path) return card.path;
   if (card.root) return card.root;
   if (isSearchTool(card.tool)) {
@@ -533,22 +571,6 @@ function getToolLabel(card: ToolResultCard): string {
   }
 
   return card.tool;
-}
-
-function toolNameFromMeta(result: CallToolResult): ToolName | undefined {
-  const meta = result._meta as Record<string, unknown> | undefined;
-  const tool = meta?.tool;
-  return isToolName(tool) ? tool : undefined;
-}
-
-function cardFromMeta(result: CallToolResult): Partial<ToolResultCard> | undefined {
-  const meta = result._meta as Record<string, unknown> | undefined;
-  const metaCard = meta?.card;
-  return metaCard && typeof metaCard === "object" ? metaCard : undefined;
-}
-
-function getStructuredContent<T>(result: CallToolResult): T | undefined {
-  return result.structuredContent as T | undefined;
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -618,4 +640,22 @@ function terminalIcon(): string {
 
 function reviewIcon(): string {
   return iconSvg('<path d="M5 4h14v16H5z" /><path d="M8 8h8" /><path d="M8 12h5" /><path d="M8 16h7" />');
+}
+
+function projectMemoryIcon(): string {
+  return iconSvg(
+    '<path d="M7 5.5A3.5 3.5 0 0 1 10.5 2H12v20h-1.5A3.5 3.5 0 0 1 7 18.5V18a3.5 3.5 0 0 1 0-7v-.5a3.5 3.5 0 0 1 0-5Z" /><path d="M17 5.5A3.5 3.5 0 0 0 13.5 2H12v20h1.5a3.5 3.5 0 0 0 3.5-3.5V18a3.5 3.5 0 0 0 0-7v-.5a3.5 3.5 0 0 0 0-5Z" />',
+  );
+}
+
+function jobIcon(): string {
+  return iconSvg(
+    '<path d="M5 7h14v12H5z" /><path d="M9 7V4h6v3" /><path d="M9 12h6" /><path d="M9 16h4" />',
+  );
+}
+
+function genericResultIcon(): string {
+  return iconSvg(
+    '<path d="M5 4h14v16H5z" /><path d="M9 9h6" /><path d="M9 13h6" /><path d="M9 17h3" />',
+  );
 }

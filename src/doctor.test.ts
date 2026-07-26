@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createServer, resolveWorkspaceAppBuild } from "./server.js";
 import { loadConfig } from "./config.js";
 import { canonicalJson } from "./project-memory.js";
+import { isToolName } from "./ui/card-types.js";
 import {
   deriveChatGptWebInfo,
   probeLocalChatGptFlow,
@@ -366,6 +367,24 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.openWorkspace.ok, true);
     assert.equal(probe.listWorkspaces.ok, true);
     assert.equal(probe.resumeWorkspace.ok, true);
+    for (const tool of probe.widgetToolNames ?? []) {
+      assert.equal(
+        isToolName(tool),
+        true,
+        `${tool} declares a widget but is unsupported by Workspace App`,
+      );
+    }
+    assert.deepEqual(
+      [
+        "resume_workspace",
+        "project_memory_preflight",
+        "start_job",
+        "start_capture",
+        "poll_job",
+        "cancel_job",
+      ].filter((tool) => !probe.widgetToolNames?.includes(tool)),
+      [],
+    );
     assert.equal(probe.backgroundJob?.ok, true);
     assert.equal(probe.backgroundJobStatus, "succeeded");
     assert.match(probe.backgroundJobOutput ?? "", /typecheck/);

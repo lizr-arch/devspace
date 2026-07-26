@@ -68,6 +68,7 @@ export interface PublicExternalClientProbe {
   artifactList?: DoctorProbeCheck;
   artifactPublication?: DoctorProbeCheck;
   toolNames?: string[];
+  widgetToolNames?: string[];
   runnerNames?: string[];
   schemaFingerprint?: string;
   workspaceAppResourceUri?: string;
@@ -275,6 +276,7 @@ export async function probePublicExternalClientFlow(
   let artifactListCheck: DoctorProbeCheck | undefined;
   let artifactPublicationCheck: DoctorProbeCheck | undefined;
   let toolNames: string[] | undefined;
+  let widgetToolNames: string[] | undefined;
   let runnerNames: string[] | undefined;
   let schemaFingerprint: string | undefined;
   let workspaceAppResourceUri: string | undefined;
@@ -455,6 +457,17 @@ export async function probePublicExternalClientFlow(
         ? toolsListResult.tools
         : [];
       toolNames = tools
+        .map((tool) => stringField(asRecord(tool), "name"))
+        .filter((name): name is string => Boolean(name));
+      widgetToolNames = tools
+        .filter((tool) =>
+          Boolean(
+            stringField(
+              asRecord(asRecord(asRecord(tool)?._meta)?.ui),
+              "resourceUri",
+            ),
+          ),
+        )
         .map((tool) => stringField(asRecord(tool), "name"))
         .filter((name): name is string => Boolean(name));
       const hasOpenWorkspace = tools.some((tool) => {
@@ -1298,6 +1311,7 @@ export async function probePublicExternalClientFlow(
     artifactList: artifactListCheck,
     artifactPublication: artifactPublicationCheck,
     toolNames,
+    widgetToolNames,
     runnerNames,
     schemaFingerprint,
     workspaceAppResourceUri,
