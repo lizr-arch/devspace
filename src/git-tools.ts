@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, mkdtempSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { normalizeWorkspaceRelativePath } from "./workspace-paths.js";
 
 const MAX_DIFF_BYTES = 1024 * 1024;
@@ -1213,8 +1213,9 @@ async function mergeStateFilesPresent(root: string): Promise<string[]> {
     const path = (
       await runGit(root, ["rev-parse", "--git-path", name])
     ).stdout.trim();
+    const absolutePath = isAbsolute(path) ? path : resolve(root, path);
     if (
-      await access(path)
+      await access(absolutePath)
         .then(() => true)
         .catch(() => false)
     ) {
