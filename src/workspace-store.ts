@@ -13,6 +13,8 @@ export interface WorkspaceSession {
   baseRef?: string;
   baseSha?: string;
   managed: boolean;
+  detached: boolean;
+  branch?: string;
   createdAt: string;
   lastUsedAt: string;
 }
@@ -26,6 +28,8 @@ export interface WorkspaceStore {
     baseRef?: string;
     baseSha?: string;
     managed?: boolean;
+    detached?: boolean;
+    branch?: string;
   }): WorkspaceSession;
   getSession(id: string): WorkspaceSession | undefined;
   listSessions(limit?: number): WorkspaceSession[];
@@ -48,6 +52,8 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
     baseRef?: string;
     baseSha?: string;
     managed?: boolean;
+    detached?: boolean;
+    branch?: string;
   }): WorkspaceSession {
     const now = new Date().toISOString();
     const session: WorkspaceSession = {
@@ -59,6 +65,8 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       baseRef: input.baseRef,
       baseSha: input.baseSha,
       managed: input.managed ?? false,
+      detached: input.detached ?? true,
+      branch: input.branch,
       createdAt: now,
       lastUsedAt: now,
     };
@@ -74,6 +82,8 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
         baseRef: session.baseRef ?? null,
         baseSha: session.baseSha ?? null,
         managed: String(session.managed),
+        detached: String(session.detached),
+        branch: session.branch ?? null,
         createdAt: session.createdAt,
         lastUsedAt: session.lastUsedAt,
       })
@@ -129,6 +139,8 @@ function rowToWorkspaceSession(row: WorkspaceSessionRow): WorkspaceSession {
     baseRef: row.baseRef ?? undefined,
     baseSha: row.baseSha ?? undefined,
     managed: row.managed === "true",
+    detached: row.detached === "true",
+    branch: row.branch ?? undefined,
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
   };

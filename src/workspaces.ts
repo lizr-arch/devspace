@@ -40,6 +40,7 @@ export interface WorkspaceWorktree {
   dirtySource: boolean;
   detached: boolean;
   managed: boolean;
+  branch?: string;
 }
 
 export interface Workspace {
@@ -221,8 +222,9 @@ export class WorkspaceRegistry {
               baseRef: session.baseRef ?? "HEAD",
               baseSha: session.baseSha ?? "",
               dirtySource: false,
-              detached: true,
+              detached: session.detached,
               managed: session.managed,
+              branch: session.branch,
             }
           : undefined,
       ...this.loadSkillsForWorkspace(root),
@@ -383,6 +385,8 @@ export class WorkspaceRegistry {
       baseRef: workspace.worktree?.baseRef,
       baseSha: workspace.worktree?.baseSha,
       managed: workspace.worktree?.managed,
+      detached: workspace.worktree?.detached,
+      branch: workspace.worktree?.branch,
     });
     this.workspaces.set(workspace.id, workspace);
     const agentsFiles = this.loadInitialAgentsFiles(workspace.root);

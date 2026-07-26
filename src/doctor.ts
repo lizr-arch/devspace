@@ -68,6 +68,9 @@ export interface PublicExternalClientProbe {
   artifactList?: DoctorProbeCheck;
   artifactPublication?: DoctorProbeCheck;
   toolNames?: string[];
+  safeGitToolDefinitions?: Record<string, Record<string, unknown>>;
+  safeGitStructuredErrorCode?: string;
+  safeGitUnknownFieldRejected?: boolean;
   runnerNames?: string[];
   schemaFingerprint?: string;
   workspaceAppResourceUri?: string;
@@ -191,6 +194,7 @@ export async function probePublicExternalClientFlow(
     resumeWorkspaceRoot?: string;
     task?: string;
     verifyProjectMemoryShadowTools?: boolean;
+    verifySafeGitTools?: boolean;
     backgroundJob?: {
       runner: JobRunner;
       args: string[];
@@ -275,6 +279,10 @@ export async function probePublicExternalClientFlow(
   let artifactListCheck: DoctorProbeCheck | undefined;
   let artifactPublicationCheck: DoctorProbeCheck | undefined;
   let toolNames: string[] | undefined;
+  let safeGitToolDefinitions:
+    Record<string, Record<string, unknown>> | undefined;
+  let safeGitStructuredErrorCode: string | undefined;
+  let safeGitUnknownFieldRejected: boolean | undefined;
   let runnerNames: string[] | undefined;
   let schemaFingerprint: string | undefined;
   let workspaceAppResourceUri: string | undefined;
@@ -457,6 +465,18 @@ export async function probePublicExternalClientFlow(
       toolNames = tools
         .map((tool) => stringField(asRecord(tool), "name"))
         .filter((name): name is string => Boolean(name));
+      safeGitToolDefinitions = Object.fromEntries(
+        tools
+          .map((tool) => asRecord(tool))
+          .filter(
+            (tool): tool is Record<string, unknown> =>
+              tool !== undefined &&
+              ["git_fetch", "git_merge", "git_push"].includes(
+                stringField(tool, "name") ?? "",
+              ),
+          )
+          .map((tool) => [String(tool.name), tool]),
+      );
       const hasOpenWorkspace = tools.some((tool) => {
         const record = asRecord(tool);
         return record?.name === "open_workspace";
@@ -814,6 +834,60 @@ export async function probePublicExternalClientFlow(
                   openWorkspace,
                   "MCP open_workspace did not succeed.",
                 );
+
+        if (
+          input.verifySafeGitTools &&
+          workspaceId &&
+          toolNames.includes("git_fetch")
+        ) {
+          const structuredFailure = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 31,
+              method: "tools/call",
+              params: {
+                name: "git_fetch",
+                arguments: { workspaceId, remote: "origin" },
+              },
+            },
+            sessionId,
+          );
+          const structuredFailureResult = asRecord(
+            asRecord(parseMcpResponseJson(structuredFailure.text))?.result,
+          );
+          const structuredFailureContent = asRecord(
+            structuredFailureResult?.structuredContent,
+          );
+          safeGitStructuredErrorCode = stringField(
+            asRecord(structuredFailureContent?.error),
+            "code",
+          );
+
+          const unknownField = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 32,
+              method: "tools/call",
+              params: {
+                name: "git_fetch",
+                arguments: {
+                  workspaceId,
+                  remote: "origin",
+                  force: true,
+                },
+              },
+            },
+            sessionId,
+          );
+          const unknownJson = asRecord(parseMcpResponseJson(unknownField.text));
+          safeGitUnknownFieldRejected =
+            Boolean(asRecord(unknownJson?.error)) ||
+            asRecord(unknownJson?.result)?.isError === true;
+        }
 
         if (workspaceId && toolNames.includes("list_workspaces")) {
           const listWorkspaces = await postMcpJsonRpc(
@@ -1298,6 +1372,9 @@ export async function probePublicExternalClientFlow(
     artifactList: artifactListCheck,
     artifactPublication: artifactPublicationCheck,
     toolNames,
+    safeGitToolDefinitions,
+    safeGitStructuredErrorCode,
+    safeGitUnknownFieldRejected,
     runnerNames,
     schemaFingerprint,
     workspaceAppResourceUri,

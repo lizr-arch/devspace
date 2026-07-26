@@ -72,6 +72,8 @@ function migrateWorkspaceState(sqlite: Database.Database): void {
       base_ref text,
       base_sha text,
       managed text not null default 'false',
+      detached text not null default 'true',
+      branch text,
       created_at text not null,
       last_used_at text not null
     );
@@ -114,6 +116,13 @@ function migrateWorkspaceState(sqlite: Database.Database): void {
     "managed",
     "text not null default 'false'",
   );
+  addColumnIfMissing(
+    sqlite,
+    "workspace_sessions",
+    "detached",
+    "text not null default 'true'",
+  );
+  addColumnIfMissing(sqlite, "workspace_sessions", "branch", "text");
 }
 
 function migrateOAuthState(sqlite: Database.Database): void {

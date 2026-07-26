@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { chmodSync, mkdtempSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { access, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -10,7 +10,11 @@ import { normalizeWorkspaceRelativePath } from "./workspace-paths.js";
 const execFileAsync = promisify(execFile);
 const MAX_DIFF_BYTES = 1024 * 1024;
 const MAX_GIT_PATHS = 100;
+const LOCAL_GIT_TIMEOUT_MS = 30_000;
+const REMOTE_GIT_TIMEOUT_MS = 60_000;
+const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
 let emptyHooksPath: string | undefined;
+const gitMutationTails = new Map<string, Promise<void>>();
 
 export interface GitWorkspaceStatus {
   headSha: string;
@@ -29,6 +33,46 @@ export interface GitDiffResult {
   sha256: string;
   bytes: number;
   truncated: boolean;
+}
+
+export interface GitFetchResult {
+  remote: string;
+  prune: boolean;
+  headSha: string;
+  branch?: string;
+  refsBefore: Record<string, string>;
+  refsAfter: Record<string, string>;
+  updatedRefs: Array<{ ref: string; before: string; after: string }>;
+  createdRefs: Array<{ ref: string; after: string }>;
+  deletedRefs: Array<{ ref: string; before: string }>;
+}
+
+export interface GitMergeResult {
+  branch: string;
+  headBefore: string;
+  sourceRef: string;
+  sourceSha: string;
+  mergeBase: string;
+  mode: "ff_only" | "no_ff";
+  fastForwardPossible: boolean;
+  headAfter: string;
+  createdMergeCommit: boolean;
+  mergeCommitSha?: string;
+  parents: string[];
+  changedFiles: string[];
+  statusAfter: GitWorkspaceStatus;
+}
+
+export interface GitPushResult {
+  remote: string;
+  destinationBranch: string;
+  remoteShaBefore: string;
+  localSha: string;
+  pushAttempted: boolean;
+  pushSucceeded: boolean;
+  remoteShaAfter: string;
+  remoteContainsLocal: boolean;
+  statusAfter: GitWorkspaceStatus;
 }
 
 export async function inspectGitStatus(
@@ -239,6 +283,362 @@ export async function manageGitBranch(input: {
   };
 }
 
+export async function fetchGit(input: {
+  workspaceRoot: string;
+  approvedRemotes: string[];
+  approvedRemoteUrls?: Record<string, string[]>;
+  remote?: string;
+  prune?: boolean;
+  expectedHeadSha?: string;
+  timeoutMs?: number;
+}): Promise<GitFetchResult> {
+  const root = await assertWorkspaceGitRoot(input.workspaceRoot);
+  const lockKey = await gitMutationLockKey(root);
+  return withGitMutationLock(lockKey, () => fetchGitLocked(root, input));
+}
+
+export async function mergeGit(input: {
+  workspaceRoot: string;
+  sourceRef: string;
+  mode: "ff_only" | "no_ff";
+  expectedHeadSha: string;
+  commitMessage?: string;
+  expectedSourceSha?: string;
+  timeoutMs?: number;
+}): Promise<GitMergeResult> {
+  const root = await assertWorkspaceGitRoot(input.workspaceRoot);
+  const lockKey = await gitMutationLockKey(root);
+  return withGitMutationLock(lockKey, async () => {
+    const statusBefore = await inspectGitStatus(root);
+    assertCleanAttachedWorkspace(statusBefore);
+    const staleMergeState = await mergeStateFilesPresent(root);
+    if (staleMergeState.length > 0) {
+      throw new Error(
+        `GIT_REPOSITORY_STATE_INVALID: Stale merge state exists: ${staleMergeState.join(", ")}.`,
+      );
+    }
+    const expectedHeadSha = normalizeExpectedCommitSha(
+      input.expectedHeadSha,
+      "expectedHeadSha",
+    );
+    if (statusBefore.headSha !== expectedHeadSha) {
+      throw new Error(
+        `GIT_EXPECTED_HEAD_MISMATCH: Expected ${expectedHeadSha}, found ${statusBefore.headSha}.`,
+      );
+    }
+    const sourceRef = await normalizeSourceRef(root, input.sourceRef);
+    const sourceSha = await resolveCommit(root, sourceRef);
+    if (input.expectedSourceSha !== undefined) {
+      const expectedSourceSha = normalizeExpectedCommitSha(
+        input.expectedSourceSha,
+        "expectedSourceSha",
+      );
+      if (sourceSha !== expectedSourceSha) {
+        throw new Error(
+          `GIT_SOURCE_SHA_MISMATCH: Expected ${expectedSourceSha}, found ${sourceSha}.`,
+        );
+      }
+    }
+    if (input.mode === "no_ff") {
+      if (
+        !input.commitMessage ||
+        input.commitMessage.trim().length === 0 ||
+        input.commitMessage.length > 10_000 ||
+        input.commitMessage.includes("\0")
+      ) {
+        throw new Error(
+          "GIT_INPUT_INVALID: no_ff requires a non-empty commitMessage.",
+        );
+      }
+    }
+    await assertNoExecutableGitFilters(root);
+    await assertNoExecutableMergeDrivers(root);
+    const mergeBase = (
+      await runGit(root, ["merge-base", statusBefore.headSha, sourceSha])
+    ).stdout.trim();
+    const fastForwardPossible = await isAncestor(
+      root,
+      statusBefore.headSha,
+      sourceSha,
+    );
+    if (input.mode === "ff_only" && !fastForwardPossible) {
+      throw new Error(
+        "GIT_FF_NOT_POSSIBLE: Source cannot fast-forward the current HEAD.",
+      );
+    }
+
+    const args =
+      input.mode === "ff_only"
+        ? ["merge", "--ff-only", "--no-verify", sourceSha]
+        : [
+            "merge",
+            "--no-ff",
+            "--no-verify",
+            "--no-gpg-sign",
+            sourceSha,
+            "-m",
+            input.commitMessage!,
+          ];
+    try {
+      await runGit(
+        root,
+        args,
+        MAX_GIT_OUTPUT_BYTES,
+        input.timeoutMs ?? LOCAL_GIT_TIMEOUT_MS,
+      );
+    } catch (error) {
+      const conflictStatus = await inspectGitStatus(root).catch(
+        () => undefined,
+      );
+      const mergeHead = await readOptionalGitRef(root, "MERGE_HEAD");
+      const conflictedPaths = conflictStatus?.conflicts ?? [];
+      if (mergeHead || conflictedPaths.length > 0) {
+        let abortError: unknown;
+        try {
+          await runGit(root, ["merge", "--abort"]);
+        } catch (candidate) {
+          abortError = candidate;
+        }
+        const recoveredStatus = await inspectGitStatus(root).catch(
+          () => undefined,
+        );
+        const stillMerging = Boolean(
+          await readOptionalGitRef(root, "MERGE_HEAD"),
+        );
+        const remainingMergeState = await mergeStateFilesPresent(root);
+        const recovered =
+          !abortError &&
+          !stillMerging &&
+          remainingMergeState.length === 0 &&
+          recoveredStatus?.headSha === statusBefore.headSha &&
+          recoveredStatus.clean;
+        if (!recovered) {
+          throw new Error(
+            `GIT_MERGE_ABORT_FAILED: Merge conflict in ${conflictedPaths.join(", ") || "(unknown paths)"}; automatic abort did not restore the clean pre-merge state. Repository state: ${stillMerging || remainingMergeState.length > 0 ? "MERGING" : "UNKNOWN"}.`,
+          );
+        }
+        throw new Error(
+          `GIT_MERGE_CONFLICT: Conflicted paths: ${conflictedPaths.join(", ") || "(unknown)"}. Merge HEAD: ${mergeHead ?? "(unknown)"}. Target HEAD ${statusBefore.headSha} and clean index/worktree were restored by git merge --abort.`,
+        );
+      }
+      throw error;
+    }
+
+    const statusAfter = await inspectGitStatus(root);
+    if (!statusAfter.clean) {
+      throw new Error(
+        "GIT_MERGE_VERIFY_FAILED: Merge completed but the workspace is not clean.",
+      );
+    }
+    const parents = (
+      await runGit(root, [
+        "show",
+        "-s",
+        "--format=%P",
+        `${statusAfter.headSha}^{commit}`,
+      ])
+    ).stdout
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    const changedFiles = (
+      await runGit(root, [
+        "diff",
+        "--name-only",
+        "-z",
+        statusBefore.headSha,
+        statusAfter.headSha,
+        "--",
+      ])
+    ).stdout
+      .split("\0")
+      .filter(Boolean)
+      .sort();
+    const createdMergeCommit = parents.length > 1;
+    return {
+      branch: statusBefore.branch!,
+      headBefore: statusBefore.headSha,
+      sourceRef,
+      sourceSha,
+      mergeBase,
+      mode: input.mode,
+      fastForwardPossible,
+      headAfter: statusAfter.headSha,
+      createdMergeCommit,
+      mergeCommitSha: createdMergeCommit ? statusAfter.headSha : undefined,
+      parents,
+      changedFiles,
+      statusAfter,
+    };
+  });
+}
+
+export async function pushGit(input: {
+  workspaceRoot: string;
+  approvedRemotes: string[];
+  approvedRemoteUrls?: Record<string, string[]>;
+  approvedDestinationBranches: string[];
+  remote?: string;
+  sourceRef?: string;
+  destinationBranch: string;
+  expectedLocalSha: string;
+  expectedRemoteSha: string;
+  verifyAncestor?: boolean;
+  timeoutMs?: number;
+}): Promise<GitPushResult> {
+  const root = await assertWorkspaceGitRoot(input.workspaceRoot);
+  const lockKey = await gitMutationLockKey(root);
+  return withGitMutationLock(lockKey, async () => {
+    const statusBefore = await inspectGitStatus(root);
+    assertCleanAttachedWorkspace(statusBefore);
+    const remote = await assertApprovedRemote(
+      root,
+      input.remote ?? "origin",
+      input.approvedRemotes,
+      input.approvedRemoteUrls,
+      true,
+    );
+    const destinationBranch = await normalizeDestinationBranch(
+      root,
+      input.destinationBranch,
+    );
+    if (!input.approvedDestinationBranches.includes(destinationBranch)) {
+      throw new Error(
+        `GIT_DESTINATION_BRANCH_NOT_APPROVED: Destination branch ${destinationBranch} is not approved.`,
+      );
+    }
+    const sourceRef = await normalizeSourceRef(root, input.sourceRef ?? "HEAD");
+    const localSha = await resolveCommit(root, sourceRef);
+    if (localSha !== statusBefore.headSha) {
+      throw new Error(
+        "GIT_SOURCE_NOT_HEAD: Push source must resolve to the current workspace HEAD.",
+      );
+    }
+    const expectedLocalSha = normalizeExpectedCommitSha(
+      input.expectedLocalSha,
+      "expectedLocalSha",
+    );
+    if (localSha !== expectedLocalSha) {
+      throw new Error(
+        `GIT_EXPECTED_LOCAL_SHA_MISMATCH: Expected ${expectedLocalSha}, found ${localSha}.`,
+      );
+    }
+    const expectedRemoteSha = normalizeExpectedCommitSha(
+      input.expectedRemoteSha,
+      "expectedRemoteSha",
+    );
+
+    await fetchGitLocked(root, {
+      ...input,
+      remote,
+      prune: true,
+    });
+    const statusAfterFetch = await inspectGitStatus(root);
+    if (
+      statusAfterFetch.headSha !== statusBefore.headSha ||
+      !statusAfterFetch.clean
+    ) {
+      throw new Error(
+        "GIT_LOCAL_CHANGED: Workspace changed while verifying the remote.",
+      );
+    }
+    const sourceShaAfterFetch = await resolveCommit(root, sourceRef);
+    if (sourceShaAfterFetch !== localSha) {
+      throw new Error(
+        "GIT_LOCAL_CHANGED: Source ref changed while verifying the remote.",
+      );
+    }
+    const remoteTrackingRef = `refs/remotes/${remote}/${destinationBranch}`;
+    const remoteShaBefore = await resolveExactCommit(root, remoteTrackingRef);
+    if (remoteShaBefore !== expectedRemoteSha) {
+      throw new Error(
+        `GIT_REMOTE_CHANGED: Expected ${expectedRemoteSha}, found ${remoteShaBefore}.`,
+      );
+    }
+    if (input.verifyAncestor === false) {
+      throw new Error(
+        "GIT_INPUT_INVALID: verifyAncestor cannot be disabled by the caller.",
+      );
+    }
+    if (!(await isAncestor(root, expectedRemoteSha, localSha))) {
+      throw new Error(
+        "GIT_PUSH_NON_FAST_FORWARD: Remote destination is not an ancestor of the local commit.",
+      );
+    }
+
+    try {
+      await runGit(
+        root,
+        [
+          "-c",
+          `remote.${remote}.mirror=false`,
+          "push",
+          "--porcelain",
+          "--no-verify",
+          `--force-with-lease=refs/heads/${destinationBranch}:${expectedRemoteSha}`,
+          "--",
+          remote,
+          `${localSha}:refs/heads/${destinationBranch}`,
+        ],
+        MAX_GIT_OUTPUT_BYTES,
+        input.timeoutMs ?? REMOTE_GIT_TIMEOUT_MS,
+      );
+    } catch (error) {
+      const remoteAfterFailure = await refreshRemoteDestination(
+        root,
+        remote,
+        destinationBranch,
+        input.timeoutMs,
+        input.approvedRemoteUrls,
+      ).catch(() => undefined);
+      if (remoteAfterFailure && remoteAfterFailure !== expectedRemoteSha) {
+        throw new Error(
+          `GIT_REMOTE_CHANGED: Remote moved from ${expectedRemoteSha} to ${remoteAfterFailure} before the push could complete.`,
+        );
+      }
+      if (error instanceof GitExecutionError && error.timedOut) {
+        throw new Error("GIT_TIMEOUT: Timed out while pushing the Git remote.");
+      }
+      throw new Error("GIT_PUSH_REJECTED: The remote rejected the push.");
+    }
+
+    const remoteShaAfter = await refreshRemoteDestination(
+      root,
+      remote,
+      destinationBranch,
+      input.timeoutMs,
+      input.approvedRemoteUrls,
+    );
+    const remoteContainsLocal = await isAncestor(
+      root,
+      localSha,
+      remoteShaAfter,
+    );
+    if (!remoteContainsLocal) {
+      throw new Error(
+        "GIT_PUSH_VERIFY_FAILED: Remote verification does not contain the pushed local commit.",
+      );
+    }
+    const statusAfter = await inspectGitStatus(root);
+    if (statusAfter.headSha !== statusBefore.headSha || !statusAfter.clean) {
+      throw new Error(
+        "GIT_PUSH_VERIFY_FAILED: Local workspace changed during push.",
+      );
+    }
+    return {
+      remote,
+      destinationBranch,
+      remoteShaBefore,
+      localSha,
+      pushAttempted: true,
+      pushSucceeded: true,
+      remoteShaAfter,
+      remoteContainsLocal,
+      statusAfter,
+    };
+  });
+}
+
 export async function assertWorkspaceGitRoot(
   workspaceRoot: string,
 ): Promise<string> {
@@ -312,8 +712,10 @@ async function runGit(
   cwd: string,
   args: string[],
   maxBuffer = 16 * 1024 * 1024,
+  timeoutMs = LOCAL_GIT_TIMEOUT_MS,
 ): Promise<{ stdout: string; stderr: string }> {
   try {
+    const env = safeGitEnvironment();
     const result = await execFileAsync(
       "git",
       [
@@ -321,28 +723,53 @@ async function runGit(
         `core.hooksPath=${getEmptyHooksPath()}`,
         "-c",
         "core.fsmonitor=false",
+        "-c",
+        "commit.gpgSign=false",
+        "-c",
+        "tag.gpgSign=false",
+        "-c",
+        "merge.autoStash=false",
+        "-c",
+        "push.followTags=false",
+        "-c",
+        "rerere.enabled=false",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "protocol.ext.allow=never",
         ...args,
       ],
       {
         cwd,
         encoding: "utf8",
         maxBuffer,
-        env: {
-          ...process.env,
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_TERMINAL_PROMPT: "0",
-        },
+        timeout: timeoutMs,
+        killSignal: "SIGKILL",
+        env,
       },
     );
     return { stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
-    const detail =
-      error instanceof Error && "stderr" in error
-        ? String((error as Error & { stderr?: string }).stderr).trim()
-        : error instanceof Error
-          ? error.message
-          : String(error);
-    throw new Error(`GIT_COMMAND_FAILED: ${detail || "Git command failed."}`);
+    const failure = error as Error & {
+      stderr?: string;
+      stdout?: string;
+      code?: number | string;
+      killed?: boolean;
+      signal?: string;
+    };
+    const timedOut = Boolean(failure.killed && failure.signal === "SIGKILL");
+    const detail = sanitizeGitOutput(
+      String(failure.stderr || failure.stdout || failure.message || ""),
+    );
+    throw new GitExecutionError({
+      message: timedOut
+        ? "GIT_TIMEOUT: Git command timed out."
+        : `GIT_COMMAND_FAILED: ${detail || "Git command failed."}`,
+      stdout: sanitizeGitOutput(String(failure.stdout ?? "")),
+      stderr: sanitizeGitOutput(String(failure.stderr ?? "")),
+      exitCode: typeof failure.code === "number" ? failure.code : undefined,
+      timedOut,
+    });
   }
 }
 
@@ -356,6 +783,498 @@ async function assertNoExecutableGitFilters(root: string): Promise<void> {
     throw new Error(
       "GIT_FILTER_REJECTED: Git content filters are not supported by safe write tools.",
     );
+  }
+}
+
+async function assertNoExecutableMergeDrivers(root: string): Promise<void> {
+  const configured = await runGit(root, [
+    "config",
+    "--get-regexp",
+    "^merge\\..*\\.driver$",
+  ]).catch(() => undefined);
+  if (configured?.stdout.trim()) {
+    throw new Error(
+      "GIT_MERGE_DRIVER_REJECTED: Custom Git merge drivers are not supported.",
+    );
+  }
+}
+
+async function fetchGitLocked(
+  root: string,
+  input: {
+    approvedRemotes: string[];
+    approvedRemoteUrls?: Record<string, string[]>;
+    remote?: string;
+    prune?: boolean;
+    expectedHeadSha?: string;
+    timeoutMs?: number;
+  },
+): Promise<GitFetchResult> {
+  const statusBefore = await inspectGitStatus(root);
+  if (input.expectedHeadSha !== undefined) {
+    const expectedHeadSha = normalizeExpectedCommitSha(
+      input.expectedHeadSha,
+      "expectedHeadSha",
+    );
+    if (statusBefore.headSha !== expectedHeadSha) {
+      throw new Error(
+        `GIT_EXPECTED_HEAD_MISMATCH: Expected ${expectedHeadSha}, found ${statusBefore.headSha}.`,
+      );
+    }
+  }
+  const remote = await assertApprovedRemote(
+    root,
+    input.remote ?? "origin",
+    input.approvedRemotes,
+    input.approvedRemoteUrls,
+    false,
+  );
+  const prune = input.prune ?? true;
+  const refsBefore = await listRemoteTrackingRefs(root, remote);
+  try {
+    await runGit(
+      root,
+      [
+        "fetch",
+        prune ? "--prune" : "--no-prune",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--",
+        remote,
+        `+refs/heads/*:refs/remotes/${remote}/*`,
+      ],
+      MAX_GIT_OUTPUT_BYTES,
+      input.timeoutMs ?? REMOTE_GIT_TIMEOUT_MS,
+    );
+  } catch (error) {
+    if (error instanceof GitExecutionError && error.timedOut) {
+      throw new Error("GIT_TIMEOUT: Timed out while fetching the Git remote.");
+    }
+    throw error;
+  }
+  const refsAfter = await listRemoteTrackingRefs(root, remote);
+  const statusAfter = await inspectGitStatus(root);
+  if (
+    statusAfter.headSha !== statusBefore.headSha ||
+    statusAfter.branch !== statusBefore.branch ||
+    statusAfter.clean !== statusBefore.clean ||
+    statusAfter.stagedDiffSha256 !== statusBefore.stagedDiffSha256 ||
+    JSON.stringify(statusAfter.staged) !==
+      JSON.stringify(statusBefore.staged) ||
+    JSON.stringify(statusAfter.unstaged) !==
+      JSON.stringify(statusBefore.unstaged) ||
+    JSON.stringify(statusAfter.untracked) !==
+      JSON.stringify(statusBefore.untracked) ||
+    JSON.stringify(statusAfter.conflicts) !==
+      JSON.stringify(statusBefore.conflicts)
+  ) {
+    throw new Error(
+      "GIT_FETCH_WORKSPACE_CHANGED: Fetch changed the current branch, index, or worktree.",
+    );
+  }
+  const updatedRefs: GitFetchResult["updatedRefs"] = [];
+  const createdRefs: GitFetchResult["createdRefs"] = [];
+  const deletedRefs: GitFetchResult["deletedRefs"] = [];
+  for (const [ref, after] of Object.entries(refsAfter)) {
+    const before = refsBefore[ref];
+    if (before === undefined) createdRefs.push({ ref, after });
+    else if (before !== after) updatedRefs.push({ ref, before, after });
+  }
+  for (const [ref, before] of Object.entries(refsBefore)) {
+    if (refsAfter[ref] === undefined) deletedRefs.push({ ref, before });
+  }
+  return {
+    remote,
+    prune,
+    headSha: statusAfter.headSha,
+    branch: statusAfter.branch,
+    refsBefore,
+    refsAfter,
+    updatedRefs,
+    createdRefs,
+    deletedRefs,
+  };
+}
+
+async function refreshRemoteDestination(
+  root: string,
+  remote: string,
+  destinationBranch: string,
+  timeoutMs?: number,
+  approvedRemoteUrls?: Record<string, string[]>,
+): Promise<string> {
+  await fetchGitLocked(root, {
+    approvedRemotes: [remote],
+    approvedRemoteUrls,
+    remote,
+    prune: true,
+    timeoutMs,
+  });
+  return resolveExactCommit(
+    root,
+    `refs/remotes/${remote}/${destinationBranch}`,
+  );
+}
+
+async function assertApprovedRemote(
+  root: string,
+  value: string,
+  approvedRemotes: string[],
+  approvedRemoteUrls: Record<string, string[]> | undefined,
+  forPush: boolean,
+): Promise<string> {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(value) ||
+    value.includes("\0")
+  ) {
+    throw new Error("GIT_REMOTE_INVALID: Remote name is invalid.");
+  }
+  if (!approvedRemotes.includes(value)) {
+    throw new Error(
+      `GIT_REMOTE_NOT_APPROVED: Remote ${value} is not approved.`,
+    );
+  }
+  const remotes = (await runGit(root, ["remote"])).stdout
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (!remotes.includes(value)) {
+    throw new Error(`GIT_REMOTE_NOT_FOUND: Remote ${value} does not exist.`);
+  }
+  await assertSafeLocalRemoteConfig(root, value);
+  const urls = (
+    await runGit(root, [
+      "remote",
+      "get-url",
+      "--all",
+      ...(forPush ? ["--push"] : []),
+      "--",
+      value,
+    ])
+  ).stdout
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (urls.length === 0 || urls.some((url) => !isSafeRemoteUrl(url))) {
+    throw new Error(
+      "GIT_REMOTE_UNSAFE: Remote uses an unsupported or unsafe URL transport.",
+    );
+  }
+  const expectedUrls = approvedRemoteUrls?.[value];
+  if (expectedUrls && urls.some((url) => !expectedUrls.includes(url))) {
+    throw new Error(
+      "GIT_REMOTE_URL_MISMATCH: Configured remote URL does not match the operator-approved binding.",
+    );
+  }
+  return value;
+}
+
+async function assertSafeLocalRemoteConfig(
+  root: string,
+  remote: string,
+): Promise<void> {
+  const unsafe = await runGit(root, [
+    "config",
+    "--local",
+    "--get-regexp",
+    `^(core\\.(sshCommand|gitProxy)|credential\\..*|credential\\.helper|include(If)?\\..*|url\\..*\\.insteadOf|remote\\.${escapeRegex(remote)}\\.(uploadpack|receivepack))$`,
+  ]).catch(() => undefined);
+  if (unsafe?.stdout.trim()) {
+    throw new Error(
+      "GIT_REMOTE_CONFIG_REJECTED: Repository-local executable or URL rewrite Git configuration is not supported.",
+    );
+  }
+}
+
+function isSafeRemoteUrl(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.length > 4096 ||
+    /[\0\r\n]/.test(value) ||
+    value.startsWith("-") ||
+    value.startsWith("ext::")
+  ) {
+    return false;
+  }
+  if (/^https:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      return (
+        !parsed.username && !parsed.password && !parsed.search && !parsed.hash
+      );
+    } catch {
+      return false;
+    }
+  }
+  if (/^file:\/\//i.test(value)) return true;
+  if (value.startsWith("/")) return true;
+  return false;
+}
+
+async function normalizeSourceRef(
+  root: string,
+  value: string,
+): Promise<string> {
+  if (value === "HEAD") return value;
+  if (/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(value)) return value;
+  if (!isSafeRefText(value)) {
+    throw new Error("GIT_SOURCE_REF_INVALID: Source ref is invalid.");
+  }
+  try {
+    await runGit(root, ["check-ref-format", "--branch", value]);
+  } catch {
+    throw new Error("GIT_SOURCE_REF_INVALID: Source ref is invalid.");
+  }
+  return value;
+}
+
+async function normalizeDestinationBranch(
+  root: string,
+  value: string,
+): Promise<string> {
+  if (!isSafeRefText(value)) {
+    throw new Error(
+      "GIT_DESTINATION_BRANCH_INVALID: Destination branch is invalid.",
+    );
+  }
+  try {
+    await runGit(root, ["check-ref-format", "--branch", value]);
+  } catch {
+    throw new Error(
+      "GIT_DESTINATION_BRANCH_INVALID: Destination branch is invalid.",
+    );
+  }
+  return value;
+}
+
+function isSafeRefText(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 255 &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) &&
+    !value.includes("..") &&
+    !value.includes("@{") &&
+    !value.endsWith(".") &&
+    !value.endsWith("/") &&
+    !value.endsWith(".lock") &&
+    !value.split("/").some((part) => part.length === 0 || part.startsWith("."))
+  );
+}
+
+function normalizeExpectedCommitSha(value: string, name: string): string {
+  if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(value)) {
+    throw new Error(`GIT_INPUT_INVALID: ${name} must be a full commit SHA.`);
+  }
+  return value;
+}
+
+async function resolveCommit(root: string, ref: string): Promise<string> {
+  try {
+    return (
+      await runGit(root, [
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${ref}^{commit}`,
+      ])
+    ).stdout.trim();
+  } catch {
+    throw new Error(
+      "GIT_SOURCE_REF_INVALID: Source ref does not resolve to a commit.",
+    );
+  }
+}
+
+async function resolveExactCommit(root: string, ref: string): Promise<string> {
+  try {
+    return (
+      await runGit(root, [
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${ref}^{commit}`,
+      ])
+    ).stdout.trim();
+  } catch {
+    throw new Error(
+      `GIT_REMOTE_CHANGED: Required remote ref ${ref} is absent.`,
+    );
+  }
+}
+
+async function readOptionalGitRef(
+  root: string,
+  ref: string,
+): Promise<string | undefined> {
+  const result = await runGit(root, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    ref,
+  ]).catch(() => undefined);
+  return result?.stdout.trim() || undefined;
+}
+
+async function mergeStateFilesPresent(root: string): Promise<string[]> {
+  const names = ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"];
+  const present: string[] = [];
+  for (const name of names) {
+    const path = (
+      await runGit(root, ["rev-parse", "--git-path", name])
+    ).stdout.trim();
+    if (
+      await access(path)
+        .then(() => true)
+        .catch(() => false)
+    ) {
+      present.push(name);
+    }
+  }
+  return present;
+}
+
+async function listRemoteTrackingRefs(
+  root: string,
+  remote: string,
+): Promise<Record<string, string>> {
+  const output = (
+    await runGit(root, [
+      "for-each-ref",
+      "--format=%(refname)%00%(objectname)",
+      `refs/remotes/${remote}/`,
+    ])
+  ).stdout;
+  return Object.fromEntries(
+    output
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [ref, sha] = line.split("\0");
+        return [ref, sha] as const;
+      })
+      .filter(([ref, sha]) => Boolean(ref && sha)),
+  );
+}
+
+async function isAncestor(
+  root: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  try {
+    await runGit(root, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch (error) {
+    if (error instanceof GitExecutionError && error.exitCode === 1)
+      return false;
+    throw error;
+  }
+}
+
+function assertCleanAttachedWorkspace(status: GitWorkspaceStatus): void {
+  if (!status.clean) {
+    throw new Error(
+      `GIT_WORKSPACE_NOT_CLEAN: staged=${status.staged.length}, unstaged=${status.unstaged.length}, untracked=${status.untracked.length}, conflicts=${status.conflicts.length}.`,
+    );
+  }
+  if (!status.branch) {
+    throw new Error(
+      "GIT_DETACHED_HEAD: Operation requires an attached branch.",
+    );
+  }
+}
+
+async function withGitMutationLock<T>(
+  lockKey: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = gitMutationTails.get(lockKey) ?? Promise.resolve();
+  let release!: () => void;
+  const tail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => tail);
+  gitMutationTails.set(lockKey, queued);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (gitMutationTails.get(lockKey) === queued)
+      gitMutationTails.delete(lockKey);
+  }
+}
+
+async function gitMutationLockKey(root: string): Promise<string> {
+  const commonDir = (
+    await runGit(root, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ])
+  ).stdout.trim();
+  return realpath(commonDir);
+}
+
+function safeGitEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of [
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PROXY_COMMAND",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+  ]) {
+    delete env[key];
+  }
+  return {
+    ...env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "/usr/bin/false",
+    SSH_ASKPASS: "/usr/bin/false",
+    GCM_INTERACTIVE: "Never",
+  };
+}
+
+function sanitizeGitOutput(value: string): string {
+  return Buffer.from(
+    value
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)([^/\s@]+)@/gi, "$1[REDACTED]@")
+      .replace(
+        /([?&](?:access_token|auth|key|password|signature|token)=)[^&\s]+/gi,
+        "$1[REDACTED]",
+      ),
+  )
+    .subarray(0, MAX_GIT_OUTPUT_BYTES)
+    .toString("utf8")
+    .trim();
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+class GitExecutionError extends Error {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode?: number;
+  readonly timedOut: boolean;
+
+  constructor(input: {
+    message: string;
+    stdout: string;
+    stderr: string;
+    exitCode?: number;
+    timedOut: boolean;
+  }) {
+    super(input.message);
+    this.name = "GitExecutionError";
+    this.stdout = input.stdout;
+    this.stderr = input.stderr;
+    this.exitCode = input.exitCode;
+    this.timedOut = input.timedOut;
   }
 }
 

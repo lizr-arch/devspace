@@ -19,6 +19,17 @@ export interface ProjectMemoryRepositoryConfig {
 export interface ProjectMemoryConfig {
   repositories: ProjectMemoryRepositoryConfig[];
 }
+export interface GitRemoteWritePolicy {
+  enabled: boolean;
+  approvedRemotes: string[];
+  approvedDestinationBranches: string[];
+  approvedRepositoryRoots: string[];
+  approvedRemoteUrls: Record<string, string[]>;
+  allowForce: false;
+  requireCleanWorkspace: true;
+  requireExpectedRemoteSha: true;
+  requireFastForward: true;
+}
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
@@ -41,6 +52,7 @@ export interface ServerConfig {
   logging: LoggingConfig;
   projectMemory: ProjectMemoryConfig;
   runners: RunnerRegistryConfig;
+  gitRemoteWrite: GitRemoteWritePolicy;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -286,6 +298,159 @@ function parseProjectMemoryConfig(
   };
 }
 
+function parseGitRemoteWritePolicy(
+  env: NodeJS.ProcessEnv,
+  value: DevspaceUserConfigGitRemoteWrite | undefined,
+  allowedRoots: string[],
+): GitRemoteWritePolicy {
+  const enabled =
+    env.DEVSPACE_GIT_REMOTE_WRITE_ENABLED === undefined
+      ? value?.enabled === true
+      : parseBoolean(env.DEVSPACE_GIT_REMOTE_WRITE_ENABLED);
+  const approvedRemotes = parseConfiguredStringList(
+    env.DEVSPACE_GIT_APPROVED_REMOTES,
+    value?.approvedRemotes,
+    ["origin"],
+  );
+  const approvedDestinationBranches = parseConfiguredStringList(
+    env.DEVSPACE_GIT_APPROVED_DESTINATION_BRANCHES,
+    value?.approvedDestinationBranches,
+    [],
+  );
+  const approvedRepositoryRoots = parseConfiguredStringList(
+    env.DEVSPACE_GIT_APPROVED_REPOSITORY_ROOTS,
+    value?.approvedRepositoryRoots,
+    [],
+  ).map((root) => resolve(expandHomePath(root)));
+  const approvedRemoteUrls = value?.approvedRemoteUrls ?? {};
+
+  for (const remote of approvedRemotes) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(remote)) {
+      throw new Error(`Invalid approved Git remote: ${remote}`);
+    }
+  }
+  for (const branch of approvedDestinationBranches) {
+    if (!isSafeConfiguredBranch(branch)) {
+      throw new Error(`Invalid approved Git destination branch: ${branch}`);
+    }
+  }
+  for (const root of approvedRepositoryRoots) {
+    if (
+      !allowedRoots.some((allowedRoot) => isPathInsideRoot(root, allowedRoot))
+    ) {
+      throw new Error(
+        `Approved Git repository root is outside allowed roots: ${root}`,
+      );
+    }
+  }
+  for (const [remote, urls] of Object.entries(approvedRemoteUrls)) {
+    if (
+      !approvedRemotes.includes(remote) ||
+      !Array.isArray(urls) ||
+      urls.length === 0
+    ) {
+      throw new Error(`Invalid approved Git remote URL binding for ${remote}`);
+    }
+    for (const url of urls) {
+      if (
+        typeof url !== "string" ||
+        (!isSafeConfiguredRemoteUrl(url) && !/^file:\/\/\/.+/.test(url))
+      ) {
+        throw new Error(`Invalid approved Git remote URL for ${remote}`);
+      }
+    }
+  }
+  if (value?.allowForce === true) {
+    throw new Error("gitRemoteWrite.allowForce must remain false");
+  }
+  if (value?.requireCleanWorkspace === false) {
+    throw new Error("gitRemoteWrite.requireCleanWorkspace must remain true");
+  }
+  if (value?.requireExpectedRemoteSha === false) {
+    throw new Error("gitRemoteWrite.requireExpectedRemoteSha must remain true");
+  }
+  if (value?.requireFastForward === false) {
+    throw new Error("gitRemoteWrite.requireFastForward must remain true");
+  }
+  if (
+    enabled &&
+    (approvedRemotes.length === 0 ||
+      approvedDestinationBranches.length === 0 ||
+      approvedRepositoryRoots.length === 0 ||
+      approvedRemotes.some((remote) => !approvedRemoteUrls[remote]?.length))
+  ) {
+    throw new Error(
+      "Enabled gitRemoteWrite requires approvedRemotes, approvedDestinationBranches, approvedRepositoryRoots, and exact approvedRemoteUrls",
+    );
+  }
+
+  return {
+    enabled,
+    approvedRemotes,
+    approvedDestinationBranches,
+    approvedRepositoryRoots,
+    approvedRemoteUrls,
+    allowForce: false,
+    requireCleanWorkspace: true,
+    requireExpectedRemoteSha: true,
+    requireFastForward: true,
+  };
+}
+
+type DevspaceUserConfigGitRemoteWrite = NonNullable<
+  ReturnType<typeof loadDevspaceFiles>["config"]["gitRemoteWrite"]
+>;
+
+function parseConfiguredStringList(
+  envValue: string | undefined,
+  configuredValue: string[] | undefined,
+  fallback: string[],
+): string[] {
+  const values =
+    envValue === undefined
+      ? (configuredValue ?? fallback)
+      : envValue
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+  if (
+    !Array.isArray(values) ||
+    values.some((entry) => typeof entry !== "string")
+  ) {
+    throw new Error("Invalid Git policy list: expected an array of strings");
+  }
+  return [...new Set(values.map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function isSafeConfiguredBranch(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 255 &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) &&
+    !value.includes("..") &&
+    !value.includes("@{") &&
+    !value.endsWith(".") &&
+    !value.endsWith("/") &&
+    !value.endsWith(".lock") &&
+    !value.split("/").some((part) => part.length === 0 || part.startsWith("."))
+  );
+}
+
+function isSafeConfiguredRemoteUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
 type DevspaceUserConfigProjectMemory = NonNullable<
   ReturnType<typeof loadDevspaceFiles>["config"]["projectMemory"]
 >;
@@ -426,6 +591,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       allowedRoots,
     ),
     runners: files.config.runners ?? {},
+    gitRemoteWrite: parseGitRemoteWritePolicy(
+      env,
+      files.config.gitRemoteWrite,
+      allowedRoots,
+    ),
   };
 }
 
