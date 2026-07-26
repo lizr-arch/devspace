@@ -123,6 +123,12 @@ try {
     "start_capture",
     "poll_job",
     "cancel_job",
+    "start_game_session",
+    "inspect_game_session",
+    "send_game_input",
+    "capture_game_frame",
+    "read_game_logs",
+    "stop_game_session",
   ]);
   assert.equal(probe.runnerNames?.includes("blender"), true);
   assert.equal(probe.runnerNames?.includes("godot-mono"), true);

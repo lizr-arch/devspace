@@ -61,3 +61,21 @@ file mutation, Git mutation, Runner, capture, or game-session tools.
 - M3 adds fixed BLEND, GLB, and audio inspectors plus bounded model previews.
 - M4 remains deferred: capability enforcement, permanent deletion, trash
   restore, merge/push, release/export, arbitrary Python, and desktop control.
+
+## M2: Godot game sessions
+
+M2 uses a distinct interactive Session lifecycle rather than representing a
+game process as a background job. A bundled `SceneTree` bridge connects to an
+ephemeral `127.0.0.1` port using a per-session random secret. DevSpace
+constructs the process arguments and resolves only registered `godot` or
+`godot-mono` executables.
+
+The MCP surface is `start_game_session`, `inspect_game_session`,
+`send_game_input`, `capture_game_frame`, `read_game_logs`, and
+`stop_game_session`. Inputs are restricted to `InputMap` actions and
+viewport-local mouse clicks. Screenshots, logs, and pinned source/engine
+snapshots remain in private DevSpace state rather than the project.
+
+Each workspace can own one active Session and the service can own two. A
+service shutdown marks live Sessions interrupted. Restart cleanup signals only
+a persisted process group whose random identity token can still be verified.
