@@ -99,6 +99,24 @@ shell, and background-job tools. Dedicated read/search tools stay enabled even
 when `DEVSPACE_TOOL_MODE=minimal`, because the shell fallback is intentionally
 unavailable in read-only mode.
 
+### Safe Git remote policy
+
+`git_fetch` and `git_merge` are registered only in full, non-read-only mode.
+`git_push` is additionally registered only when `gitRemoteWrite.enabled` is
+true. Configure exact repository roots, remote names, remote URLs, and
+destination branches in `~/.devspace/config.json`; see
+[Safe Git Integration](safe-git-integration.md).
+
+These environment variables can override the non-secret list fields:
+
+- `DEVSPACE_GIT_REMOTE_WRITE_ENABLED`
+- `DEVSPACE_GIT_APPROVED_REMOTES`
+- `DEVSPACE_GIT_APPROVED_DESTINATION_BRANCHES`
+- `DEVSPACE_GIT_APPROVED_REPOSITORY_ROOTS`
+
+Exact `approvedRemoteUrls` remain in the operator-owned config file. Enabling
+remote write without URL bindings fails closed.
+
 ## Widgets
 
 `DEVSPACE_WIDGETS` controls ChatGPT Apps iframe usage.

@@ -255,6 +255,19 @@ Uncommitted source checkout changes are not copied into the managed worktree.
 Commit, stash, or ask the model to work in checkout mode if those changes are
 needed.
 
+## Safe Git Push Reports Remote Changed
+
+`expectedRemoteSha` is an optimistic concurrency lock. If another actor updates
+the destination, DevSpace stops with `GIT_REMOTE_CHANGED`; it does not rebase,
+merge, reset, or force a history update. Fetch again, inspect the new history,
+then repeat merge and validation in a clean managed worktree.
+
+## Safe Git Merge Rejects A Dirty Checkout
+
+Staged, unstaged, untracked, or conflicted paths block `git_merge` and
+`git_push`. Do not use stash, clean, reset, or an ignore-untracked escape hatch.
+Open a managed worktree from the fetched remote base and integrate there.
+
 ## Windows Shell Commands Fail
 
 DevSpace shell execution requires Bash. Native PowerShell and `cmd.exe` command

@@ -55,6 +55,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 1, name: "workspace-state" },
       { version: 2, name: "oauth-state" },
       { version: 3, name: "project-memory-shadow-state" },
+      { version: 4, name: "workspace-attached-branch-state" },
     ]);
   } finally {
     database.close();

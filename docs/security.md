@@ -90,6 +90,12 @@ Filesystem path containment applies to DevSpace file tools. Shell commands run
 as local commands and can do what your user account can do. This is why the MCP
 client must be trusted and the Owner password must stay private.
 
+The DevSpaceMac Cloudflare surface does not restore shell access for remote Git
+integration. Its safe Git tools accept no command, URL, caller refspec, force,
+delete, tag, mirror, or arbitrary argument fields. Remote operations require
+exact operator repository, remote, URL, and branch bindings. See
+[Safe Git Integration](safe-git-integration.md).
+
 ## Background Validation Jobs
 
 Background jobs do not accept a shell command string. They select a code-owned
@@ -146,6 +152,16 @@ not a sandbox for other local processes or direct filesystem access.
 Managed worktrees reduce accidental edits to your active checkout, but they are
 not a security boundary. They are a workflow boundary for isolated coding
 sessions.
+
+Managed worktrees use a unique attached `devspace/integration/...` branch so a
+bounded merge can run without touching a dirty source checkout. Merge never
+auto-stashes, cleans, resets, or ignores untracked files.
+
+`git_merge` and `git_push` enforce this workflow boundary: ordinary checkout,
+detached, unmanaged, or unapproved-source workspaces are rejected before a Git
+mutation runs. Remote Git calls use a separate POSIX process group so timeout
+termination also stops local Git descendants before the repository lock is
+released.
 
 ## Logs
 

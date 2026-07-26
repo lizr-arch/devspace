@@ -33,6 +33,17 @@ export interface DevspaceUserConfig {
       maxOutputBytes?: number;
     }>;
   };
+  gitRemoteWrite?: {
+    enabled?: boolean;
+    approvedRemotes?: string[];
+    approvedDestinationBranches?: string[];
+    approvedRepositoryRoots?: string[];
+    approvedRemoteUrls?: Record<string, string[]>;
+    allowForce?: boolean;
+    requireCleanWorkspace?: boolean;
+    requireExpectedRemoteSha?: boolean;
+    requireFastForward?: boolean;
+  };
 }
 
 export interface DevspaceAuthConfig {

@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "../src/server.js";
@@ -51,6 +52,21 @@ const sourceCommit = execFileSync(
 ).trim();
 
 const port = await freePort();
+mkdirSync(join(root, "config"), { recursive: true });
+writeFileSync(
+  join(root, "config", "config.json"),
+  JSON.stringify({
+    gitRemoteWrite: {
+      enabled: true,
+      approvedRemotes: ["origin"],
+      approvedDestinationBranches: ["main"],
+      approvedRepositoryRoots: [workspaceRoot],
+      approvedRemoteUrls: {
+        origin: ["https://github.com/example/game-art-fixture.git"],
+      },
+    },
+  }),
+);
 const config = loadConfig({
   DEVSPACE_CONFIG_DIR: join(root, "config"),
   DEVSPACE_ALLOWED_ROOTS: workspaceRoot,
@@ -59,6 +75,7 @@ const config = loadConfig({
   DEVSPACE_STATE_DIR: stateDir,
   DEVSPACE_WORKTREE_ROOT: worktreeRoot,
   DEVSPACE_TOOL_MODE: "full",
+  DEVSPACE_WIDGETS: "off",
   DEVSPACE_LOG_LEVEL: "silent",
   DEVSPACE_LOG_REQUESTS: "0",
   DEVSPACE_LOG_TOOL_CALLS: "0",
@@ -109,6 +126,9 @@ try {
     "git_unstage_paths",
     "git_commit",
     "git_branch",
+    "git_fetch",
+    "git_merge",
+    "git_push",
     "resume_workspace",
     "open_workspace",
     "project_memory_preflight",

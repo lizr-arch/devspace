@@ -288,6 +288,8 @@ DevSpace gives ChatGPT tools to:
 - publish one registered artifact through a high-entropy, short-lived URL that
   revalidates its path, signature, size, and SHA-256 on every access
 - use isolated Git worktrees for parallel coding sessions
+- fetch, merge, and push an exact fast-forward integration commit for an
+  operator-approved repository without arbitrary Git arguments or Bash
 - follow project instructions from `AGENTS.md` and `CLAUDE.md`
 - discover local agent skills from your skill folders
 - show tool cards and optional change summaries in ChatGPT Apps-compatible hosts
@@ -330,6 +332,7 @@ devspace doctor
 
 - [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
 - [Cloudflare Named Tunnel](./docs/cloudflare-named-tunnel.md)
+- [Safe Git Integration](./docs/safe-git-integration.md)
 - [ChatGPT Web Connection Path](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-web-connection.md)
 - [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
 - [Local Coach Bridge](https://github.com/Waishnav/devspace/blob/main/docs/local-coach-bridge.md)

@@ -22,6 +22,11 @@ const migrations: Migration[] = [
     name: "project-memory-shadow-state",
     up: migrateProjectMemoryShadowState,
   },
+  {
+    version: 4,
+    name: "workspace-attached-branch-state",
+    up: migrateWorkspaceAttachedBranchState,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -72,6 +77,8 @@ function migrateWorkspaceState(sqlite: Database.Database): void {
       base_ref text,
       base_sha text,
       managed text not null default 'false',
+      detached text not null default 'true',
+      branch text,
       created_at text not null,
       last_used_at text not null
     );
@@ -114,6 +121,23 @@ function migrateWorkspaceState(sqlite: Database.Database): void {
     "managed",
     "text not null default 'false'",
   );
+  addColumnIfMissing(
+    sqlite,
+    "workspace_sessions",
+    "detached",
+    "text not null default 'true'",
+  );
+  addColumnIfMissing(sqlite, "workspace_sessions", "branch", "text");
+}
+
+function migrateWorkspaceAttachedBranchState(sqlite: Database.Database): void {
+  addColumnIfMissing(
+    sqlite,
+    "workspace_sessions",
+    "detached",
+    "text not null default 'true'",
+  );
+  addColumnIfMissing(sqlite, "workspace_sessions", "branch", "text");
 }
 
 function migrateOAuthState(sqlite: Database.Database): void {

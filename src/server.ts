@@ -81,9 +81,12 @@ import {
 } from "./workspace-paths.js";
 import {
   commitGit,
+  fetchGit,
   inspectGitDiff,
   inspectGitStatus,
   manageGitBranch,
+  mergeGit,
+  pushGit,
   stageGitPaths,
   unstageGitPaths,
 } from "./git-tools.js";
@@ -106,6 +109,7 @@ import { createWorkspaceStore } from "./workspace-store.js";
 import {
   formatAgentsPath,
   WorkspaceRegistry,
+  type Workspace,
   type WorkspaceContext,
 } from "./workspaces.js";
 
@@ -115,7 +119,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "devspacemac-m3-template.2026-07-26";
+const TOOL_SCHEMA_REVISION = "devspacemac-m4-safe-git-integration.2026-07-27";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -401,6 +405,8 @@ function exposedToolNames(
       "git_unstage_paths",
       "git_commit",
       "git_branch",
+      "git_fetch",
+      "git_merge",
       "start_game_session",
       "inspect_game_session",
       "send_game_input",
@@ -411,6 +417,9 @@ function exposedToolNames(
       "inspect_audio",
       "render_model_preview",
     );
+    if (config.gitRemoteWrite.enabled) {
+      tools.splice(tools.indexOf("git_merge") + 1, 0, "git_push");
+    }
   }
   if (config.widgets === "changes") tools.push("show_changes");
   if (exposeDedicatedReadTools(config)) {
@@ -441,6 +450,7 @@ function createServiceRuntime(
         widgets: config.widgets,
         toolNaming: config.toolNaming,
         requiredCapabilities,
+        gitRemoteWrite: config.gitRemoteWrite,
         workspaceApp: workspaceApp
           ? {
               resourceUri: workspaceApp.resourceUri,
@@ -501,6 +511,9 @@ function requiredCapabilityForTool(tool: string): ToolCapability {
       "git_unstage_paths",
       "git_commit",
       "git_branch",
+      "git_fetch",
+      "git_merge",
+      "git_push",
     ].includes(tool)
   ) {
     return "git.write";
@@ -619,6 +632,7 @@ const workspaceContextOutputSchema: z.ZodRawShape = {
       dirtySource: z.boolean(),
       detached: z.boolean(),
       managed: z.boolean(),
+      branch: z.string().optional(),
     })
     .optional(),
   agentsFiles: z.array(workspaceAgentsFileOutputSchema),
@@ -877,6 +891,76 @@ function logFailedToolResponse(
 
 function textBlock(text: string): ToolContent {
   return { type: "text", text };
+}
+
+function gitToolFailure(tool: string, error: unknown, projectMemory: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const match = /^([A-Z][A-Z0-9_]+):\s*(.*)$/s.exec(raw);
+  const detail = {
+    code: match?.[1] ?? "GIT_OPERATION_FAILED",
+    message: match?.[2] || raw || "Git operation failed.",
+  };
+  const result = `${detail.code}: ${detail.message}`;
+  return {
+    isError: true as const,
+    content: [textBlock(result)],
+    _meta: { tool, projectMemory },
+    structuredContent: { result, error: detail },
+  };
+}
+
+function gitRemotePolicyForWorkspace(
+  config: ServerConfig,
+  workspace: { root: string; sourceRoot?: string },
+) {
+  if (!config.gitRemoteWrite.enabled) {
+    throw new Error(
+      "GIT_REMOTE_POLICY_DISABLED: Operator Git remote policy is disabled.",
+    );
+  }
+  const repositoryRoot = workspace.sourceRoot ?? workspace.root;
+  if (!config.gitRemoteWrite.approvedRepositoryRoots.includes(repositoryRoot)) {
+    throw new Error(
+      "GIT_REPOSITORY_NOT_APPROVED: Workspace repository is not approved for remote Git operations.",
+    );
+  }
+  return {
+    approvedRemotes: config.gitRemoteWrite.approvedRemotes,
+    approvedRemoteUrls: config.gitRemoteWrite.approvedRemoteUrls,
+    approvedDestinationBranches:
+      config.gitRemoteWrite.approvedDestinationBranches,
+  };
+}
+
+function assertManagedAttachedGitWorkspace(workspace: Workspace): void {
+  if (
+    workspace.mode !== "worktree" ||
+    workspace.worktree?.managed !== true ||
+    workspace.worktree.path !== workspace.root
+  ) {
+    throw new Error(
+      "GIT_MANAGED_WORKTREE_REQUIRED: Operation requires a DevSpace-managed worktree.",
+    );
+  }
+  if (workspace.worktree.detached || !workspace.worktree.branch) {
+    throw new Error(
+      "GIT_DETACHED_HEAD: Operation requires an attached managed worktree branch.",
+    );
+  }
+}
+
+function gitRemoteWriteSummary(config: ServerConfig) {
+  const policy = config.gitRemoteWrite;
+  return {
+    enabled: policy.enabled,
+    approvedRemotes: policy.approvedRemotes,
+    approvedDestinationBranches: policy.approvedDestinationBranches,
+    approvedRepositoryRoots: policy.approvedRepositoryRoots,
+    allowForce: policy.allowForce,
+    requireCleanWorkspace: policy.requireCleanWorkspace,
+    requireExpectedRemoteSha: policy.requireExpectedRemoteSha,
+    requireFastForward: policy.requireFastForward,
+  };
 }
 
 function assertJobWorkspace(job: JobSnapshot, workspaceId: string): void {
@@ -1341,6 +1425,16 @@ function createMcpServer(
           supportedFormats: z.array(z.string()),
           captureProfileDirectory: z.literal(".devspace/captures"),
         }),
+        gitRemoteWrite: z.object({
+          enabled: z.boolean(),
+          approvedRemotes: z.array(z.string()),
+          approvedDestinationBranches: z.array(z.string()),
+          approvedRepositoryRoots: z.array(z.string()),
+          allowForce: z.literal(false),
+          requireCleanWorkspace: z.literal(true),
+          requireExpectedRemoteSha: z.literal(true),
+          requireFastForward: z.literal(true),
+        }),
       }),
       _meta: {},
       annotations: {
@@ -1401,6 +1495,7 @@ function createMcpServer(
           ],
           captureProfileDirectory: ".devspace/captures" as const,
         },
+        gitRemoteWrite: gitRemoteWriteSummary(config),
       };
       const result = [
         `DevSpace ${PACKAGE_VERSION}`,
@@ -1412,6 +1507,7 @@ function createMcpServer(
           ? `Workspace App: ${runtime.workspaceApp.resourceUri} (${runtime.workspaceApp.buildFingerprint})`
           : "Workspace App: disabled",
         `Allowed roots: ${config.allowedRoots.join(", ")}`,
+        `Git remote write: enabled=${String(config.gitRemoteWrite.enabled)}, remotes=${config.gitRemoteWrite.approvedRemotes.join(", ") || "(none)"}, branches=${config.gitRemoteWrite.approvedDestinationBranches.join(", ") || "(none)"}, force=false`,
         `Runners: ${formatRunnerSummary(runnerRegistry.runners)}`,
         runnerRegistry.diagnostics.length > 0
           ? `Runner diagnostics: ${runnerRegistry.diagnostics.join(" | ")}`
@@ -2358,6 +2454,233 @@ function createMcpServer(
         };
       },
     );
+
+    registerAppTool(
+      server,
+      "git_fetch",
+      {
+        title: "Fetch approved Git remote",
+        description:
+          "Fetch one existing operator-approved remote without accepting a URL or refspec. Remote-tracking ref changes are reported; HEAD, branch, index, and worktree must remain unchanged.",
+        inputSchema: z.strictObject({
+          workspaceId: z.string(),
+          remote: z.string().max(255).optional(),
+          prune: z.boolean().optional(),
+          expectedHeadSha: z
+            .string()
+            .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+            .optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        }),
+        outputSchema: resultOutputSchema({
+          fetch: z.unknown().optional(),
+          error: z.object({ code: z.string(), message: z.string() }).optional(),
+        }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async ({
+        workspaceId,
+        remote,
+        prune,
+        expectedHeadSha,
+        projectMemoryReceiptId,
+      }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "git_fetch",
+          projectMemoryReceiptId,
+        );
+        try {
+          const policy = gitRemotePolicyForWorkspace(config, workspace);
+          const fetch = await fetchGit({
+            workspaceRoot: workspace.root,
+            approvedRemotes: policy.approvedRemotes,
+            approvedRemoteUrls: policy.approvedRemoteUrls,
+            remote,
+            prune,
+            expectedHeadSha,
+          });
+          const result = [
+            `Fetched ${fetch.remote} (prune=${String(fetch.prune)}).`,
+            `HEAD ${fetch.headSha} on ${fetch.branch ?? "(detached)"}.`,
+            `Remote refs: ${fetch.updatedRefs.length} updated, ${fetch.createdRefs.length} created, ${fetch.deletedRefs.length} deleted.`,
+          ].join("\n");
+          return {
+            content: [textBlock(result)],
+            _meta: { tool: "git_fetch", projectMemory },
+            structuredContent: { result, fetch },
+          };
+        } catch (error) {
+          return gitToolFailure("git_fetch", error, projectMemory);
+        }
+      },
+    );
+
+    registerAppTool(
+      server,
+      "git_merge",
+      {
+        title: "Merge Git commit safely",
+        description:
+          "Merge one validated commit into a clean attached workspace using ff-only or no-ff. Expected SHAs prevent stale operations; hooks, GPG signing, executable filters, and custom merge drivers are blocked. Conflicts are recorded and automatically aborted back to the clean pre-merge state.",
+        inputSchema: z.strictObject({
+          workspaceId: z.string(),
+          sourceRef: z.string().min(1).max(255),
+          mode: z.enum(["ff_only", "no_ff"]),
+          expectedHeadSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+          commitMessage: z.string().min(1).max(10_000).optional(),
+          expectedSourceSha: z
+            .string()
+            .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+            .optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        }),
+        outputSchema: resultOutputSchema({
+          merge: z.unknown().optional(),
+          error: z.object({ code: z.string(), message: z.string() }).optional(),
+        }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        sourceRef,
+        mode,
+        expectedHeadSha,
+        commitMessage,
+        expectedSourceSha,
+        projectMemoryReceiptId,
+      }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "git_merge",
+          projectMemoryReceiptId,
+        );
+        try {
+          assertManagedAttachedGitWorkspace(workspace);
+          gitRemotePolicyForWorkspace(config, workspace);
+          const merge = await mergeGit({
+            workspaceRoot: workspace.root,
+            sourceRef,
+            mode,
+            expectedHeadSha,
+            commitMessage,
+            expectedSourceSha,
+          });
+          const result = [
+            `Merged ${merge.sourceRef} (${merge.sourceSha}) into ${merge.branch}.`,
+            `HEAD ${merge.headBefore} -> ${merge.headAfter}; mode=${merge.mode}.`,
+            merge.createdMergeCommit
+              ? `Created merge commit ${merge.mergeCommitSha}.`
+              : "No merge commit was created.",
+          ].join("\n");
+          return {
+            content: [textBlock(result)],
+            _meta: { tool: "git_merge", projectMemory },
+            structuredContent: { result, merge },
+          };
+        } catch (error) {
+          return gitToolFailure("git_merge", error, projectMemory);
+        }
+      },
+    );
+
+    if (config.gitRemoteWrite.enabled) {
+      registerAppTool(
+        server,
+        "git_push",
+        {
+          title: "Push approved Git branch safely",
+          description:
+            "Push one exact local commit to one operator-approved remote branch. The tool fetches first, requires exact local and remote SHAs, verifies fast-forward ancestry, performs an atomic expected-remote compare-and-swap, and fetches again to verify the result. Force, deletion, tags, arbitrary refspecs, URLs, and arbitrary Git arguments are not accepted.",
+          inputSchema: z.strictObject({
+            workspaceId: z.string(),
+            remote: z.string().max(255).optional(),
+            sourceRef: z.string().min(1).max(255).optional(),
+            destinationBranch: z.string().min(1).max(255),
+            expectedLocalSha: z
+              .string()
+              .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+            expectedRemoteSha: z
+              .string()
+              .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+            verifyAncestor: z.boolean().optional(),
+            projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+          }),
+          outputSchema: resultOutputSchema({
+            push: z.unknown().optional(),
+            error: z
+              .object({ code: z.string(), message: z.string() })
+              .optional(),
+          }),
+          _meta: {},
+          annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: true,
+          },
+        },
+        async ({
+          workspaceId,
+          remote,
+          sourceRef,
+          destinationBranch,
+          expectedLocalSha,
+          expectedRemoteSha,
+          verifyAncestor,
+          projectMemoryReceiptId,
+        }) => {
+          const workspace = workspaces.getWorkspace(workspaceId);
+          const projectMemory = workspaces.observeProjectMemoryAccess(
+            workspaceId,
+            "git_push",
+            projectMemoryReceiptId,
+          );
+          try {
+            assertManagedAttachedGitWorkspace(workspace);
+            const policy = gitRemotePolicyForWorkspace(config, workspace);
+            const push = await pushGit({
+              workspaceRoot: workspace.root,
+              approvedRemotes: policy.approvedRemotes,
+              approvedRemoteUrls: policy.approvedRemoteUrls,
+              approvedDestinationBranches: policy.approvedDestinationBranches,
+              remote,
+              sourceRef,
+              destinationBranch,
+              expectedLocalSha,
+              expectedRemoteSha,
+              verifyAncestor,
+            });
+            const result = [
+              `Pushed ${push.localSha} to ${push.remote}/${push.destinationBranch}.`,
+              `Remote ${push.remoteShaBefore} -> ${push.remoteShaAfter}.`,
+              `Verified remoteContainsLocal=${String(push.remoteContainsLocal)}.`,
+            ].join("\n");
+            return {
+              content: [textBlock(result)],
+              _meta: { tool: "git_push", projectMemory },
+              structuredContent: { result, push },
+            };
+          } catch (error) {
+            return gitToolFailure("git_push", error, projectMemory);
+          }
+        },
+      );
+    }
   }
 
   registerAppTool(
