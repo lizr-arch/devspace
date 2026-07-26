@@ -203,7 +203,7 @@ export class BackgroundJobManager {
       const child = spawn(resolvedRunner.executable, input.args, {
         cwd: input.workingDirectory,
         env: {
-          ...process.env,
+          ...resolvedRunner.environment,
           ...validatedJobEnvironment(input.environment),
           DEVSPACE_JOB_ID: jobId,
           DEVSPACE_PROCESS_TOKEN: processToken,

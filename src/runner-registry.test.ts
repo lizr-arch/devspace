@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
   MAX_CONCURRENT_JOBS,
   MAX_JOB_TIMEOUT_SECONDS,
@@ -165,6 +165,38 @@ try {
   assert.equal(resolved.definition.maxTimeoutSeconds, 30);
   assert.equal(resolved.definition.maxConcurrent, 1);
   assert.match(resolved.version ?? "", /^v\d+/);
+
+  if (process.platform !== "win32") {
+    const launchdBin = join(root, "launchd-bin");
+    mkdirSync(launchdBin);
+    symlinkSync(process.execPath, join(launchdBin, "node"));
+    const launchdNpm = join(launchdBin, "npm");
+    writeFileSync(
+      launchdNpm,
+      '#!/usr/bin/env node\nconsole.log("10.9.8-launchd-test");\n',
+      { mode: 0o700 },
+    );
+    const launchdRegistry = new RunnerRegistry(
+      { npm: { executable: launchdNpm } },
+      process.platform,
+      {
+        HOME: root,
+        PATH: ["/usr/bin", "/bin"].join(delimiter),
+      },
+    );
+    const launchdResolved = await launchdRegistry.resolve("npm");
+    assert.equal(launchdResolved.version, "10.9.8-launchd-test");
+    assert.equal(
+      launchdResolved.environment.PATH?.split(delimiter)[0],
+      launchdBin,
+    );
+    launchdResolved.environment.PATH = "/mutated";
+    const cachedLaunchdResolved = await launchdRegistry.resolve("npm");
+    assert.equal(
+      cachedLaunchdResolved.environment.PATH?.split(delimiter)[0],
+      launchdBin,
+    );
+  }
 
   const invalid = new RunnerRegistry({
     npm: {

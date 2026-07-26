@@ -158,6 +158,7 @@ export class GameSessionManager {
       const handshake = await this.spawnAndHandshake(
         session,
         resolvedEngine.executable,
+        resolvedEngine.environment,
         project.absolutePath,
         token,
       );
@@ -422,6 +423,7 @@ export class GameSessionManager {
   ): Promise<{
     name: "godot" | "godot-mono";
     executable: string;
+    environment: NodeJS.ProcessEnv;
     version?: string;
   }> {
     const csharp = readdirSync(projectRoot).some((entry) =>
@@ -440,6 +442,7 @@ export class GameSessionManager {
         return {
           name: name as "godot" | "godot-mono",
           executable: resolved.executable,
+          environment: resolved.environment,
           version: resolved.version,
         };
       } catch (error) {
@@ -454,6 +457,7 @@ export class GameSessionManager {
   private async spawnAndHandshake(
     session: LiveSession,
     executable: string,
+    environment: NodeJS.ProcessEnv,
     projectRoot: string,
     token: string,
   ): Promise<Record<string, unknown>> {
@@ -481,7 +485,7 @@ export class GameSessionManager {
       {
         cwd: projectRoot,
         env: {
-          ...process.env,
+          ...environment,
           DEVSPACE_BRIDGE_PORT: String(address.port),
           DEVSPACE_BRIDGE_TOKEN: token,
           DEVSPACE_GAME_SCENE: session.scene,

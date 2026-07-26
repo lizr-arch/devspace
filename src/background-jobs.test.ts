@@ -7,10 +7,11 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   BackgroundJobManager,
@@ -60,6 +61,51 @@ try {
   assert.equal(completed.status, "succeeded");
   assert.match(completed.output ?? "", /job-ok/);
   assert.equal(completed.exitCode, 0);
+
+  if (process.platform !== "win32") {
+    const launchdBin = join(root, "launchd-bin");
+    mkdirSync(launchdBin);
+    symlinkSync(process.execPath, join(launchdBin, "node"));
+    const launchdNpm = join(launchdBin, "npm");
+    writeFileSync(
+      launchdNpm,
+      `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  console.log("10.9.8-launchd-test");
+} else {
+  console.log("launchd-job-ok");
+}
+`,
+      { mode: 0o700 },
+    );
+    const launchdManager = new BackgroundJobManager(
+      join(root, "launchd-state"),
+      new RunnerRegistry(
+        { npm: { executable: launchdNpm } },
+        process.platform,
+        {
+          HOME: root,
+          PATH: ["/usr/bin", "/bin"].join(delimiter),
+        },
+      ),
+    );
+    const launchdStarted = await launchdManager.start({
+      workspaceId: "ws_launchd",
+      workspaceRoot,
+      workingDirectory: workspaceRoot,
+      runner: "npm",
+      args: ["run", "verify"],
+      timeoutSeconds: 30,
+    });
+    const launchdCompleted = await waitForTerminal(
+      launchdManager,
+      launchdStarted.jobId,
+    );
+    assert.equal(launchdCompleted.status, "succeeded");
+    assert.equal(launchdCompleted.runnerVersion, "10.9.8-launchd-test");
+    assert.match(launchdCompleted.output ?? "", /launchd-job-ok/);
+    launchdManager.close();
+  }
 
   const long = await manager.start({
     workspaceId: "ws_test",

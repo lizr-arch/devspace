@@ -298,6 +298,7 @@ export class ExternalInspectorManager {
         output,
       ],
       this.stateDir,
+      runner.environment,
     );
     if (!existsSync(output)) {
       throw new Error("INSPECTOR_FAILED: Blender returned no inspection.");
@@ -383,6 +384,7 @@ export class ExternalInspectorManager {
           String(height),
         ],
         this.stateDir,
+        runner.environment,
       );
     }
     if ((await sha256File(source.absolutePath)) !== sourceBefore) {
@@ -439,6 +441,7 @@ export class ExternalInspectorManager {
       runner.executable,
       ["--headless", "--editor", "--path", project, "--quit-after", "3"],
       project,
+      runner.environment,
     );
     await runFixed(
       runner.executable,
@@ -452,6 +455,7 @@ export class ExternalInspectorManager {
       ],
       project,
       {
+        ...runner.environment,
         DEVSPACE_PREVIEW_OUTPUT: output,
         DEVSPACE_PREVIEW_VIEW: view,
       },
@@ -609,7 +613,7 @@ function runFixed(
   executable: string,
   args: string[],
   cwd: string,
-  environment: Record<string, string> = {},
+  environment: NodeJS.ProcessEnv = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {

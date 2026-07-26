@@ -87,6 +87,7 @@ export interface RunnerInspection {
 export interface ResolvedRunner {
   definition: RunnerDefinition;
   executable: string;
+  environment: NodeJS.ProcessEnv;
   version?: string;
 }
 
@@ -170,7 +171,11 @@ export class RunnerRegistry {
     }
     const cached = this.resolvedCache.get(name);
     if (cached)
-      return { ...cached, definition: cloneDefinition(cached.definition) };
+      return {
+        ...cached,
+        definition: cloneDefinition(cached.definition),
+        environment: { ...cached.environment },
+      };
 
     const definition = this.getDefinition(name);
     if (!definition.enabled) {
@@ -183,14 +188,23 @@ export class RunnerRegistry {
     }
 
     const executable = await this.locateExecutable(name);
+    const environment = environmentForExecutable(
+      executable,
+      this.env,
+      this.platform,
+    );
     const version = await probeVersion(
       executable,
       definition.versionArgs,
-      this.env,
+      environment,
     ).catch(() => undefined);
-    const resolved = { definition, executable, version };
+    const resolved = { definition, executable, environment, version };
     this.resolvedCache.set(name, resolved);
-    return { ...resolved, definition: cloneDefinition(definition) };
+    return {
+      ...resolved,
+      definition: cloneDefinition(definition),
+      environment: { ...environment },
+    };
   }
 
   validateArguments(
@@ -752,6 +766,30 @@ function executableCandidates(
     .filter(Boolean)
     .map((directory) => join(directory, runner));
   return Array.from(new Set([...(fixed[runner] ?? []), ...fromPath]));
+}
+
+function environmentForExecutable(
+  executable: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): NodeJS.ProcessEnv {
+  const pathKey =
+    Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  const executableDirectory = dirname(executable);
+  const currentPath = env[pathKey] ?? "";
+  const entries = currentPath.split(delimiter).filter(Boolean);
+  const normalizedExecutableDirectory =
+    platform === "win32"
+      ? executableDirectory.toLowerCase()
+      : executableDirectory;
+  const withoutDuplicate = entries.filter((entry) => {
+    const normalized = platform === "win32" ? entry.toLowerCase() : entry;
+    return normalized !== normalizedExecutableDirectory;
+  });
+  return {
+    ...env,
+    [pathKey]: [executableDirectory, ...withoutDuplicate].join(delimiter),
+  };
 }
 
 async function isExecutableFile(candidate: string): Promise<boolean> {
