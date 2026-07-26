@@ -185,8 +185,10 @@ Git, Bash, public URL, allowed hosts, SQLite native dependency status, and
 ChatGPT Web readiness details. `--live` also probes local health, OAuth
 metadata, dynamic registration, and the Owner password approval page. `--public`
 probes the configured public URL through your live tunnel or reverse proxy.
-`--public --full-loop` additionally completes a real external OAuth flow and a
-real `open_workspace` MCP call through that public URL.
+`--public --full-loop` additionally completes a real external OAuth flow,
+initializes MCP, reads the versioned Workspace App template, downloads its
+entry JavaScript and stylesheets with CORS/CORP validation, and makes a real
+`open_workspace` MCP call through that public URL.
 
 ## Running From A Local Checkout
 
@@ -194,7 +196,11 @@ If you are developing DevSpace itself instead of using the published package:
 
 ```bash
 npm install --include=dev
+npm run build
 npm run dev
 ```
 
-The same setup rules apply.
+The same setup rules apply. When widgets are enabled, startup validates the
+Vite manifest and its entry JavaScript/CSS immediately. Run `npm run build`
+again if startup reports that the Workspace App manifest or an asset is
+unavailable.

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { access, realpath } from "node:fs/promises";
+import { accessSync, existsSync, lstatSync, readFileSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -115,8 +115,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "devspacemac-m3.2026-07-26";
-const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
+const TOOL_SCHEMA_REVISION = "devspacemac-m3-template.2026-07-26";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -155,6 +154,11 @@ interface ServiceRuntime {
   tools: string[];
   schemaFingerprint: string;
   requiredCapabilities: Record<string, ToolCapability>;
+  workspaceApp?: {
+    resourceUri: string;
+    buildFingerprint: string;
+    manifestSha256: string;
+  };
 }
 
 async function rollbackImportedAsset(input: {
@@ -236,6 +240,13 @@ interface WorkspaceAppManifestEntry {
 
 type WorkspaceAppManifest = Record<string, WorkspaceAppManifestEntry>;
 
+export interface WorkspaceAppBuild {
+  entry: WorkspaceAppManifestEntry;
+  resourceUri: string;
+  buildFingerprint: string;
+  manifestSha256: string;
+}
+
 interface DiffStats {
   additions: number;
   removals: number;
@@ -286,13 +297,19 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
 function toolWidgetDescriptorMeta(
   config: ServerConfig,
   kind: ToolWidgetKind,
+  workspaceApp: WorkspaceAppBuild | undefined,
 ): ToolWidgetDescriptorMeta {
   if (!shouldAttachWidget(config.widgets, kind)) return { _meta: {} };
+  if (!workspaceApp) {
+    throw new Error(
+      `Workspace App build is required when DEVSPACE_WIDGETS=${config.widgets}.`,
+    );
+  }
 
   return {
     _meta: {
       ui: {
-        resourceUri: WORKSPACE_APP_URI,
+        resourceUri: workspaceApp.resourceUri,
         visibility: ["model"],
       },
     },
@@ -404,7 +421,10 @@ function exposedToolNames(
   return tools;
 }
 
-function createServiceRuntime(config: ServerConfig): ServiceRuntime {
+function createServiceRuntime(
+  config: ServerConfig,
+  workspaceApp: WorkspaceAppBuild | undefined,
+): ServiceRuntime {
   const tools = exposedToolNames(config, toolNamesFor(config));
   const requiredCapabilities = Object.fromEntries(
     tools.map((tool) => [tool, requiredCapabilityForTool(tool)]),
@@ -420,6 +440,13 @@ function createServiceRuntime(config: ServerConfig): ServiceRuntime {
         widgets: config.widgets,
         toolNaming: config.toolNaming,
         requiredCapabilities,
+        workspaceApp: workspaceApp
+          ? {
+              resourceUri: workspaceApp.resourceUri,
+              buildFingerprint: workspaceApp.buildFingerprint,
+              manifestSha256: workspaceApp.manifestSha256,
+            }
+          : undefined,
       }),
     )
     .digest("hex");
@@ -429,6 +456,13 @@ function createServiceRuntime(config: ServerConfig): ServiceRuntime {
     tools,
     schemaFingerprint,
     requiredCapabilities,
+    workspaceApp: workspaceApp
+      ? {
+          resourceUri: workspaceApp.resourceUri,
+          buildFingerprint: workspaceApp.buildFingerprint,
+          manifestSha256: workspaceApp.manifestSha256,
+        }
+      : undefined,
   };
 }
 
@@ -530,6 +564,10 @@ function serverInstructions(
 
 export interface CreateServerOptions {
   projectMemoryRunner?: ProjectMemoryCommandRunner;
+  workspaceAppBuild?: {
+    manifestUrl?: URL;
+    uiDirectoryUrl?: URL;
+  };
 }
 function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
   return {
@@ -910,30 +948,103 @@ function uiManifestUrl(): URL {
   return new URL("../dist/ui/.vite/manifest.json", import.meta.url);
 }
 
-function readWorkspaceAppManifest(): WorkspaceAppManifest {
-  return JSON.parse(
-    readFileSync(uiManifestUrl(), "utf8"),
-  ) as WorkspaceAppManifest;
+function uiBuildDirectoryUrl(): URL {
+  return new URL("../dist/ui/", import.meta.url);
 }
 
-function getWorkspaceAppManifestEntry(): WorkspaceAppManifestEntry {
-  const manifest = readWorkspaceAppManifest();
-  const entry = manifest[WORKSPACE_APP_MANIFEST_ENTRY];
+export function resolveWorkspaceAppBuild(
+  input: {
+    manifestUrl?: URL;
+    uiDirectoryUrl?: URL;
+  } = {},
+): WorkspaceAppBuild {
+  const manifestUrl = input.manifestUrl ?? uiManifestUrl();
+  const uiDirectoryUrl = input.uiDirectoryUrl ?? uiBuildDirectoryUrl();
+  let manifestText: string;
+  try {
+    manifestText = readFileSync(manifestUrl, "utf8");
+  } catch (error) {
+    throw new Error(
+      `Workspace App manifest is unavailable. Run npm run build before starting DevSpace: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 
+  let manifest: WorkspaceAppManifest;
+  try {
+    manifest = JSON.parse(manifestText) as WorkspaceAppManifest;
+  } catch (error) {
+    throw new Error(
+      `Workspace App manifest is invalid. Run npm run build before starting DevSpace: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  const entry = manifest[WORKSPACE_APP_MANIFEST_ENTRY];
   if (!entry?.file) {
     throw new Error(`Missing ${WORKSPACE_APP_MANIFEST_ENTRY} in UI manifest.`);
   }
 
-  return entry;
+  const candidates = [entry.file, ...(entry.css ?? [])].map((assetPath) => {
+    if (
+      !assetPath ||
+      assetPath.startsWith("/") ||
+      assetPath.includes("\\") ||
+      assetPath.split("/").includes("..")
+    ) {
+      throw new Error(
+        `Workspace App manifest contains an invalid asset path: ${assetPath}.`,
+      );
+    }
+    return {
+      assetPath,
+      url: new URL(assetPath, uiDirectoryUrl),
+    };
+  });
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate.url);
+    } catch (error) {
+      throw new Error(
+        `Workspace App asset is unavailable: ${candidate.assetPath}. Run npm run build before starting DevSpace: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  const manifestSha256 = createHash("sha256")
+    .update(manifestText)
+    .digest("hex");
+  const buildFingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        packageVersion: PACKAGE_VERSION,
+        schemaRevision: TOOL_SCHEMA_REVISION,
+        manifestSha256,
+      }),
+    )
+    .digest("hex");
+
+  return {
+    entry,
+    manifestSha256,
+    buildFingerprint,
+    resourceUri: `ui://devspace/workspace-app-${buildFingerprint.slice(0, 16)}.html`,
+  };
 }
 
 function assetUrl(baseUrl: string, assetPath: string): string {
   return `${baseUrl}/${assetPath.replace(/^\/+/, "")}`;
 }
 
-function workspaceAppHtml(config: ServerConfig): string {
+function workspaceAppHtml(
+  config: ServerConfig,
+  workspaceApp: WorkspaceAppBuild,
+): string {
   const baseUrl = assetBaseUrl(config);
-  const entry = getWorkspaceAppManifestEntry();
+  const entry = workspaceApp.entry;
   const stylesheets = (entry.css ?? [])
     .map(
       (stylesheet) =>
@@ -978,17 +1089,6 @@ function setAssetHeaders(res: Response): void {
   res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-}
-
-async function assertWorkspaceAppAssets(): Promise<void> {
-  const entry = getWorkspaceAppManifestEntry();
-  const candidates = [entry.file, ...(entry.css ?? [])].map(
-    (assetPath) => new URL(`../dist/ui/${assetPath}`, import.meta.url),
-  );
-
-  for (const candidate of candidates) {
-    await access(candidate);
-  }
 }
 
 function workspaceContextToolResponse(input: {
@@ -1119,8 +1219,11 @@ function createMcpServer(
   artifacts: ArtifactLedger,
   publisher: ArtifactPublisher,
   runtime: ServiceRuntime,
+  workspaceApp: WorkspaceAppBuild | undefined,
 ): McpServer {
   const toolNames = toolNamesFor(config);
+  const widgetMeta = (kind: ToolWidgetKind): ToolWidgetDescriptorMeta =>
+    toolWidgetDescriptorMeta(config, kind, workspaceApp);
   const server = new McpServer(
     {
       name: "devspace",
@@ -1134,26 +1237,26 @@ function createMcpServer(
     },
   );
 
-  registerAppResource(
-    server,
-    "DevSpace Diff Card",
-    WORKSPACE_APP_URI,
-    {
-      description: "Interactive card for viewing DevSpace file diffs.",
-      _meta: {
-        ui: {
-          csp: appCsp(config),
+  if (workspaceApp) {
+    registerAppResource(
+      server,
+      "DevSpace Workspace App",
+      workspaceApp.resourceUri,
+      {
+        description:
+          "Versioned interactive card for viewing DevSpace workspace and tool results.",
+        _meta: {
+          ui: {
+            csp: appCsp(config),
+          },
         },
       },
-    },
-    async () => {
-      await assertWorkspaceAppAssets();
-      return {
+      async () => ({
         contents: [
           {
-            uri: WORKSPACE_APP_URI,
+            uri: workspaceApp.resourceUri,
             mimeType: RESOURCE_MIME_TYPE,
-            text: workspaceAppHtml(config),
+            text: workspaceAppHtml(config, workspaceApp),
             _meta: {
               ui: {
                 csp: appCsp(config),
@@ -1161,9 +1264,9 @@ function createMcpServer(
             },
           },
         ],
-      };
-    },
-  );
+      }),
+    );
+  }
 
   registerAppTool(
     server,
@@ -1187,6 +1290,13 @@ function createMcpServer(
         toolMode: z.enum(["minimal", "full"]),
         toolNaming: z.enum(["legacy", "short"]),
         widgets: z.enum(["off", "changes", "full"]),
+        workspaceApp: z
+          .object({
+            resourceUri: z.string(),
+            buildFingerprint: z.string(),
+            manifestSha256: z.string(),
+          })
+          .optional(),
         allowedRoots: z.array(z.string()),
         worktreeRoot: z.string(),
         jobs: z.object({
@@ -1263,6 +1373,7 @@ function createMcpServer(
           : ("full" as const),
         toolNaming: config.toolNaming,
         widgets: config.widgets,
+        workspaceApp: runtime.workspaceApp,
         allowedRoots: config.allowedRoots,
         worktreeRoot: config.worktreeRoot,
         jobs: {
@@ -1299,6 +1410,9 @@ function createMcpServer(
         `Schema: ${TOOL_SCHEMA_REVISION} (${runtime.schemaFingerprint})`,
         `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
         `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
+        runtime.workspaceApp
+          ? `Workspace App: ${runtime.workspaceApp.resourceUri} (${runtime.workspaceApp.buildFingerprint})`
+          : "Workspace App: disabled",
         `Allowed roots: ${config.allowedRoots.join(", ")}`,
         `Runners: ${formatRunnerSummary(runnerRegistry.runners)}`,
         runnerRegistry.diagnostics.length > 0
@@ -2267,7 +2381,7 @@ function createMcpServer(
           ),
       },
       outputSchema: workspaceContextOutputSchema,
-      ...toolWidgetDescriptorMeta(config, "workspace"),
+      ...widgetMeta("workspace"),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -2324,7 +2438,7 @@ function createMcpServer(
           ),
       },
       outputSchema: workspaceContextOutputSchema,
-      ...toolWidgetDescriptorMeta(config, "workspace"),
+      ...widgetMeta("workspace"),
       annotations: { readOnlyHint: true },
     },
     async ({ path, mode, baseRef, task }) => {
@@ -2365,7 +2479,7 @@ function createMcpServer(
         result: z.string(),
         projectMemory: projectMemoryPreflightOutputSchema,
       },
-      ...toolWidgetDescriptorMeta(config, "project_memory"),
+      ...widgetMeta("project_memory"),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ workspaceId, task }) => {
@@ -2450,7 +2564,7 @@ function createMcpServer(
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "read"),
+      ...widgetMeta("read"),
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -2542,7 +2656,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "write"),
+        ...widgetMeta("write"),
         annotations: WRITE_TOOL_ANNOTATIONS,
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -2815,7 +2929,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           status: z.literal("applied"),
         }),
-        ...toolWidgetDescriptorMeta(config, "edit"),
+        ...widgetMeta("edit"),
         annotations: EDIT_TOOL_ANNOTATIONS,
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -2914,7 +3028,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "show_changes"),
+        ...widgetMeta("show_changes"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, since, markReviewed, projectMemoryReceiptId }) => {
@@ -2985,7 +3099,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "search"),
+        ...widgetMeta("search"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3067,7 +3181,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "search"),
+        ...widgetMeta("search"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3149,7 +3263,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "directory"),
+        ...widgetMeta("directory"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3243,7 +3357,7 @@ function createMcpServer(
             projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
           },
           outputSchema: resultOutputSchema(),
-          ...toolWidgetDescriptorMeta(config, "shell"),
+          ...widgetMeta("shell"),
           annotations: SHELL_TOOL_ANNOTATIONS,
         },
         async ({
@@ -3373,7 +3487,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           job: jobSnapshotOutputSchema,
         }),
-        ...toolWidgetDescriptorMeta(config, "job"),
+        ...widgetMeta("job"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -3459,7 +3573,7 @@ function createMcpServer(
           job: jobSnapshotOutputSchema,
           profile: captureProfileOutputSchema,
         }),
-        ...toolWidgetDescriptorMeta(config, "job"),
+        ...widgetMeta("job"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -3557,7 +3671,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           job: jobSnapshotOutputSchema,
         }),
-        ...toolWidgetDescriptorMeta(config, "job"),
+        ...widgetMeta("job"),
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -3631,7 +3745,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           job: jobSnapshotOutputSchema,
         }),
-        ...toolWidgetDescriptorMeta(config, "job"),
+        ...widgetMeta("job"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -4112,8 +4226,12 @@ export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
 ): RunningServer {
+  const workspaceApp =
+    config.widgets === "off"
+      ? undefined
+      : resolveWorkspaceAppBuild(options.workspaceAppBuild);
   const runners = new RunnerRegistry(config.runners);
-  const runtime = createServiceRuntime(config);
+  const runtime = createServiceRuntime(config, workspaceApp);
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
@@ -4317,6 +4435,7 @@ export function createServer(
           artifacts,
           publisher,
           runtime,
+          workspaceApp,
         );
         await server.connect(transport);
       } else {

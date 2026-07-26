@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createServer } from "./server.js";
+import { join, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createServer, resolveWorkspaceAppBuild } from "./server.js";
 import { loadConfig } from "./config.js";
 import { canonicalJson } from "./project-memory.js";
 import {
@@ -17,6 +18,8 @@ import {
 const tempRoot = mkdtempSync(join(tmpdir(), "devspace-doctor-test-"));
 
 try {
+  await testWorkspaceAppBuildResolution();
+  await testWorkspaceAppStartupValidation();
   await testDerivedChatGptUrls();
   await testPublicProbeHeaders();
   await testLiveChatGptProbe();
@@ -27,6 +30,100 @@ try {
   await testPublicProbeExplainsInvalidHost();
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
+}
+
+async function testWorkspaceAppBuildResolution(): Promise<void> {
+  const uiDirectory = mkdtempSync(join(tempRoot, "workspace-app-build-"));
+  const manifestDirectory = join(uiDirectory, ".vite");
+  const assetsDirectory = join(uiDirectory, "assets");
+  mkdirSync(manifestDirectory, { recursive: true });
+  mkdirSync(assetsDirectory, { recursive: true });
+  writeFileSync(join(assetsDirectory, "workspace-app-test.js"), "export {};\n");
+  writeFileSync(
+    join(assetsDirectory, "workspace-app-test.css"),
+    "body { color: black; }\n",
+  );
+  const manifestPath = join(manifestDirectory, "manifest.json");
+  const manifest = {
+    "workspace-app.html": {
+      file: "assets/workspace-app-test.js",
+      css: ["assets/workspace-app-test.css"],
+    },
+  };
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+
+  const paths = {
+    manifestUrl: pathToFileURL(manifestPath),
+    uiDirectoryUrl: pathToFileURL(`${uiDirectory}${sep}`),
+  };
+  const first = resolveWorkspaceAppBuild(paths);
+  assert.match(
+    first.resourceUri,
+    /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/,
+  );
+  assert.match(first.buildFingerprint, /^[0-9a-f]{64}$/);
+  assert.match(first.manifestSha256, /^[0-9a-f]{64}$/);
+
+  writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+  const second = resolveWorkspaceAppBuild(paths);
+  assert.notEqual(second.resourceUri, first.resourceUri);
+  assert.notEqual(second.buildFingerprint, first.buildFingerprint);
+  assert.notEqual(second.manifestSha256, first.manifestSha256);
+
+  writeFileSync(
+    manifestPath,
+    JSON.stringify({
+      "workspace-app.html": {
+        file: "../outside.js",
+      },
+    }),
+  );
+  assert.throws(() => resolveWorkspaceAppBuild(paths), /invalid asset path/i);
+}
+
+async function testWorkspaceAppStartupValidation(): Promise<void> {
+  const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: mkdtempSync(join(tempRoot, "config-app-startup-")),
+    DEVSPACE_ALLOWED_ROOTS: process.cwd(),
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    DEVSPACE_PUBLIC_BASE_URL: "https://devspace.example.com",
+    DEVSPACE_STATE_DIR: mkdtempSync(join(tempRoot, "state-app-startup-")),
+    DEVSPACE_WORKTREE_ROOT: mkdtempSync(
+      join(tempRoot, "worktree-app-startup-"),
+    ),
+    DEVSPACE_LOG_LEVEL: "silent",
+    DEVSPACE_LOG_REQUESTS: "0",
+    DEVSPACE_LOG_TOOL_CALLS: "0",
+  });
+  const missingManifest = pathToFileURL(
+    join(tempRoot, "missing-workspace-app-manifest.json"),
+  );
+  assert.throws(
+    () =>
+      createServer(config, {
+        workspaceAppBuild: { manifestUrl: missingManifest },
+      }),
+    /Workspace App manifest is unavailable.*npm run build/i,
+  );
+
+  const widgetsOffConfig = loadConfig({
+    DEVSPACE_CONFIG_DIR: mkdtempSync(join(tempRoot, "config-app-startup-off-")),
+    DEVSPACE_ALLOWED_ROOTS: process.cwd(),
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    DEVSPACE_PUBLIC_BASE_URL: "https://devspace.example.com",
+    DEVSPACE_STATE_DIR: mkdtempSync(join(tempRoot, "state-app-startup-off-")),
+    DEVSPACE_WORKTREE_ROOT: mkdtempSync(
+      join(tempRoot, "worktree-app-startup-off-"),
+    ),
+    DEVSPACE_WIDGETS: "off",
+    DEVSPACE_LOG_LEVEL: "silent",
+    DEVSPACE_LOG_REQUESTS: "0",
+    DEVSPACE_LOG_TOOL_CALLS: "0",
+  });
+  const widgetsOff = createServer(widgetsOffConfig, {
+    workspaceAppBuild: { manifestUrl: missingManifest },
+  });
+  widgetsOff.close();
 }
 
 async function testDerivedChatGptUrls(): Promise<void> {
@@ -219,6 +316,13 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.tokenExchange.ok, true);
     assert.equal(probe.initialize.ok, true);
     assert.equal(probe.toolsList.ok, true);
+    assert.equal(probe.mcpAppResourceUri.ok, true);
+    assert.equal(probe.mcpAppResource.ok, true);
+    assert.equal(probe.mcpAppMimeType.ok, true);
+    assert.equal(probe.mcpAppEntryJavaScript.ok, true);
+    assert.equal(probe.mcpAppStylesheets.ok, true);
+    assert.equal(probe.mcpAppAssetCors.ok, true);
+    assert.equal(probe.mcpAppBuildFingerprint.ok, true);
     assert.equal(probe.devspaceInfo.ok, true);
     assert.equal(probe.openWorkspace.ok, true);
     assert.equal(probe.listWorkspaces.ok, true);
@@ -227,6 +331,12 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.backgroundJobStatus, "succeeded");
     assert.match(probe.backgroundJobOutput ?? "", /typecheck/);
     assert.match(probe.schemaFingerprint ?? "", /^[0-9a-f]{64}$/);
+    assert.match(
+      probe.workspaceAppResourceUri ?? "",
+      /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/,
+    );
+    assert.match(probe.workspaceAppBuildFingerprint ?? "", /^[0-9a-f]{64}$/);
+    assert.match(probe.workspaceAppManifestSha256 ?? "", /^[0-9a-f]{64}$/);
     assert.deepEqual(probe.runnerNames, [
       "npm",
       "pnpm",
@@ -291,6 +401,7 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
     DEVSPACE_STATE_DIR: stateDir,
     DEVSPACE_WORKTREE_ROOT: worktreeRoot,
     DEVSPACE_READ_ONLY: "1",
+    DEVSPACE_WIDGETS: "off",
     DEVSPACE_LOG_LEVEL: "silent",
     DEVSPACE_LOG_REQUESTS: "0",
     DEVSPACE_LOG_TOOL_CALLS: "0",
@@ -312,6 +423,11 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       workspacePath: process.cwd(),
     });
     assert.equal(probe.ready, true);
+    assert.equal(probe.mcpAppResourceUri.ok, true);
+    assert.equal(probe.mcpAppResource.ok, true);
+    assert.equal(probe.mcpAppBuildFingerprint.ok, true);
+    assert.match(probe.mcpAppResourceUri.detail, /DEVSPACE_WIDGETS=off/);
+    assert.equal(probe.workspaceAppResourceUri, undefined);
     assert.deepEqual(probe.toolNames, [
       "devspace_info",
       "list_workspaces",

@@ -158,8 +158,16 @@ through your live tunnel or reverse proxy.
 
 `doctor --public --full-loop` goes further again: it behaves like a real
 external MCP client by registering an OAuth client, completing the Owner
-password approval, exchanging a token, initializing MCP, listing tools, and
+password approval, exchanging a token, initializing MCP, listing tools, reading
+the exact versioned MCP App resource advertised by those tools, downloading its
+entry JavaScript and stylesheets, validating their CORS/CORP headers, and
 calling `open_workspace` through the public tunnel.
+
+Each UI build uses a fingerprinted resource URI. If the UI bundle, package
+version, or tool schema revision changes, restart DevSpace and refresh the App
+actions before testing in a new chat. `devspace_info` reports the current
+resource URI and build fingerprint so a cached template can be distinguished
+from the running build.
 
 ## Pinggy Note
 

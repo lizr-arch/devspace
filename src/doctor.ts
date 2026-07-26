@@ -53,6 +53,13 @@ export interface PublicExternalClientProbe {
   tokenExchange: DoctorProbeCheck;
   initialize: DoctorProbeCheck;
   toolsList: DoctorProbeCheck;
+  mcpAppResourceUri: DoctorProbeCheck;
+  mcpAppResource: DoctorProbeCheck;
+  mcpAppMimeType: DoctorProbeCheck;
+  mcpAppEntryJavaScript: DoctorProbeCheck;
+  mcpAppStylesheets: DoctorProbeCheck;
+  mcpAppAssetCors: DoctorProbeCheck;
+  mcpAppBuildFingerprint: DoctorProbeCheck;
   devspaceInfo: DoctorProbeCheck;
   openWorkspace: DoctorProbeCheck;
   listWorkspaces: DoctorProbeCheck;
@@ -63,6 +70,9 @@ export interface PublicExternalClientProbe {
   toolNames?: string[];
   runnerNames?: string[];
   schemaFingerprint?: string;
+  workspaceAppResourceUri?: string;
+  workspaceAppBuildFingerprint?: string;
+  workspaceAppManifestSha256?: string;
   workspaceId?: string;
   workspaceRoot?: string;
   projectMemoryReceiptId?: string;
@@ -217,6 +227,34 @@ export async function probePublicExternalClientFlow(
     ok: false,
     detail: "MCP tools/list did not run.",
   };
+  let mcpAppResourceUriCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP App resource URI discovery did not run.",
+  };
+  let mcpAppResourceCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP resources/read did not run.",
+  };
+  let mcpAppMimeTypeCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP App MIME type validation did not run.",
+  };
+  let mcpAppEntryJavaScriptCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP App entry JavaScript validation did not run.",
+  };
+  let mcpAppStylesheetsCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP App stylesheet validation did not run.",
+  };
+  let mcpAppAssetCorsCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP App asset CORS validation did not run.",
+  };
+  let mcpAppBuildFingerprintCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP App build fingerprint validation did not run.",
+  };
   let openWorkspaceCheck: DoctorProbeCheck = {
     ok: false,
     detail: "MCP open_workspace did not run.",
@@ -239,6 +277,9 @@ export async function probePublicExternalClientFlow(
   let toolNames: string[] | undefined;
   let runnerNames: string[] | undefined;
   let schemaFingerprint: string | undefined;
+  let workspaceAppResourceUri: string | undefined;
+  let workspaceAppBuildFingerprint: string | undefined;
+  let workspaceAppManifestSha256: string | undefined;
   let workspaceId: string | undefined;
   let workspaceRoot: string | undefined;
   let projectMemoryReceiptId: string | undefined;
@@ -420,6 +461,18 @@ export async function probePublicExternalClientFlow(
         const record = asRecord(tool);
         return record?.name === "open_workspace";
       });
+      const advertisedAppResourceUris = Array.from(
+        new Set(
+          tools
+            .map((tool) =>
+              stringField(
+                asRecord(asRecord(asRecord(tool)?._meta)?.ui),
+                "resourceUri",
+              ),
+            )
+            .filter((uri): uri is string => Boolean(uri)),
+        ),
+      );
 
       toolsListCheck =
         toolsList.ok && hasOpenWorkspace
@@ -435,6 +488,182 @@ export async function probePublicExternalClientFlow(
                   "MCP tools/list responded, but open_workspace was not present.",
               }
             : failedCheck(toolsList, "MCP tools/list did not succeed.");
+
+      if (config.widgets === "off") {
+        const disabled = okCheck(
+          toolsList.status,
+          "MCP App validation skipped because DEVSPACE_WIDGETS=off.",
+        );
+        mcpAppResourceUriCheck = disabled;
+        mcpAppResourceCheck = disabled;
+        mcpAppMimeTypeCheck = disabled;
+        mcpAppEntryJavaScriptCheck = disabled;
+        mcpAppStylesheetsCheck = disabled;
+        mcpAppAssetCorsCheck = disabled;
+        mcpAppBuildFingerprintCheck = disabled;
+      } else if (advertisedAppResourceUris.length === 1) {
+        workspaceAppResourceUri = advertisedAppResourceUris[0];
+        mcpAppResourceUriCheck = okCheck(
+          toolsList.status,
+          `All widget-enabled tools advertise ${workspaceAppResourceUri}.`,
+        );
+
+        const resourceRead = await postMcpJsonRpc(
+          info.publicMcpUrl,
+          accessToken,
+          {
+            jsonrpc: "2.0",
+            id: 30,
+            method: "resources/read",
+            params: { uri: workspaceAppResourceUri },
+          },
+          sessionId,
+        );
+        const resourceResult = asRecord(
+          asRecord(parseMcpResponseJson(resourceRead.text))?.result,
+        );
+        const contents = Array.isArray(resourceResult?.contents)
+          ? resourceResult.contents
+          : [];
+        const appContent = contents
+          .map(asRecord)
+          .find(
+            (content) =>
+              stringField(content, "uri") === workspaceAppResourceUri,
+          );
+        const appHtml = stringField(appContent, "text");
+        const appMimeType = stringField(appContent, "mimeType");
+
+        mcpAppResourceCheck =
+          resourceRead.ok && appHtml
+            ? okCheck(
+                resourceRead.status,
+                "MCP resources/read returned the advertised Workspace App template.",
+              )
+            : resourceRead.ok
+              ? {
+                  ok: false,
+                  status: resourceRead.status,
+                  detail:
+                    "MCP resources/read responded, but the advertised Workspace App HTML was missing.",
+                }
+              : failedCheck(
+                  resourceRead,
+                  "MCP resources/read did not return the Workspace App template.",
+                );
+        mcpAppMimeTypeCheck =
+          appMimeType === "text/html;profile=mcp-app"
+            ? okCheck(
+                resourceRead.status,
+                "Workspace App resource uses text/html;profile=mcp-app.",
+              )
+            : {
+                ok: false,
+                status: resourceRead.status,
+                detail: `Workspace App resource returned ${appMimeType ?? "no MIME type"} instead of text/html;profile=mcp-app.`,
+              };
+
+        if (appHtml) {
+          const assetUrls = extractWorkspaceAppAssetUrls(appHtml);
+          const invalidAssetUrls = [
+            ...assetUrls.scripts,
+            ...assetUrls.stylesheets,
+          ].filter(
+            (url) => !isExpectedWorkspaceAppAssetUrl(url, info.publicBaseUrl),
+          );
+          const scriptResults =
+            invalidAssetUrls.length === 0
+              ? await Promise.all(
+                  assetUrls.scripts.map(async (url) => ({
+                    url,
+                    result: await fetchText(url, requestInit),
+                  })),
+                )
+              : [];
+          const stylesheetResults =
+            invalidAssetUrls.length === 0
+              ? await Promise.all(
+                  assetUrls.stylesheets.map(async (url) => ({
+                    url,
+                    result: await fetchText(url, requestInit),
+                  })),
+                )
+              : [];
+          const fetchedAssets = [...scriptResults, ...stylesheetResults];
+
+          mcpAppEntryJavaScriptCheck =
+            invalidAssetUrls.length === 0 &&
+            scriptResults.length === 1 &&
+            scriptResults[0]?.result.ok === true &&
+            isJavaScriptContentType(
+              scriptResults[0].result.headers?.get("content-type"),
+            )
+              ? okCheck(
+                  scriptResults[0].result.status,
+                  "Workspace App entry JavaScript is publicly retrievable.",
+                )
+              : {
+                  ok: false,
+                  status: scriptResults[0]?.result.status,
+                  detail:
+                    invalidAssetUrls.length > 0
+                      ? `Workspace App HTML referenced an unexpected asset URL: ${invalidAssetUrls[0]}.`
+                      : `Expected one retrievable Workspace App entry JavaScript asset; found ${assetUrls.scripts.length}.`,
+                };
+          mcpAppStylesheetsCheck =
+            invalidAssetUrls.length === 0 &&
+            stylesheetResults.length > 0 &&
+            stylesheetResults.every(
+              ({ result }) =>
+                result.ok &&
+                result.headers
+                  ?.get("content-type")
+                  ?.toLowerCase()
+                  .startsWith("text/css") === true,
+            )
+              ? okCheck(
+                  stylesheetResults[0]?.result.status,
+                  `All ${stylesheetResults.length} Workspace App stylesheet assets are publicly retrievable.`,
+                )
+              : {
+                  ok: false,
+                  status: stylesheetResults[0]?.result.status,
+                  detail:
+                    invalidAssetUrls.length > 0
+                      ? `Workspace App HTML referenced an unexpected asset URL: ${invalidAssetUrls[0]}.`
+                      : `Expected retrievable Workspace App stylesheets; found ${assetUrls.stylesheets.length}.`,
+                };
+          mcpAppAssetCorsCheck =
+            fetchedAssets.length > 0 &&
+            fetchedAssets.every(
+              ({ result }) =>
+                result.ok &&
+                result.headers?.get("access-control-allow-origin") === "*" &&
+                result.headers?.get("cross-origin-resource-policy") ===
+                  "cross-origin",
+            )
+              ? okCheck(
+                  fetchedAssets[0]?.result.status,
+                  "All Workspace App assets allow cross-origin loading with CORS and CORP headers.",
+                )
+              : {
+                  ok: false,
+                  status: fetchedAssets.find(({ result }) => !result.ok)?.result
+                    .status,
+                  detail:
+                    "One or more Workspace App assets were unavailable or missing Access-Control-Allow-Origin: * and Cross-Origin-Resource-Policy: cross-origin.",
+                };
+        }
+      } else {
+        mcpAppResourceUriCheck = {
+          ok: false,
+          status: toolsList.status,
+          detail:
+            advertisedAppResourceUris.length === 0
+              ? "Widget-enabled tools did not advertise an MCP App resource URI."
+              : `Widget-enabled tools advertised multiple MCP App resource URIs: ${advertisedAppResourceUris.join(", ")}.`,
+        };
+      }
 
       if (toolNames.includes("devspace_info")) {
         const devspaceInfo = await postMcpJsonRpc(
@@ -457,6 +686,19 @@ export async function probePublicExternalClientFlow(
         schemaFingerprint = stringField(
           devspaceInfoStructured,
           "schemaFingerprint",
+        );
+        const workspaceApp = asRecord(devspaceInfoStructured?.workspaceApp);
+        workspaceAppBuildFingerprint = stringField(
+          workspaceApp,
+          "buildFingerprint",
+        );
+        workspaceAppManifestSha256 = stringField(
+          workspaceApp,
+          "manifestSha256",
+        );
+        const reportedWorkspaceAppResourceUri = stringField(
+          workspaceApp,
+          "resourceUri",
         );
         const reportedTools = Array.isArray(devspaceInfoStructured?.tools)
           ? devspaceInfoStructured.tools
@@ -498,6 +740,27 @@ export async function probePublicExternalClientFlow(
                     "MCP devspace_info responded, but its fingerprint, tool catalog, or runner registry was incomplete.",
                 }
               : failedCheck(devspaceInfo, "MCP devspace_info did not succeed.");
+
+        if (config.widgets !== "off") {
+          const fingerprintPrefix = workspaceAppBuildFingerprint?.slice(0, 16);
+          mcpAppBuildFingerprintCheck =
+            Boolean(workspaceAppResourceUri) &&
+            reportedWorkspaceAppResourceUri === workspaceAppResourceUri &&
+            /^[0-9a-f]{64}$/.test(workspaceAppBuildFingerprint ?? "") &&
+            /^[0-9a-f]{64}$/.test(workspaceAppManifestSha256 ?? "") &&
+            workspaceAppResourceUri?.endsWith(`-${fingerprintPrefix}.html`) ===
+              true
+              ? okCheck(
+                  devspaceInfo.status,
+                  "devspace_info build fingerprint matches the advertised versioned Workspace App URI.",
+                )
+              : {
+                  ok: false,
+                  status: devspaceInfo.status,
+                  detail:
+                    "devspace_info Workspace App metadata did not match the advertised resource URI or valid build hashes.",
+                };
+        }
       }
 
       if (hasOpenWorkspace) {
@@ -1020,6 +1283,13 @@ export async function probePublicExternalClientFlow(
     tokenExchange: tokenExchangeCheck,
     initialize: initializeCheck,
     toolsList: toolsListCheck,
+    mcpAppResourceUri: mcpAppResourceUriCheck,
+    mcpAppResource: mcpAppResourceCheck,
+    mcpAppMimeType: mcpAppMimeTypeCheck,
+    mcpAppEntryJavaScript: mcpAppEntryJavaScriptCheck,
+    mcpAppStylesheets: mcpAppStylesheetsCheck,
+    mcpAppAssetCors: mcpAppAssetCorsCheck,
+    mcpAppBuildFingerprint: mcpAppBuildFingerprintCheck,
     devspaceInfo: devspaceInfoCheck,
     openWorkspace: openWorkspaceCheck,
     listWorkspaces: listWorkspacesCheck,
@@ -1030,6 +1300,9 @@ export async function probePublicExternalClientFlow(
     toolNames,
     runnerNames,
     schemaFingerprint,
+    workspaceAppResourceUri,
+    workspaceAppBuildFingerprint,
+    workspaceAppManifestSha256,
     workspaceId,
     workspaceRoot,
     projectMemoryReceiptId,
@@ -1056,6 +1329,13 @@ export async function probePublicExternalClientFlow(
       tokenExchangeCheck.ok &&
       initializeCheck.ok &&
       toolsListCheck.ok &&
+      mcpAppResourceUriCheck.ok &&
+      mcpAppResourceCheck.ok &&
+      mcpAppMimeTypeCheck.ok &&
+      mcpAppEntryJavaScriptCheck.ok &&
+      mcpAppStylesheetsCheck.ok &&
+      mcpAppAssetCorsCheck.ok &&
+      mcpAppBuildFingerprintCheck.ok &&
       devspaceInfoCheck.ok &&
       openWorkspaceCheck.ok &&
       listWorkspacesCheck.ok &&
@@ -1102,6 +1382,57 @@ export function publicProbeRequestInitForBaseUrl(
 
 function publicUrl(baseUrl: string, path: string): string {
   return new URL(path, `${stripTrailingSlash(baseUrl)}/`).toString();
+}
+
+function extractWorkspaceAppAssetUrls(html: string): {
+  scripts: string[];
+  stylesheets: string[];
+} {
+  const scripts = Array.from(html.matchAll(/<script\b[^>]*>/gi))
+    .map(([tag]) => htmlAttribute(tag, "src"))
+    .filter((url): url is string => Boolean(url));
+  const stylesheets = Array.from(html.matchAll(/<link\b[^>]*>/gi))
+    .filter(([tag]) =>
+      (htmlAttribute(tag, "rel") ?? "")
+        .split(/\s+/)
+        .some((value) => value.toLowerCase() === "stylesheet"),
+    )
+    .map(([tag]) => htmlAttribute(tag, "href"))
+    .filter((url): url is string => Boolean(url));
+  return { scripts, stylesheets };
+}
+
+function htmlAttribute(tag: string, name: string): string | undefined {
+  const match = tag.match(
+    new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"),
+  );
+  return match?.[1] ?? match?.[2];
+}
+
+function isExpectedWorkspaceAppAssetUrl(
+  candidate: string,
+  publicBaseUrl: string,
+): boolean {
+  try {
+    const candidateUrl = new URL(candidate);
+    const baseUrl = new URL(publicBaseUrl);
+    return (
+      candidateUrl.origin === baseUrl.origin &&
+      candidateUrl.pathname.startsWith("/mcp-app-assets/") &&
+      !candidateUrl.username &&
+      !candidateUrl.password
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isJavaScriptContentType(value: string | null | undefined): boolean {
+  const normalized = value?.toLowerCase() ?? "";
+  return (
+    normalized.startsWith("text/javascript") ||
+    normalized.startsWith("application/javascript")
+  );
 }
 
 function stripTrailingSlash(value: string): string {

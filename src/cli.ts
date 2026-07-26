@@ -413,6 +413,27 @@ async function runDoctor(args: string[] = []): Promise<void> {
           `    MCP tools/list: ${external.toolsList.ok ? "OK" : "FAIL"}${external.toolsList.status ? ` (${external.toolsList.status})` : ""} - ${external.toolsList.detail}`,
         );
         console.log(
+          `    MCP App resource URI: ${external.mcpAppResourceUri.ok ? "OK" : "FAIL"}${external.mcpAppResourceUri.status ? ` (${external.mcpAppResourceUri.status})` : ""} - ${external.mcpAppResourceUri.detail}`,
+        );
+        console.log(
+          `    MCP resources/read: ${external.mcpAppResource.ok ? "OK" : "FAIL"}${external.mcpAppResource.status ? ` (${external.mcpAppResource.status})` : ""} - ${external.mcpAppResource.detail}`,
+        );
+        console.log(
+          `    MCP App MIME type: ${external.mcpAppMimeType.ok ? "OK" : "FAIL"}${external.mcpAppMimeType.status ? ` (${external.mcpAppMimeType.status})` : ""} - ${external.mcpAppMimeType.detail}`,
+        );
+        console.log(
+          `    MCP App entry JavaScript: ${external.mcpAppEntryJavaScript.ok ? "OK" : "FAIL"}${external.mcpAppEntryJavaScript.status ? ` (${external.mcpAppEntryJavaScript.status})` : ""} - ${external.mcpAppEntryJavaScript.detail}`,
+        );
+        console.log(
+          `    MCP App stylesheets: ${external.mcpAppStylesheets.ok ? "OK" : "FAIL"}${external.mcpAppStylesheets.status ? ` (${external.mcpAppStylesheets.status})` : ""} - ${external.mcpAppStylesheets.detail}`,
+        );
+        console.log(
+          `    MCP App asset CORS: ${external.mcpAppAssetCors.ok ? "OK" : "FAIL"}${external.mcpAppAssetCors.status ? ` (${external.mcpAppAssetCors.status})` : ""} - ${external.mcpAppAssetCors.detail}`,
+        );
+        console.log(
+          `    MCP App build fingerprint: ${external.mcpAppBuildFingerprint.ok ? "OK" : "FAIL"}${external.mcpAppBuildFingerprint.status ? ` (${external.mcpAppBuildFingerprint.status})` : ""} - ${external.mcpAppBuildFingerprint.detail}`,
+        );
+        console.log(
           `    MCP devspace_info: ${external.devspaceInfo.ok ? "OK" : "FAIL"}${external.devspaceInfo.status ? ` (${external.devspaceInfo.status})` : ""} - ${external.devspaceInfo.detail}`,
         );
         console.log(

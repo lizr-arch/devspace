@@ -298,3 +298,10 @@ DEVSPACE_WIDGETS=full
 The aggregate `show_changes` tool is only exposed with
 `DEVSPACE_WIDGETS=changes`. Plain MCP clients may ignore ChatGPT Apps widget
 metadata and only show text results.
+
+When widgets are enabled, DevSpace refuses to start if
+`dist/ui/.vite/manifest.json` or the manifest's entry JavaScript/CSS is missing.
+Run `npm run build` before `npm run start`. If ChatGPT still shows
+`Failed to fetch template`, run `devspace doctor --public --full-loop` and
+compare its MCP App resource URI/build fingerprint with `devspace_info`, then
+refresh the App actions and use a new chat.
