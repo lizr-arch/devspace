@@ -78,7 +78,23 @@ assert.equal(
 
 writeFileSync(
   join(fullToolConfigDir, "config.json"),
-  JSON.stringify({ toolMode: "full", trustProxy: true }),
+  JSON.stringify({
+    toolMode: "full",
+    trustProxy: true,
+    gitRemoteWrite: {
+      enabled: true,
+      approvedRemotes: ["origin"],
+      approvedDestinationBranches: ["main"],
+      approvedRepositoryRoots: [process.cwd()],
+      approvedRemoteUrls: {
+        origin: ["https://github.com/example/devspace.git"],
+      },
+      allowForce: false,
+      requireCleanWorkspace: true,
+      requireExpectedRemoteSha: true,
+      requireFastForward: true,
+    },
+  }),
 );
 assert.equal(
   loadConfig({
@@ -99,6 +115,65 @@ assert.equal(loadConfig(baseEnv).readOnly, false);
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_READ_ONLY: "1" }).readOnly,
   true,
+);
+assert.deepEqual(loadConfig(baseEnv).gitRemoteWrite, {
+  enabled: false,
+  approvedRemotes: ["origin"],
+  approvedDestinationBranches: [],
+  approvedRepositoryRoots: [],
+  approvedRemoteUrls: {},
+  allowForce: false,
+  requireCleanWorkspace: true,
+  requireExpectedRemoteSha: true,
+  requireFastForward: true,
+});
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+  }).gitRemoteWrite.enabled,
+  true,
+);
+assert.throws(
+  () =>
+    loadConfig({
+      ...baseEnv,
+      DEVSPACE_GIT_REMOTE_WRITE_ENABLED: "1",
+      DEVSPACE_GIT_APPROVED_REMOTES: "origin",
+      DEVSPACE_GIT_APPROVED_DESTINATION_BRANCHES: "main",
+      DEVSPACE_GIT_APPROVED_REPOSITORY_ROOTS: process.cwd(),
+    }),
+  /exact approvedRemoteUrls/,
+);
+assert.throws(
+  () =>
+    loadConfig({
+      ...baseEnv,
+      DEVSPACE_GIT_REMOTE_WRITE_ENABLED: "1",
+    }),
+  /approvedDestinationBranches, approvedRepositoryRoots, and exact approvedRemoteUrls/,
+);
+const unsafeGitPolicyDir = mkdtempSync(
+  join(tmpdir(), "devspace-unsafe-git-policy-"),
+);
+writeFileSync(
+  join(unsafeGitPolicyDir, "config.json"),
+  JSON.stringify({
+    gitRemoteWrite: {
+      enabled: true,
+      approvedRemotes: ["origin"],
+      approvedDestinationBranches: ["*"],
+      allowForce: true,
+    },
+  }),
+);
+assert.throws(
+  () =>
+    loadConfig({
+      ...baseEnv,
+      DEVSPACE_CONFIG_DIR: unsafeGitPolicyDir,
+    }),
+  /Invalid approved Git destination branch|allowForce must remain false/,
 );
 assert.equal(loadConfig(baseEnv).skillsEnabled, true);
 assert.deepEqual(loadConfig(baseEnv).projectMemory, { repositories: [] });

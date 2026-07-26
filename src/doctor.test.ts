@@ -316,9 +316,24 @@ async function testPublicExternalClientProbe(): Promise<void> {
   );
   const port = await freePort();
   const publicBaseUrl = `http://127.0.0.1:${port}`;
+  writeFileSync(
+    join(configDir, "config.json"),
+    JSON.stringify({
+      gitRemoteWrite: {
+        enabled: true,
+        approvedRemotes: ["origin"],
+        approvedDestinationBranches: ["main"],
+        approvedRepositoryRoots: [process.cwd()],
+        approvedRemoteUrls: {
+          origin: ["https://github.com/example/devspace.git"],
+        },
+      },
+    }),
+  );
   const config = loadConfig({
     DEVSPACE_CONFIG_DIR: configDir,
     DEVSPACE_ALLOWED_ROOTS: `${process.cwd()},${artifactWorkspace}`,
+    DEVSPACE_TOOL_MODE: "full",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     DEVSPACE_PUBLIC_BASE_URL: publicBaseUrl,
     DEVSPACE_STATE_DIR: stateDir,
@@ -344,6 +359,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
   try {
     const probe = await probePublicExternalClientFlow(config, {
       workspacePath: process.cwd(),
+      verifySafeGitTools: true,
       backgroundJob: {
         runner: "npm",
         args: ["run", "typecheck"],
@@ -355,6 +371,64 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.tokenExchange.ok, true);
     assert.equal(probe.initialize.ok, true);
     assert.equal(probe.toolsList.ok, true);
+    assert.equal(probe.toolNames?.length, 44);
+    assert.equal(probe.toolNames?.includes("git_fetch"), true);
+    assert.equal(probe.toolNames?.includes("git_merge"), true);
+    assert.equal(probe.toolNames?.includes("git_push"), true);
+    assert.equal(probe.safeGitStructuredErrorCode, "GIT_REMOTE_URL_MISMATCH");
+    assert.equal(probe.safeGitUnknownFieldRejected, true);
+    const safeGitDefinitions = probe.safeGitToolDefinitions ?? {};
+    assert.deepEqual(Object.keys(safeGitDefinitions).sort(), [
+      "git_fetch",
+      "git_merge",
+      "git_push",
+    ]);
+    for (const tool of Object.values(safeGitDefinitions)) {
+      const inputSchema = tool.inputSchema as {
+        properties?: Record<string, unknown>;
+        additionalProperties?: boolean;
+      };
+      assert.equal(inputSchema.additionalProperties, false);
+      for (const forbidden of [
+        "force",
+        "forceWithLease",
+        "delete",
+        "tags",
+        "mirror",
+        "all",
+        "setUpstream",
+        "arbitraryRefspec",
+        "pushOptions",
+        "url",
+        "args",
+      ]) {
+        assert.equal(forbidden in (inputSchema.properties ?? {}), false);
+      }
+      assert.equal(
+        (tool._meta as { devspace?: { requiredCapability?: string } }).devspace
+          ?.requiredCapability,
+        "git.write",
+      );
+    }
+    assert.deepEqual(
+      Object.keys(
+        (
+          safeGitDefinitions.git_push.inputSchema as {
+            properties: Record<string, unknown>;
+          }
+        ).properties,
+      ).sort(),
+      [
+        "destinationBranch",
+        "expectedLocalSha",
+        "expectedRemoteSha",
+        "projectMemoryReceiptId",
+        "remote",
+        "sourceRef",
+        "verifyAncestor",
+        "workspaceId",
+      ],
+    );
     assert.equal(probe.mcpAppResourceUri.ok, true);
     assert.equal(probe.mcpAppResource.ok, true);
     assert.equal(probe.mcpAppMimeType.ok, true);
@@ -483,6 +557,9 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "ls",
       "inspect_glb",
     ]);
+    assert.equal(probe.toolNames.includes("git_fetch"), false);
+    assert.equal(probe.toolNames.includes("git_merge"), false);
+    assert.equal(probe.toolNames.includes("git_push"), false);
   } finally {
     await new Promise<void>((resolve, reject) => {
       httpServer.close((error) => (error ? reject(error) : resolve()));
