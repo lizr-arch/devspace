@@ -25,9 +25,9 @@ import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
 import { attachRegisteredToolName } from "./tool-result-metadata.js";
+import { classifyMcpClient } from "./mcp-client-classification.js";
 import {
   logEvent,
-  requestIp,
   requestPath,
   commandPreview,
   sessionIdPrefix,
@@ -124,7 +124,8 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION = "devspacemac-m4-safe-git-integration.2026-07-27";
+const TOOL_SCHEMA_REVISION =
+  "devspacemac-mcp-app-session-stability-v1.2026-07-27";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -648,6 +649,16 @@ function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
   };
 }
 
+function mcpSessionSourceCountsSchema() {
+  return z.object({
+    main_connector: z.number().int().nonnegative(),
+    workspace_app: z.number().int().nonnegative(),
+    doctor: z.number().int().nonnegative(),
+    test_client: z.number().int().nonnegative(),
+    unknown: z.number().int().nonnegative(),
+  });
+}
+
 const workspaceSkillOutputSchema = z.object({
   name: z.string(),
   description: z.string(),
@@ -889,16 +900,49 @@ function sendJsonRpcError(
 
 function requestLogFields(
   req: Request,
-  config: ServerConfig,
+  _config: ServerConfig,
 ): Record<string, unknown> {
   return {
-    ip: requestIp(req, config.logging.trustProxy),
-    host: req.header("host"),
-    userAgent: req.header("user-agent"),
-    origin: req.header("origin"),
-    referer: req.header("referer"),
+    networkSource: req.header("cf-ray") ? "cloudflare" : "direct",
+    host: boundedHeader(req.header("host"), 120),
+    userAgentCategory: userAgentCategory(req.header("user-agent")),
+    originHost: safeUrlHost(req.header("origin")),
     contentLength: req.header("content-length"),
   };
+}
+
+function boundedHeader(
+  value: string | undefined,
+  maxLength: number,
+): string | undefined {
+  return value?.slice(0, maxLength);
+}
+
+function safeUrlHost(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL(value).host.slice(0, 120);
+  } catch {
+    return "invalid";
+  }
+}
+
+function userAgentCategory(value: string | undefined): string {
+  const lower = value?.toLowerCase() ?? "";
+  if (!lower) return "missing";
+  if (lower.includes("devspacedoctor")) return "devspace_doctor";
+  if (lower.includes("chatgpt") || lower.includes("openai")) return "openai";
+  if (lower.includes("cloudflare")) return "cloudflare";
+  if (lower.includes("curl")) return "curl";
+  if (lower.includes("node")) return "node";
+  if (
+    lower.includes("chrome") ||
+    lower.includes("safari") ||
+    lower.includes("firefox")
+  ) {
+    return "browser";
+  }
+  return "other";
 }
 
 function logToolCall(config: ServerConfig, fields: ToolLogFields): void {
@@ -1440,11 +1484,29 @@ function createMcpServer(
         worktreeRoot: z.string(),
         mcpSessions: z.object({
           active: z.number().int().nonnegative(),
+          highWaterMark: z.number().int().nonnegative(),
           created: z.number().int().nonnegative(),
+          initializeRequests: z.number().int().nonnegative(),
+          acquireRequests: z.number().int().nonnegative(),
+          reusedRequests: z.number().int().nonnegative(),
+          unknownSessionRequests: z.number().int().nonnegative(),
           closed: z.number().int().nonnegative(),
+          clientClosed: z.number().int().nonnegative(),
           expired: z.number().int().nonnegative(),
           capacityEvictions: z.number().int().nonnegative(),
           closeErrors: z.number().int().nonnegative(),
+          createdLastMinute: z.number().int().nonnegative(),
+          createdLastFiveMinutes: z.number().int().nonnegative(),
+          inFlightRequests: z.number().int().nonnegative(),
+          activeBySource: mcpSessionSourceCountsSchema(),
+          createdBySource: mcpSessionSourceCountsSchema(),
+          unknownRequestsByReason: z.object({
+            client: z.number().int().nonnegative(),
+            expired: z.number().int().nonnegative(),
+            capacity: z.number().int().nonnegative(),
+            shutdown: z.number().int().nonnegative(),
+            never_seen: z.number().int().nonnegative(),
+          }),
           idleTtlSeconds: z.number().positive(),
           maxSessions: z.number().int().positive(),
         }),
@@ -1580,7 +1642,7 @@ function createMcpServer(
         `Schema: ${TOOL_SCHEMA_REVISION} (${runtime.schemaFingerprint})`,
         `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
         `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
-        `MCP sessions: ${mcpSessions.active}/${mcpSessions.maxSessions} active; ${mcpSessions.expired} expired; ${mcpSessions.capacityEvictions} capacity evictions`,
+        `MCP sessions: ${mcpSessions.active}/${mcpSessions.maxSessions} active; high-water ${mcpSessions.highWaterMark}; created ${mcpSessions.createdLastMinute}/min; reused ${mcpSessions.reusedRequests}; unknown ${mcpSessions.unknownSessionRequests}; expired ${mcpSessions.expired}; capacity evictions ${mcpSessions.capacityEvictions}`,
         `Memory: RSS ${memory.rssMiB} MiB; heap ${memory.heapUsedMiB}/${memory.heapTotalMiB} MiB`,
         runtime.workspaceApp
           ? `Workspace App: ${runtime.workspaceApp.resourceUri} (${runtime.workspaceApp.buildFingerprint})`
@@ -4631,16 +4693,18 @@ export function createServer(
       ? undefined
       : resolveWorkspaceAppBuild(options.workspaceAppBuild);
   const mcpSessions = new McpSessionRegistry<Transport>({
-    onClosed: ({ sessionId, reason }) => {
+    onClosed: ({ sessionId, reason, source }) => {
       logEvent(config.logging, "info", "mcp_session_closed", {
         sessionIdPrefix: sessionIdPrefix(sessionId),
         reason,
+        source,
       });
     },
-    onCloseError: ({ sessionId, reason, error }) => {
+    onCloseError: ({ sessionId, reason, source, error }) => {
       logEvent(config.logging, "warn", "mcp_session_close_error", {
         sessionIdPrefix: sessionIdPrefix(sessionId),
         reason,
+        source,
         error: error instanceof Error ? error.message : String(error),
       });
     },
@@ -4811,6 +4875,7 @@ export function createServer(
       sessionIdPrefix: sessionIdPrefix(sessionId),
       isInitialize: initializeRequest,
     });
+    if (initializeRequest) mcpSessions.recordInitializeRequest();
 
     let transport: Transport | undefined;
     let acquiredSessionId: string | undefined;
@@ -4819,20 +4884,34 @@ export function createServer(
       if (sessionId) {
         transport = mcpSessions.acquire(sessionId);
         if (!transport) {
+          logEvent(config.logging, "warn", "mcp_session_unknown", {
+            requestId,
+            sessionIdPrefix: sessionIdPrefix(sessionId),
+            reason: mcpSessions.missingReason(sessionId),
+          });
           sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
           return;
         }
         acquiredSessionId = sessionId;
       } else if (initializeRequest) {
         initializingTransport = true;
+        const client = classifyMcpClient(req.body);
         const createdTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
-            mcpSessions.register(newSessionId, createdTransport, 1);
+            mcpSessions.register(
+              newSessionId,
+              createdTransport,
+              1,
+              client.source,
+            );
             acquiredSessionId = newSessionId;
             logEvent(config.logging, "info", "mcp_session_created", {
               requestId,
               sessionIdPrefix: sessionIdPrefix(newSessionId),
+              source: client.source,
+              clientName: client.clientName,
+              clientVersion: client.clientVersion,
               ...requestLogFields(req, config),
             });
           },

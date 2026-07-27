@@ -5,17 +5,34 @@ export const DEFAULT_MAX_MCP_SESSIONS = 256;
 export type McpSessionCloseReason =
   "client" | "expired" | "capacity" | "shutdown";
 
+export type McpSessionSource =
+  "main_connector" | "workspace_app" | "doctor" | "test_client" | "unknown";
+
+export type McpMissingSessionReason = McpSessionCloseReason | "never_seen";
+
 export interface CloseableMcpTransport {
   close(): Promise<void>;
 }
 
 export interface McpSessionSnapshot {
   active: number;
+  highWaterMark: number;
   created: number;
+  initializeRequests: number;
+  acquireRequests: number;
+  reusedRequests: number;
+  unknownSessionRequests: number;
   closed: number;
+  clientClosed: number;
   expired: number;
   capacityEvictions: number;
   closeErrors: number;
+  createdLastMinute: number;
+  createdLastFiveMinutes: number;
+  inFlightRequests: number;
+  activeBySource: Record<McpSessionSource, number>;
+  createdBySource: Record<McpSessionSource, number>;
+  unknownRequestsByReason: Record<McpMissingSessionReason, number>;
   idleTtlSeconds: number;
   maxSessions: number;
 }
@@ -25,6 +42,7 @@ interface McpSessionRecord<TTransport extends CloseableMcpTransport> {
   transport: TTransport;
   lastUsedAtMs: number;
   inFlightRequests: number;
+  source: McpSessionSource;
 }
 
 export interface McpSessionRegistryOptions {
@@ -36,10 +54,12 @@ export interface McpSessionRegistryOptions {
   onClosed?: (event: {
     sessionId: string;
     reason: McpSessionCloseReason;
+    source: McpSessionSource;
   }) => void;
   onCloseError?: (event: {
     sessionId: string;
     reason: McpSessionCloseReason;
+    source: McpSessionSource;
     error: unknown;
   }) => void;
 }
@@ -53,10 +73,23 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
   private readonly onCloseError?: McpSessionRegistryOptions["onCloseError"];
   private readonly sweepTimer?: NodeJS.Timeout;
   private created = 0;
+  private highWaterMark = 0;
+  private initializeRequests = 0;
+  private acquireRequests = 0;
+  private reusedRequests = 0;
+  private unknownSessionRequests = 0;
   private closed = 0;
+  private clientClosed = 0;
   private expired = 0;
   private capacityEvictions = 0;
   private closeErrors = 0;
+  private readonly createdAtMs: number[] = [];
+  private readonly createdBySource = emptySourceCounts();
+  private readonly closedSessionReasons = new Map<
+    string,
+    McpSessionCloseReason
+  >();
+  private readonly unknownRequestsByReason = emptyMissingReasonCounts();
   private stopped = false;
 
   constructor(options: McpSessionRegistryOptions = {}) {
@@ -82,6 +115,7 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
     sessionId: string,
     transport: TTransport,
     inFlightRequests = 0,
+    source: McpSessionSource = "unknown",
   ): void {
     if (this.stopped) {
       throw new Error("MCP session registry is closed.");
@@ -94,22 +128,43 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
       throw new Error("inFlightRequests must be a non-negative integer.");
     }
 
+    const registeredAtMs = this.now();
     this.sessions.set(sessionId, {
       sessionId,
       transport,
-      lastUsedAtMs: this.now(),
+      lastUsedAtMs: registeredAtMs,
       inFlightRequests,
+      source,
     });
     this.created += 1;
+    this.createdAtMs.push(registeredAtMs);
+    this.createdBySource[source] += 1;
     this.enforceCapacity(sessionId);
+    this.highWaterMark = Math.max(this.highWaterMark, this.sessions.size);
+  }
+
+  recordInitializeRequest(): void {
+    this.initializeRequests += 1;
   }
 
   acquire(sessionId: string): TTransport | undefined {
+    this.acquireRequests += 1;
     const session = this.sessions.get(sessionId);
-    if (!session) return undefined;
+    if (!session) {
+      this.unknownSessionRequests += 1;
+      const reason = this.closedSessionReasons.get(sessionId) ?? "never_seen";
+      this.unknownRequestsByReason[reason] += 1;
+      return undefined;
+    }
+    this.reusedRequests += 1;
     session.lastUsedAtMs = this.now();
     session.inFlightRequests += 1;
     return session.transport;
+  }
+
+  missingReason(sessionId: string): McpMissingSessionReason | undefined {
+    if (this.sessions.has(sessionId)) return undefined;
+    return this.closedSessionReasons.get(sessionId) ?? "never_seen";
   }
 
   release(sessionId: string): void {
@@ -145,13 +200,35 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
   }
 
   snapshot(): McpSessionSnapshot {
+    const currentTime = this.now();
+    this.pruneCreatedAt(currentTime - 5 * 60 * 1000);
+    const activeBySource = emptySourceCounts();
+    let inFlightRequests = 0;
+    for (const session of this.sessions.values()) {
+      activeBySource[session.source] += 1;
+      inFlightRequests += session.inFlightRequests;
+    }
     return {
       active: this.sessions.size,
+      highWaterMark: this.highWaterMark,
       created: this.created,
+      initializeRequests: this.initializeRequests,
+      acquireRequests: this.acquireRequests,
+      reusedRequests: this.reusedRequests,
+      unknownSessionRequests: this.unknownSessionRequests,
       closed: this.closed,
+      clientClosed: this.clientClosed,
       expired: this.expired,
       capacityEvictions: this.capacityEvictions,
       closeErrors: this.closeErrors,
+      createdLastMinute: this.createdAtMs.filter(
+        (createdAt) => createdAt > currentTime - 60 * 1000,
+      ).length,
+      createdLastFiveMinutes: this.createdAtMs.length,
+      inFlightRequests,
+      activeBySource,
+      createdBySource: { ...this.createdBySource },
+      unknownRequestsByReason: { ...this.unknownRequestsByReason },
       idleTtlSeconds: this.idleTtlMs / 1000,
       maxSessions: this.maxSessions,
     };
@@ -199,17 +276,28 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
   ): void {
     if (this.sessions.get(session.sessionId) !== session) return;
     this.sessions.delete(session.sessionId);
+    this.rememberClosedSession(session.sessionId, reason);
     this.closed += 1;
+    if (reason === "client") this.clientClosed += 1;
     if (reason === "expired") this.expired += 1;
     if (reason === "capacity") this.capacityEvictions += 1;
-    this.onClosed?.({ sessionId: session.sessionId, reason });
+    this.onClosed?.({
+      sessionId: session.sessionId,
+      reason,
+      source: session.source,
+    });
     if (closeTransport) {
       try {
         void session.transport.close().catch((error) => {
-          this.recordCloseError(session.sessionId, reason, error);
+          this.recordCloseError(
+            session.sessionId,
+            reason,
+            session.source,
+            error,
+          );
         });
       } catch (error) {
-        this.recordCloseError(session.sessionId, reason, error);
+        this.recordCloseError(session.sessionId, reason, session.source, error);
       }
     }
   }
@@ -217,11 +305,56 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
   private recordCloseError(
     sessionId: string,
     reason: McpSessionCloseReason,
+    source: McpSessionSource,
     error: unknown,
   ): void {
     this.closeErrors += 1;
-    this.onCloseError?.({ sessionId, reason, error });
+    this.onCloseError?.({ sessionId, reason, source, error });
   }
+
+  private rememberClosedSession(
+    sessionId: string,
+    reason: McpSessionCloseReason,
+  ): void {
+    this.closedSessionReasons.delete(sessionId);
+    this.closedSessionReasons.set(sessionId, reason);
+    while (this.closedSessionReasons.size > this.maxSessions * 4) {
+      const oldest = this.closedSessionReasons.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.closedSessionReasons.delete(oldest);
+    }
+  }
+
+  private pruneCreatedAt(cutoffMs: number): void {
+    let firstRetained = 0;
+    while (
+      firstRetained < this.createdAtMs.length &&
+      this.createdAtMs[firstRetained] <= cutoffMs
+    ) {
+      firstRetained += 1;
+    }
+    if (firstRetained > 0) this.createdAtMs.splice(0, firstRetained);
+  }
+}
+
+function emptySourceCounts(): Record<McpSessionSource, number> {
+  return {
+    main_connector: 0,
+    workspace_app: 0,
+    doctor: 0,
+    test_client: 0,
+    unknown: 0,
+  };
+}
+
+function emptyMissingReasonCounts(): Record<McpMissingSessionReason, number> {
+  return {
+    client: 0,
+    expired: 0,
+    capacity: 0,
+    shutdown: 0,
+    never_seen: 0,
+  };
 }
 
 function assertPositiveInteger(value: number, name: string): void {

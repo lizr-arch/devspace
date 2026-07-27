@@ -29,6 +29,9 @@ assert.equal(ttlRegistry.sweep(), 1);
 assert.equal(ttlRegistry.snapshot().active, 0);
 assert.equal(ttlRegistry.snapshot().expired, 1);
 assert.equal(ttlTransport.closeCalls, 1);
+assert.equal(ttlRegistry.acquire("ttl"), undefined);
+assert.equal(ttlRegistry.snapshot().unknownSessionRequests, 1);
+assert.equal(ttlRegistry.snapshot().unknownRequestsByReason.expired, 1);
 
 now = 0;
 const activeRegistry = new McpSessionRegistry<FakeTransport>({
@@ -69,6 +72,7 @@ capacityRegistry.register("middle", middleTransport);
 now = 2;
 capacityRegistry.register("newest", newestTransport);
 assert.equal(capacityRegistry.snapshot().active, 2);
+assert.equal(capacityRegistry.snapshot().highWaterMark, 2);
 assert.equal(capacityRegistry.snapshot().capacityEvictions, 1);
 assert.equal(oldestTransport.closeCalls, 1);
 assert.equal(middleTransport.closeCalls, 0);
@@ -106,6 +110,7 @@ assert.equal(
   false,
 );
 assert.equal(clientRegistry.snapshot().closed, 1);
+assert.equal(clientRegistry.snapshot().clientClosed, 1);
 assert.equal(clientTransport.closeCalls, 0);
 
 const shutdownRegistry = new McpSessionRegistry<FakeTransport>({
@@ -150,3 +155,85 @@ assert.equal(
   soakTransports.reduce((total, transport) => total + transport.closeCalls, 0),
   2_000,
 );
+
+now = 0;
+const reuseRegistry = new McpSessionRegistry<FakeTransport>({
+  idleTtlMs: 300_000,
+  maxSessions: 10,
+  now: () => now,
+  autoSweep: false,
+});
+reuseRegistry.recordInitializeRequest();
+reuseRegistry.recordInitializeRequest();
+reuseRegistry.register("reuse", new FakeTransport(), 0, "main_connector");
+for (let call = 0; call < 30; call += 1) {
+  assert.ok(reuseRegistry.acquire("reuse"));
+  now += 1_000;
+  reuseRegistry.release("reuse");
+}
+const reuseSnapshot = reuseRegistry.snapshot();
+assert.equal(reuseSnapshot.initializeRequests, 2);
+assert.equal(reuseSnapshot.acquireRequests, 30);
+assert.equal(reuseSnapshot.reusedRequests, 30);
+assert.equal(reuseSnapshot.created, 1);
+assert.equal(reuseSnapshot.active, 1);
+assert.equal(reuseSnapshot.highWaterMark, 1);
+assert.equal(reuseSnapshot.activeBySource.main_connector, 1);
+assert.equal(reuseSnapshot.createdBySource.main_connector, 1);
+assert.equal(reuseSnapshot.createdLastMinute, 1);
+assert.equal(reuseSnapshot.createdLastFiveMinutes, 1);
+
+const concurrentRegistry = new McpSessionRegistry<FakeTransport>({
+  idleTtlMs: 100,
+  maxSessions: 3,
+  now: () => now,
+  autoSweep: false,
+});
+concurrentRegistry.register("app", new FakeTransport(), 0, "workspace_app");
+concurrentRegistry.register("doctor", new FakeTransport(), 0, "doctor");
+concurrentRegistry.register("test", new FakeTransport(), 0, "test_client");
+assert.ok(concurrentRegistry.acquire("app"));
+assert.ok(concurrentRegistry.acquire("doctor"));
+assert.ok(concurrentRegistry.acquire("test"));
+now += 1_000;
+assert.equal(concurrentRegistry.sweep(), 0);
+assert.equal(concurrentRegistry.snapshot().inFlightRequests, 3);
+concurrentRegistry.release("app");
+concurrentRegistry.release("doctor");
+concurrentRegistry.release("test");
+assert.equal(concurrentRegistry.snapshot().inFlightRequests, 0);
+assert.deepEqual(concurrentRegistry.snapshot().activeBySource, {
+  main_connector: 0,
+  workspace_app: 1,
+  doctor: 1,
+  test_client: 1,
+  unknown: 0,
+});
+
+class RejectingTransport implements CloseableMcpTransport {
+  async close(): Promise<void> {
+    throw new Error("expected close failure");
+  }
+}
+const closeErrors: string[] = [];
+const failureRegistry = new McpSessionRegistry<RejectingTransport>({
+  idleTtlMs: 1,
+  now: () => now,
+  autoSweep: false,
+  onCloseError: ({ error }) => {
+    closeErrors.push(error instanceof Error ? error.message : String(error));
+  },
+});
+failureRegistry.register("reject", new RejectingTransport());
+now += 1;
+failureRegistry.sweep();
+await new Promise<void>((resolve) => setImmediate(resolve));
+assert.equal(failureRegistry.snapshot().closeErrors, 1);
+assert.deepEqual(closeErrors, ["expected close failure"]);
+
+const unknownRegistry = new McpSessionRegistry<FakeTransport>({
+  autoSweep: false,
+});
+assert.equal(unknownRegistry.acquire("never-seen"), undefined);
+assert.equal(unknownRegistry.snapshot().unknownSessionRequests, 1);
+assert.equal(unknownRegistry.snapshot().unknownRequestsByReason.never_seen, 1);
