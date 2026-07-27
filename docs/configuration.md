@@ -123,9 +123,10 @@ remote write without URL bindings fails closed.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `off` | Disables Workspace App metadata for every tool. |
+| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to workspace context, Project Memory, and `show_changes`. |
+| `review_only` | Recommended for production. Attaches the Workspace App only to the centralized diff, artifact, media, model, and capture review allowlist. |
+| `full` | Compatibility default. Attaches the Workspace App to every tool definition that supports it. |
 
 ## Skills
 

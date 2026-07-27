@@ -162,6 +162,17 @@ http://127.0.0.1:7676
 不要改为 `0.0.0.0`。Cloudflare Tunnel 在同一台机器通过 IPv4 loopback
 访问它。
 
+生产 Connector 建议配置：
+
+```text
+DEVSPACE_WIDGETS=review_only
+```
+
+该模式只为 Diff、Artifact、图片、模型、音频和帧截图审阅工具附加
+Workspace App。普通 workspace、read、search、Git 修改和后台任务工具仍
+返回完整文本与 structuredContent，但不再为每次结果加载 App。`off`、
+`changes`、`full` 仍保留，其中 `full` 主要用于兼容性调试。
+
 ## 7. 完整验证
 
 使用第二个 PowerShell 窗口：

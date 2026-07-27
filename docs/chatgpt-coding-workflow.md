@@ -126,8 +126,9 @@ By default, `DEVSPACE_WIDGETS=full`.
 In that mode, DevSpace attaches widget UI to the exposed workspace, file, edit,
 and shell tools. The aggregate `show_changes` tool is not exposed by default.
 
-Use `DEVSPACE_WIDGETS=off` to disable widget UI, or `DEVSPACE_WIDGETS=changes`
-to expose the aggregate show-changes flow.
+Use `DEVSPACE_WIDGETS=off` to disable widget UI,
+`DEVSPACE_WIDGETS=review_only` for the production rich-review allowlist, or
+`DEVSPACE_WIDGETS=changes` to expose the aggregate show-changes flow.
 
 ## Shell Use
 

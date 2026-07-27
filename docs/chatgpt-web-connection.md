@@ -163,6 +163,13 @@ the exact versioned MCP App resource advertised by those tools, downloading its
 entry JavaScript and stylesheets, validating their CORS/CORP headers, and
 calling `open_workspace` through the public tunnel.
 
+For the ChatGPT production connector, prefer
+`DEVSPACE_WIDGETS=review_only`. It attaches the Workspace App only to the
+bounded rich-review allowlist; ordinary read, search, workspace, Git mutation,
+and background-job tools still return text and structured content without
+creating per-result App frames. Use `full` only for compatibility debugging,
+`changes` for the aggregate changes card, or `off` for plain MCP output.
+
 Each UI build uses a fingerprinted resource URI. If the UI bundle, package
 version, or tool schema revision changes, restart DevSpace and refresh the App
 actions before testing in a new chat. `devspace_info` reports the current

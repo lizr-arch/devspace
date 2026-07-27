@@ -302,15 +302,30 @@ If a skill appears in `open_workspace`, the model must read that skill's
 
 ## Review Card Does Not Appear
 
-Per-tool widget cards are enabled by default with:
+The compatibility default remains per-tool cards:
 
 ```bash
 DEVSPACE_WIDGETS=full
 ```
 
+For production connectors, prefer:
+
+```bash
+DEVSPACE_WIDGETS=review_only
+```
+
+`review_only` attaches the Workspace App only to the centralized allowlist of
+diff, artifact, image, model, audio, and frame-capture review tools. Ordinary
+read, search, workspace, Git mutation, and job tools remain plain MCP results,
+which reduces iframe and MCP App churn without reducing tool functionality.
+
 The aggregate `show_changes` tool is only exposed with
 `DEVSPACE_WIDGETS=changes`. Plain MCP clients may ignore ChatGPT Apps widget
 metadata and only show text results.
+
+`DEVSPACE_WIDGETS=off` attaches no Workspace App. Use `full` only for
+compatibility debugging or clients that require a card for every supported
+tool.
 
 When widgets are enabled, DevSpace refuses to start if
 `dist/ui/.vite/manifest.json` or the manifest's entry JavaScript/CSS is missing.

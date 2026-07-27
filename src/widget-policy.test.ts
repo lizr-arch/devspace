@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { REVIEW_ONLY_WIDGET_TOOLS, shouldAttachWidget } from "./server.js";
 
 const richTools = new Set<string>(REVIEW_ONLY_WIDGET_TOOLS);
@@ -57,3 +58,19 @@ assert.deepEqual([...richTools].sort(), [
   "publish_artifact",
   "render_model_preview",
 ]);
+
+for (const path of [
+  "README.md",
+  "LLM-SETUP.md",
+  "docs/gotchas.md",
+  "docs/cloudflare-named-tunnel.md",
+  "docs/chatgpt-web-connection.md",
+  "docs/configuration.md",
+  ".env.example",
+]) {
+  assert.match(
+    readFileSync(path, "utf8"),
+    /DEVSPACE_WIDGETS=review_only|`review_only`/,
+    `${path} should document review_only`,
+  );
+}

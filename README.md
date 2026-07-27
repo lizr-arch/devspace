@@ -189,6 +189,12 @@ dynamic client registration, completes the Owner password OAuth flow, exchanges
 an access token, initializes MCP over the public tunnel, lists tools, and calls
 `open_workspace` as a real external client.
 
+For a production MCP connector, set `DEVSPACE_WIDGETS=review_only`. This keeps
+rich cards for bounded diff, artifact, media, model, and capture review tools
+while ordinary workspace, read, search, Git mutation, and job calls remain
+plain MCP results. `off`, `changes`, and the compatibility-oriented `full` mode
+remain available.
+
 A verified quick path is Cloudflare Quick Tunnel:
 
 ```bash

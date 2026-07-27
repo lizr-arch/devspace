@@ -204,3 +204,6 @@ The same setup rules apply. When widgets are enabled, startup validates the
 Vite manifest and its entry JavaScript/CSS immediately. Run `npm run build`
 again if startup reports that the Workspace App manifest or an asset is
 unavailable.
+
+For production connectors, prefer `DEVSPACE_WIDGETS=review_only`; use `full`
+only when compatibility testing requires cards on every supported tool.

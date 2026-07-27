@@ -488,3 +488,8 @@ launchctl print "gui/$(id -u)/com.example.cloudflared-devspace"
 Cloudflare normally maintains multiple outbound connections and reconnects
 individual ones when necessary. Judge availability with repeated public probes
 and the full-loop doctor, not a single connector log line.
+
+For the production service, set `DEVSPACE_WIDGETS=review_only`. This preserves
+rich diff, artifact, media, model, and capture review while avoiding Workspace
+App metadata on ordinary tools. The tunnel hostname, route, OAuth settings, and
+Cloudflare token do not need to change when switching this mode.
