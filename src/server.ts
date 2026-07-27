@@ -69,6 +69,13 @@ import {
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import {
+  LiveRequestMonitor,
+  ProcessCpuSampler,
+  liveMonitorHtml,
+  requireLocalMonitor,
+  setMonitorSecurityHeaders,
+} from "./live-monitor.js";
 import { importPng, MAX_PNG_IMPORT_BYTES } from "./png-import.js";
 import { importAsset, MAX_IMPORT_BYTES } from "./asset-import.js";
 import { inspectArtifact } from "./artifact-inspector.js";
@@ -4782,6 +4789,8 @@ export function createServer(
   const jobs = new BackgroundJobManager(config.stateDir, runners, artifacts);
   const games = new GameSessionManager(config.stateDir, runners);
   const inspectors = new ExternalInspectorManager(config.stateDir, runners);
+  const requestMonitor = new LiveRequestMonitor();
+  const cpuSampler = new ProcessCpuSampler();
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", 1);
@@ -4790,9 +4799,14 @@ export function createServer(
   app.use((req, res, next) => {
     const requestId = randomUUID();
     const startedAt = performance.now();
+    const finishMonitoring = requestMonitor.begin(requestPath(req));
     res.locals.requestId = requestId;
 
-    res.on("finish", () => {
+    let completed = false;
+    const completeRequest = () => {
+      if (completed) return;
+      completed = true;
+      finishMonitoring(res.statusCode, performance.now() - startedAt);
       const path = requestPath(req);
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
@@ -4805,9 +4819,43 @@ export function createServer(
         durationMs: Math.round(performance.now() - startedAt),
         ...requestLogFields(req, config),
       });
-    });
+    };
+    res.once("finish", completeRequest);
+    res.once("close", completeRequest);
 
     next();
+  });
+
+  app.get("/monitor", (req, res) => {
+    if (!requireLocalMonitor(req, res)) return;
+    setMonitorSecurityHeaders(res);
+    res.type("html").send(liveMonitorHtml());
+  });
+
+  app.get("/monitor/api", (req, res) => {
+    if (!requireLocalMonitor(req, res)) return;
+    setMonitorSecurityHeaders(res);
+    res.json({
+      observedAt: new Date().toISOString(),
+      service: {
+        name: "devspace",
+        version: PACKAGE_VERSION,
+        bootId: runtime.bootId,
+        startedAt: runtime.startedAt,
+        uptimeSeconds: Math.max(
+          0,
+          Math.round((Date.now() - Date.parse(runtime.startedAt)) / 1_000),
+        ),
+      },
+      process: {
+        pid: process.pid,
+        cpuPercent: cpuSampler.snapshot(),
+      },
+      memory: processMemorySnapshot(),
+      requests: requestMonitor.snapshot(),
+      sessions: mcpSessions.snapshot(),
+      jobs: jobs.monitorSnapshot(),
+    });
   });
 
   app.get("/artifacts/:token", async (req, res) => {

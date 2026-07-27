@@ -178,6 +178,14 @@ export interface JobSnapshot extends PersistedJob {
   nextOutputOffsetBytes?: number;
 }
 
+export interface BackgroundJobMonitorSnapshot {
+  total: number;
+  active: number;
+  maxConcurrent: number;
+  byStatus: Record<JobStatus, number>;
+  activeByRunner: Record<JobRunner, number>;
+}
+
 export class BackgroundJobManager {
   private readonly jobs = new Map<string, LiveJob>();
   private readonly jobsDir: string;
@@ -390,6 +398,37 @@ export class BackgroundJobManager {
     this.persist(job);
     this.terminate(job);
     return publicSnapshot(job);
+  }
+
+  monitorSnapshot(): BackgroundJobMonitorSnapshot {
+    this.initialize();
+    const byStatus = Object.fromEntries(
+      [
+        "running",
+        "cancelling",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "interrupted",
+      ].map((status) => [status, 0]),
+    ) as Record<JobStatus, number>;
+    const activeByRunner = Object.fromEntries(
+      JOB_RUNNERS.map((runner) => [runner, 0]),
+    ) as Record<JobRunner, number>;
+    for (const job of this.jobs.values()) {
+      byStatus[job.status] += 1;
+      if (job.status === "running" || job.status === "cancelling") {
+        activeByRunner[job.runner] += 1;
+      }
+    }
+    return {
+      total: this.jobs.size,
+      active: this.runningCount(),
+      maxConcurrent: MAX_CONCURRENT_JOBS,
+      byStatus,
+      activeByRunner,
+    };
   }
 
   close(): void {
