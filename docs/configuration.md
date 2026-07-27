@@ -31,19 +31,39 @@ npx @waishnav/devspace config set toolMode full
 
 ## Core Environment Variables
 
-| Variable                     | Purpose                                                                                                    |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `HOST`                       | Local bind host. Defaults to `127.0.0.1`.                                                                  |
-| `PORT`                       | Local port. Defaults to `7676`.                                                                            |
-| `DEVSPACE_ALLOWED_ROOTS`     | Comma-separated local roots that workspaces may open.                                                      |
-| `DEVSPACE_PUBLIC_BASE_URL`   | Public origin for the MCP endpoint and built-in OAuth pages, without `/mcp`.                               |
-| `DEVSPACE_ALLOWED_HOSTS`     | Optional Host header allowlist override.                                                                   |
-| `DEVSPACE_TOOL_MODE`         | `minimal` (default) or `full`; full exposes dedicated grep, glob, and ls tools.                            |
-| `DEVSPACE_TRUST_PROXY`       | Set to `1` only when DevSpace is behind one local tunnel/reverse-proxy hop.                                |
-| `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters.                                         |
-| `DEVSPACE_READ_ONLY`         | Set to `1` to expose a read-only MCP surface with no mutation, publication, Runner, or game-session tools. |
-| `DEVSPACE_WORKTREE_ROOT`     | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`.                                  |
-| `DEVSPACE_STATE_DIR`         | Directory for SQLite state. Defaults to `~/.local/share/devspace`.                                         |
+| Variable                                      | Purpose                                                                                                    |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `HOST`                                        | Local bind host. Defaults to `127.0.0.1`.                                                                  |
+| `PORT`                                        | Local port. Defaults to `7676`.                                                                            |
+| `DEVSPACE_ALLOWED_ROOTS`                      | Comma-separated local roots that workspaces may open.                                                      |
+| `DEVSPACE_PUBLIC_BASE_URL`                    | Public origin for the MCP endpoint and built-in OAuth pages, without `/mcp`.                               |
+| `DEVSPACE_ALLOWED_HOSTS`                      | Optional Host header allowlist override.                                                                   |
+| `DEVSPACE_TOOL_MODE`                          | `minimal` (default) or `full`; full exposes dedicated grep, glob, and ls tools.                            |
+| `DEVSPACE_TRUST_PROXY`                        | Set to `1` only when DevSpace is behind one local tunnel/reverse-proxy hop.                                |
+| `DEVSPACE_OAUTH_OWNER_TOKEN`                  | Owner password for OAuth approval. Must be at least 16 characters.                                         |
+| `DEVSPACE_READ_ONLY`                          | Set to `1` to expose a read-only MCP surface with no mutation, publication, Runner, or game-session tools. |
+| `DEVSPACE_WORKTREE_ROOT`                      | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`.                                  |
+| `DEVSPACE_STATE_DIR`                          | Directory for SQLite state. Defaults to `~/.local/share/devspace`.                                         |
+| `DEVSPACE_MCP_TRANSPORT_MODE`                 | `stateless` (default) or `stateful`. Stateless avoids retaining one server per client session.             |
+| `DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS`       | Stateful idle transport lifetime. Defaults to `300`; allowed range `30-3600`.                              |
+| `DEVSPACE_MCP_SESSION_MAX_SESSIONS`           | Maximum retained MCP transports. Defaults to `64`; allowed range `8-1024`.                                 |
+| `DEVSPACE_MCP_SESSION_SWEEP_INTERVAL_SECONDS` | Stateful idle-session sweep interval. Defaults to `30`; allowed range `5-300`.                             |
+
+The transport mode can be persisted as `mcpTransportMode`; stateful limits are
+persisted under `mcpSessions` in `~/.devspace/config.json`. Set them with:
+
+```bash
+devspace config set mcpTransportMode stateless
+devspace config set mcpSessionIdleTtlSeconds 300
+devspace config set mcpSessionMaxSessions 64
+devspace config set mcpSessionSweepIntervalSeconds 30
+```
+
+Stateless mode creates and closes one MCP server per HTTP POST and returns 405
+for GET/DELETE, matching the SDK's stateless Streamable HTTP pattern. Use
+stateful mode only when a client requires server-sent event streams. In stateful
+mode, the sweep interval must not exceed the idle TTL, and the capacity limit is
+a hard safety boundary.
 
 ## OAuth
 

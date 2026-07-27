@@ -207,6 +207,39 @@ export class RunnerRegistry {
     };
   }
 
+  async resolveExecutable(
+    name: string,
+    executable: string,
+    versionArgs?: string[],
+  ): Promise<ResolvedRunner> {
+    const definition = this.getDefinition(name);
+    if (!definition.enabled) {
+      throw new Error(`RUNNER_UNAVAILABLE: Runner ${name} is disabled.`);
+    }
+    if (!definition.supportedPlatforms.includes(this.platform)) {
+      throw new Error(
+        `RUNNER_UNAVAILABLE: Runner ${name} is not supported on ${this.platform}.`,
+      );
+    }
+
+    const environment = environmentForExecutable(
+      executable,
+      this.env,
+      this.platform,
+    );
+    const version = await probeVersion(
+      executable,
+      versionArgs ?? definition.versionArgs,
+      environment,
+    ).catch(() => undefined);
+    return {
+      definition,
+      executable,
+      environment,
+      version,
+    };
+  }
+
   validateArguments(
     name: string,
     args: string[],

@@ -444,24 +444,27 @@ export async function probePublicExternalClientFlow(
     sessionId = initialize.headers?.get("mcp-session-id") ?? undefined;
     const initializeResult = asRecord(asRecord(initializeJson)?.result);
 
+    const statelessTransport = config.mcpTransportMode === "stateless";
     initializeCheck =
       initialize.ok &&
-      sessionId &&
+      (statelessTransport || Boolean(sessionId)) &&
       initializeResult?.protocolVersion === "2024-11-05"
         ? okCheck(
             initialize.status,
-            "External MCP initialize succeeded through the public URL.",
+            statelessTransport
+              ? "External stateless MCP initialize succeeded through the public URL."
+              : "External MCP initialize succeeded through the public URL.",
           )
         : initialize.ok
           ? {
               ok: false,
               status: initialize.status,
               detail:
-                "MCP initialize responded, but no MCP session or expected protocolVersion was returned.",
+                "MCP initialize responded, but its transport/session contract or expected protocolVersion was not returned.",
             }
           : failedCheck(initialize, "MCP initialize did not succeed.");
 
-    if (sessionId) {
+    if (sessionId || statelessTransport) {
       const toolsList = await postMcpJsonRpc(
         info.publicMcpUrl,
         accessToken,
@@ -788,7 +791,10 @@ export async function probePublicExternalClientFlow(
                 }
               : failedCheck(devspaceInfo, "MCP devspace_info did not succeed.");
 
-        if (input.sessionReuseCalls || input.sessionConcurrentCalls) {
+        if (
+          !statelessTransport &&
+          (input.sessionReuseCalls || input.sessionConcurrentCalls)
+        ) {
           const requestedCalls = input.sessionReuseCalls ?? 0;
           const concurrentCalls = input.sessionConcurrentCalls ?? 0;
           if (

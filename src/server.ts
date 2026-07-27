@@ -27,6 +27,10 @@ import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
 import { attachRegisteredToolName } from "./tool-result-metadata.js";
 import { classifyMcpClient } from "./mcp-client-classification.js";
 import {
+  createShutdownHandler,
+  type ShutdownReason,
+} from "./process-shutdown.js";
+import {
   logEvent,
   requestPath,
   commandPreview,
@@ -1483,10 +1487,12 @@ function createMcpServer(
         allowedRoots: z.array(z.string()),
         worktreeRoot: z.string(),
         mcpSessions: z.object({
+          transportMode: z.enum(["stateful", "stateless"]),
           active: z.number().int().nonnegative(),
           highWaterMark: z.number().int().nonnegative(),
           created: z.number().int().nonnegative(),
           initializeRequests: z.number().int().nonnegative(),
+          statelessRequests: z.number().int().nonnegative(),
           acquireRequests: z.number().int().nonnegative(),
           reusedRequests: z.number().int().nonnegative(),
           unknownSessionRequests: z.number().int().nonnegative(),
@@ -1642,7 +1648,7 @@ function createMcpServer(
         `Schema: ${TOOL_SCHEMA_REVISION} (${runtime.schemaFingerprint})`,
         `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
         `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
-        `MCP sessions: ${mcpSessions.active}/${mcpSessions.maxSessions} active; high-water ${mcpSessions.highWaterMark}; created ${mcpSessions.createdLastMinute}/min; reused ${mcpSessions.reusedRequests}; unknown ${mcpSessions.unknownSessionRequests}; expired ${mcpSessions.expired}; capacity evictions ${mcpSessions.capacityEvictions}`,
+        `MCP transport: ${mcpSessions.transportMode}; sessions ${mcpSessions.active}/${mcpSessions.maxSessions} active; high-water ${mcpSessions.highWaterMark}; created ${mcpSessions.createdLastMinute}/min; stateless requests ${mcpSessions.statelessRequests}; reused ${mcpSessions.reusedRequests}; unknown ${mcpSessions.unknownSessionRequests}; expired ${mcpSessions.expired}; capacity evictions ${mcpSessions.capacityEvictions}`,
         `Memory: RSS ${memory.rssMiB} MiB; heap ${memory.heapUsedMiB}/${memory.heapTotalMiB} MiB`,
         runtime.workspaceApp
           ? `Workspace App: ${runtime.workspaceApp.resourceUri} (${runtime.workspaceApp.buildFingerprint})`
@@ -4693,6 +4699,10 @@ export function createServer(
       ? undefined
       : resolveWorkspaceAppBuild(options.workspaceAppBuild);
   const mcpSessions = new McpSessionRegistry<Transport>({
+    transportMode: config.mcpTransportMode,
+    idleTtlMs: config.mcpSessionIdleTtlMs,
+    maxSessions: config.mcpSessionMaxSessions,
+    sweepIntervalMs: config.mcpSessionSweepIntervalMs,
     onClosed: ({ sessionId, reason, source }) => {
       logEvent(config.logging, "info", "mcp_session_closed", {
         sessionIdPrefix: sessionIdPrefix(sessionId),
@@ -4877,6 +4887,71 @@ export function createServer(
     });
     if (initializeRequest) mcpSessions.recordInitializeRequest();
 
+    if (config.mcpTransportMode === "stateless") {
+      mcpSessions.recordStatelessRequest();
+      if (req.method !== "POST") {
+        sendJsonRpcError(res, 405, -32000, "Method not allowed");
+        return;
+      }
+
+      if (initializeRequest) {
+        const client = classifyMcpClient(req.body);
+        logEvent(config.logging, "info", "mcp_stateless_initialize", {
+          requestId,
+          source: client.source,
+          clientName: client.clientName,
+          clientVersion: client.clientVersion,
+          ...requestLogFields(req, config),
+        });
+      }
+
+      const statelessTransport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+      const statelessServer = createMcpServer(
+        config,
+        workspaces,
+        reviewCheckpoints,
+        jobs,
+        games,
+        inspectors,
+        runners,
+        artifacts,
+        publisher,
+        runtime,
+        workspaceApp,
+      );
+      let statelessClosed = false;
+      const closeStatelessServer = (): void => {
+        if (statelessClosed) return;
+        statelessClosed = true;
+        void statelessServer.close().catch((error) => {
+          logEvent(config.logging, "warn", "mcp_stateless_close_error", {
+            requestId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      };
+      res.once("finish", closeStatelessServer);
+      res.once("close", closeStatelessServer);
+
+      try {
+        await statelessServer.connect(statelessTransport);
+        await statelessTransport.handleRequest(req, res, req.body);
+      } catch (error) {
+        logEvent(config.logging, "error", "mcp_request_error", {
+          requestId,
+          transportMode: "stateless",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (!res.headersSent) {
+          sendJsonRpcError(res, 500, -32603, "Internal server error");
+        }
+        closeStatelessServer();
+      }
+      return;
+    }
+
     let transport: Transport | undefined;
     let acquiredSessionId: string | undefined;
     let initializingTransport = false;
@@ -5018,18 +5093,20 @@ if (await isMainModule()) {
     );
   });
 
-  const shutdown = (reason: string, err?: Error) => {
-    if (err) {
+  const shutdown = createShutdownHandler({
+    httpServer,
+    closeResources: close,
+    exit: (code) => process.exit(code),
+    logCrash: (reason: ShutdownReason, error: Error) => {
       const ts = new Date().toISOString();
-      const label = reason === "uncaughtException" ? "UNCAUGHT EXCEPTION" : "UNHANDLED REJECTION";
+      const label =
+        reason === "uncaughtException"
+          ? "UNCAUGHT EXCEPTION"
+          : "UNHANDLED REJECTION";
       console.error(`[${ts}] ${label}`);
-      console.error(err.stack ?? err.message ?? String(err));
-    }
-    httpServer.close(() => {
-      close();
-      process.exit(reason === "SIGTERM" || reason === "SIGINT" ? 0 : 1);
-    });
-  };
+      console.error(error.stack ?? error.message ?? String(error));
+    },
+  });
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
   process.on("uncaughtException", (err) => shutdown("uncaughtException", err));

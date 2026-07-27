@@ -8,10 +8,12 @@ import {
   appendFileSync,
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join, dirname, delimiter } from "node:path";
@@ -38,30 +40,55 @@ export {
 };
 
 // ---------------------------------------------------------------------------
-// Workspace .venv detection — P0 fix: pytest (and future python runners)
-// should use the workspace's virtualenv, not the DevSpace host's python.
-// Walks up from workspaceRoot (max 5 levels) looking for .venv or venv.
+// Workspace .venv detection — pytest should use project dependencies without
+// automatically reaching outside the approved workspace root.
 // ---------------------------------------------------------------------------
 const VENV_CANDIDATES = [".venv", "venv"];
-const MAX_VENV_WALK_DEPTH = 5;
 
-function findWorkspaceVenvPython(
+export interface WorkspacePytestInvocation {
+  executable: string;
+  argsPrefix: string[];
+  venvRoot: string;
+  venvScripts: string;
+}
+
+export function resolveWorkspacePytestInvocation(
   workspaceRoot: string,
-  platform: string,
-): string | undefined {
-  let dir = workspaceRoot;
-  for (let i = 0; i < MAX_VENV_WALK_DEPTH; i++) {
-    for (const name of VENV_CANDIDATES) {
-      const python = join(
-        dir,
-        name,
-        platform === "win32" ? join("Scripts", "python.exe") : join("bin", "python"),
-      );
-      if (existsSync(python)) return python;
+  platform: NodeJS.Platform = process.platform,
+): WorkspacePytestInvocation | undefined {
+  for (const name of VENV_CANDIDATES) {
+    const venvRoot = join(workspaceRoot, name);
+    const venvScripts = join(
+      venvRoot,
+      platform === "win32" ? "Scripts" : "bin",
+    );
+    const python = join(
+      venvScripts,
+      platform === "win32" ? "python.exe" : "python",
+    );
+    if (!existsSync(python)) continue;
+
+    try {
+      // Reject a venv directory that is itself redirected outside the approved
+      // workspace. The python launcher may still be a normal system-Python
+      // symlink, as created by standard venv tooling.
+      if (
+        lstatSync(venvRoot).isSymbolicLink() ||
+        lstatSync(venvScripts).isSymbolicLink() ||
+        !statSync(python).isFile()
+      ) {
+        continue;
+      }
+    } catch {
+      continue;
     }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+
+    return {
+      executable: python,
+      argsPrefix: ["-m", "pytest"],
+      venvRoot,
+      venvScripts,
+    };
   }
   return undefined;
 }
@@ -196,7 +223,20 @@ export class BackgroundJobManager {
       throw new Error("Job label must be at most 200 characters.");
     }
 
-    const resolvedRunner = await this.runners.resolve(input.runner);
+    const workspacePytest =
+      input.runner === "pytest"
+        ? resolveWorkspacePytestInvocation(
+            input.workspaceRoot,
+            process.platform,
+          )
+        : undefined;
+    const resolvedRunner = workspacePytest
+      ? await this.runners.resolveExecutable(
+          input.runner,
+          workspacePytest.executable,
+          [...workspacePytest.argsPrefix, "--version"],
+        )
+      : await this.runners.resolve(input.runner);
     const artifactBaseline = input.artifactRoots
       ? this.artifacts.captureBaseline(input.workspaceRoot, input.artifactRoots)
       : undefined;
@@ -230,9 +270,8 @@ export class BackgroundJobManager {
     try {
       const processToken = randomUUID();
 
-      // P0: for python-based runners (pytest), prefer the workspace's
-      // .venv so project dependencies (tiktoken, etc.) are available.
       let executable = resolvedRunner.executable;
+      let args = input.args;
       const env: Record<string, string> = {
         ...resolvedRunner.environment,
         ...validatedJobEnvironment(input.environment),
@@ -240,27 +279,18 @@ export class BackgroundJobManager {
         DEVSPACE_PROCESS_TOKEN: processToken,
       };
 
-      if (input.runner === "pytest") {
-        const venvPython = findWorkspaceVenvPython(
-          input.workspaceRoot,
-          process.platform,
+      if (workspacePytest) {
+        executable = workspacePytest.executable;
+        args = [...workspacePytest.argsPrefix, ...input.args];
+        env.VIRTUAL_ENV = workspacePytest.venvRoot;
+        const pathKey =
+          Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+        env[pathKey] = [workspacePytest.venvScripts, env[pathKey] ?? ""].join(
+          delimiter,
         );
-        if (venvPython) {
-          const isWin = process.platform === "win32";
-          const venvScripts = dirname(venvPython);
-          const venvRoot = dirname(venvScripts); // .venv/
-          executable = join(
-            venvScripts,
-            isWin ? "pytest.exe" : "pytest",
-          );
-          env.VIRTUAL_ENV = venvRoot;
-          const pathKey =
-            Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
-          env[pathKey] = [venvScripts, env[pathKey] ?? ""].join(delimiter);
-        }
       }
 
-      const child = spawn(executable, input.args, {
+      const child = spawn(executable, args, {
         cwd: input.workingDirectory,
         env,
         detached: process.platform !== "win32",
@@ -720,9 +750,11 @@ function processSignalTarget(job: LiveJob): number | undefined {
   if (!Number.isSafeInteger(processGroupId) || processGroupId !== processId) {
     return undefined;
   }
+  const attachedChildMatches = job.child?.pid === processId;
   if (
-    !job.processToken ||
-    !processGroupContainsToken(processGroupId as number, job.processToken)
+    !attachedChildMatches &&
+    (!job.processToken ||
+      !processGroupContainsToken(processGroupId as number, job.processToken))
   ) {
     return undefined;
   }

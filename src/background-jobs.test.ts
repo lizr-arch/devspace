@@ -446,7 +446,9 @@ async function waitForArtifacts(manager: BackgroundJobManager, jobId: string) {
 }
 
 async function waitForTerminal(manager: BackgroundJobManager, jobId: string) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // Cancellation allows a 3-second graceful process-group shutdown before
+  // SIGKILL. Leave enough CI scheduling margin beyond that production grace.
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     const snapshot = manager.poll(jobId);
     if (
       ["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(
