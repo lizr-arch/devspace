@@ -182,6 +182,58 @@ export const assetImportReceipts = sqliteTable(
   ],
 );
 
+export const approvedAssetReceipts = sqliteTable(
+  "approved_asset_receipts",
+  {
+    assetReceiptId: text("asset_receipt_id").primaryKey(),
+    originatingWorkspaceSessionId: text("originating_workspace_session_id")
+      .notNull()
+      .references(() => workspaceSessions.id, { onDelete: "restrict" }),
+    projectId: text("project_id").notNull(),
+    taskId: text("task_id").notNull(),
+    assetRole: text("asset_role").notNull(),
+    destinationPath: text("destination_path").notNull(),
+    sha256: text("sha256").notNull(),
+    sourceFileId: text("source_file_id"),
+    importReceiptId: text("import_receipt_id")
+      .notNull()
+      .references(() => assetImportReceipts.importReceiptId, {
+        onDelete: "restrict",
+      }),
+    projectReceiptPath: text("project_receipt_path").notNull(),
+    receiptJson: text("receipt_json").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("approved_asset_receipts_project_task_role_idx").on(
+      table.projectId,
+      table.taskId,
+      table.assetRole,
+      table.createdAt,
+    ),
+    index("approved_asset_receipts_source_file_idx").on(table.sourceFileId),
+    index("approved_asset_receipts_path_idx").on(table.destinationPath),
+  ],
+);
+
+export const approvedAssetSupersessions = sqliteTable(
+  "approved_asset_supersessions",
+  {
+    supersededAssetReceiptId: text("superseded_asset_receipt_id")
+      .primaryKey()
+      .references(() => approvedAssetReceipts.assetReceiptId, {
+        onDelete: "restrict",
+      }),
+    supersedingAssetReceiptId: text("superseding_asset_receipt_id")
+      .notNull()
+      .unique()
+      .references(() => approvedAssetReceipts.assetReceiptId, {
+        onDelete: "restrict",
+      }),
+    createdAt: text("created_at").notNull(),
+  },
+);
+
 export type WorkspaceSessionRow = typeof workspaceSessions.$inferSelect;
 export type NewWorkspaceSessionRow = typeof workspaceSessions.$inferInsert;
 export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;

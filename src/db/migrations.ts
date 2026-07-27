@@ -32,6 +32,11 @@ const migrations: Migration[] = [
     name: "asset-import-receipts",
     up: migrateAssetImportReceipts,
   },
+  {
+    version: 6,
+    name: "approved-asset-receipts",
+    up: migrateApprovedAssetReceipts,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -285,6 +290,52 @@ function migrateAssetImportReceipts(sqlite: Database.Database): void {
       on asset_import_receipts(workspace_session_id, destination_path, created_at desc);
     create index if not exists asset_import_receipts_source_file_idx
       on asset_import_receipts(source_file_id);
+  `);
+}
+
+function migrateApprovedAssetReceipts(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists approved_asset_receipts (
+      asset_receipt_id text primary key,
+      originating_workspace_session_id text not null,
+      project_id text not null,
+      task_id text not null,
+      asset_role text not null,
+      destination_path text not null,
+      sha256 text not null,
+      source_file_id text,
+      import_receipt_id text not null,
+      project_receipt_path text not null,
+      receipt_json text not null,
+      created_at text not null,
+      foreign key (originating_workspace_session_id)
+        references workspace_sessions(id)
+        on delete restrict,
+      foreign key (import_receipt_id)
+        references asset_import_receipts(import_receipt_id)
+        on delete restrict
+    );
+
+    create index if not exists approved_asset_receipts_project_path_sha_idx
+      on approved_asset_receipts(project_id, destination_path, sha256);
+    create index if not exists approved_asset_receipts_project_task_role_idx
+      on approved_asset_receipts(project_id, task_id, asset_role, created_at desc);
+    create index if not exists approved_asset_receipts_source_file_idx
+      on approved_asset_receipts(source_file_id);
+    create index if not exists approved_asset_receipts_path_idx
+      on approved_asset_receipts(destination_path);
+
+    create table if not exists approved_asset_supersessions (
+      superseded_asset_receipt_id text primary key,
+      superseding_asset_receipt_id text not null unique,
+      created_at text not null,
+      foreign key (superseded_asset_receipt_id)
+        references approved_asset_receipts(asset_receipt_id)
+        on delete restrict,
+      foreign key (superseding_asset_receipt_id)
+        references approved_asset_receipts(asset_receipt_id)
+        on delete restrict
+    );
   `);
 }
 
