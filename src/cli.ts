@@ -522,9 +522,53 @@ function runConfigCommand(args: string[]): void {
     console.log(`Updated ${files.configPath}`);
     return;
   }
+  if (
+    key === "mcpSessionIdleTtlSeconds" ||
+    key === "mcpSessionMaxSessions" ||
+    key === "mcpSessionSweepIntervalSeconds"
+  ) {
+    const parsed = Number(value);
+    const limits =
+      key === "mcpSessionIdleTtlSeconds"
+        ? { minimum: 30, maximum: 3600 }
+        : key === "mcpSessionMaxSessions"
+          ? { minimum: 8, maximum: 1024 }
+          : { minimum: 5, maximum: 300 };
+    if (
+      !Number.isInteger(parsed) ||
+      parsed < limits.minimum ||
+      parsed > limits.maximum
+    ) {
+      throw new Error(
+        `${key} must be an integer from ${limits.minimum} to ${limits.maximum}.`,
+      );
+    }
+    const mcpSessions = {
+      ...files.config.mcpSessions,
+      ...(key === "mcpSessionIdleTtlSeconds" ? { idleTtlSeconds: parsed } : {}),
+      ...(key === "mcpSessionMaxSessions" ? { maxSessions: parsed } : {}),
+      ...(key === "mcpSessionSweepIntervalSeconds"
+        ? { sweepIntervalSeconds: parsed }
+        : {}),
+    };
+    const effectiveIdleTtlSeconds = mcpSessions.idleTtlSeconds ?? 90;
+    const effectiveSweepIntervalSeconds =
+      mcpSessions.sweepIntervalSeconds ?? 15;
+    if (effectiveSweepIntervalSeconds > effectiveIdleTtlSeconds) {
+      throw new Error(
+        "mcpSessionSweepIntervalSeconds must not exceed mcpSessionIdleTtlSeconds.",
+      );
+    }
+    writeDevspaceConfig({
+      ...files.config,
+      mcpSessions,
+    });
+    console.log(`Updated ${files.configPath}`);
+    return;
+  }
 
   throw new Error(
-    "Supported configuration keys are `publicBaseUrl`, `toolMode`, and `widgets`.",
+    "Supported configuration keys are `publicBaseUrl`, `toolMode`, `widgets`, `mcpSessionIdleTtlSeconds`, `mcpSessionMaxSessions`, and `mcpSessionSweepIntervalSeconds`.",
   );
 }
 
@@ -1471,6 +1515,9 @@ function printHelp(): void {
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace config set toolMode <minimal|full>",
       "  devspace config set widgets <off|changes|review_only|full>",
+      "  devspace config set mcpSessionIdleTtlSeconds <30-3600>",
+      "  devspace config set mcpSessionMaxSessions <8-1024>",
+      "  devspace config set mcpSessionSweepIntervalSeconds <5-300>",
       '  devspace coach-pack --path <repo> --task "..." --out coach_pack.md',
       "                           Build a bounded read-only context pack and manifest",
       "  devspace coach-ingest <reply.md> [--out summary.json]",

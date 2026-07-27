@@ -4693,6 +4693,9 @@ export function createServer(
       ? undefined
       : resolveWorkspaceAppBuild(options.workspaceAppBuild);
   const mcpSessions = new McpSessionRegistry<Transport>({
+    idleTtlMs: config.mcpSessionIdleTtlMs,
+    maxSessions: config.mcpSessionMaxSessions,
+    sweepIntervalMs: config.mcpSessionSweepIntervalMs,
     onClosed: ({ sessionId, reason, source }) => {
       logEvent(config.logging, "info", "mcp_session_closed", {
         sessionIdPrefix: sessionIdPrefix(sessionId),

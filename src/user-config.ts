@@ -12,6 +12,11 @@ export interface DevspaceUserConfig {
   allowedHosts?: string[];
   toolMode?: "minimal" | "full";
   widgets?: "off" | "changes" | "review_only" | "full";
+  mcpSessions?: {
+    idleTtlSeconds?: number;
+    maxSessions?: number;
+    sweepIntervalSeconds?: number;
+  };
   trustProxy?: boolean;
   stateDir?: string;
   worktreeRoot?: string;

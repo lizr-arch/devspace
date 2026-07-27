@@ -1,6 +1,6 @@
-export const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
-export const DEFAULT_MCP_SESSION_SWEEP_INTERVAL_MS = 30 * 1000;
-export const DEFAULT_MAX_MCP_SESSIONS = 256;
+export const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 90 * 1000;
+export const DEFAULT_MCP_SESSION_SWEEP_INTERVAL_MS = 15 * 1000;
+export const DEFAULT_MAX_MCP_SESSIONS = 64;
 
 export type McpSessionCloseReason =
   "client" | "expired" | "capacity" | "shutdown";

@@ -2,6 +2,11 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
+import {
+  DEFAULT_MAX_MCP_SESSIONS,
+  DEFAULT_MCP_SESSION_IDLE_TTL_MS,
+  DEFAULT_MCP_SESSION_SWEEP_INTERVAL_MS,
+} from "./mcp-session-registry.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { loadDevspaceFiles } from "./user-config.js";
 import type { RunnerRegistryConfig } from "./runner-registry.js";
@@ -50,6 +55,9 @@ export interface ServerConfig {
   skillPaths: string[];
   agentDir: string;
   logging: LoggingConfig;
+  mcpSessionIdleTtlMs: number;
+  mcpSessionMaxSessions: number;
+  mcpSessionSweepIntervalMs: number;
   projectMemory: ProjectMemoryConfig;
   runners: RunnerRegistryConfig;
   gitRemoteWrite: GitRemoteWritePolicy;
@@ -184,6 +192,60 @@ function parsePositiveInteger(
   }
 
   return parsed;
+}
+
+function parseMcpSessionConfig(
+  env: NodeJS.ProcessEnv,
+  configured:
+    | {
+        idleTtlSeconds?: number;
+        maxSessions?: number;
+        sweepIntervalSeconds?: number;
+      }
+    | undefined,
+): {
+  idleTtlMs: number;
+  maxSessions: number;
+  sweepIntervalMs: number;
+} {
+  const idleTtlSeconds = parseBoundedInteger(
+    env.DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS
+      ? Number(env.DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS)
+      : configured?.idleTtlSeconds,
+    DEFAULT_MCP_SESSION_IDLE_TTL_MS / 1000,
+    30,
+    3600,
+    "MCP session idle TTL seconds",
+  );
+  const maxSessions = parseBoundedInteger(
+    env.DEVSPACE_MCP_SESSION_MAX_SESSIONS
+      ? Number(env.DEVSPACE_MCP_SESSION_MAX_SESSIONS)
+      : configured?.maxSessions,
+    DEFAULT_MAX_MCP_SESSIONS,
+    8,
+    1024,
+    "MCP session max sessions",
+  );
+  const sweepIntervalSeconds = parseBoundedInteger(
+    env.DEVSPACE_MCP_SESSION_SWEEP_INTERVAL_SECONDS
+      ? Number(env.DEVSPACE_MCP_SESSION_SWEEP_INTERVAL_SECONDS)
+      : configured?.sweepIntervalSeconds,
+    DEFAULT_MCP_SESSION_SWEEP_INTERVAL_MS / 1000,
+    5,
+    300,
+    "MCP session sweep interval seconds",
+  );
+  if (sweepIntervalSeconds > idleTtlSeconds) {
+    throw new Error(
+      "MCP session sweep interval seconds must not exceed the idle TTL.",
+    );
+  }
+
+  return {
+    idleTtlMs: idleTtlSeconds * 1000,
+    maxSessions,
+    sweepIntervalMs: sweepIntervalSeconds * 1000,
+  };
 }
 
 function parseToolNaming(value: string | undefined): ToolNamingMode {
@@ -550,6 +612,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const allowedRoots = parseAllowedRoots(
     env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots,
   );
+  const mcpSessions = parseMcpSessionConfig(env, files.config.mcpSessions);
 
   return {
     host,
@@ -588,6 +651,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       ),
     ),
     logging: parseLoggingConfig(env, files.config.trustProxy),
+    mcpSessionIdleTtlMs: mcpSessions.idleTtlMs,
+    mcpSessionMaxSessions: mcpSessions.maxSessions,
+    mcpSessionSweepIntervalMs: mcpSessions.sweepIntervalMs,
     projectMemory: parseProjectMemoryConfig(
       files.config.projectMemory,
       allowedRoots,

@@ -44,6 +44,23 @@ npx @waishnav/devspace config set toolMode full
 | `DEVSPACE_READ_ONLY`         | Set to `1` to expose a read-only MCP surface with no mutation, publication, Runner, or game-session tools. |
 | `DEVSPACE_WORKTREE_ROOT`     | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`.                                  |
 | `DEVSPACE_STATE_DIR`         | Directory for SQLite state. Defaults to `~/.local/share/devspace`.                                         |
+| `DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS` | Idle MCP transport lifetime. Defaults to `90`; allowed range `30-3600`.                       |
+| `DEVSPACE_MCP_SESSION_MAX_SESSIONS` | Maximum retained MCP transports. Defaults to `64`; allowed range `8-1024`.                         |
+| `DEVSPACE_MCP_SESSION_SWEEP_INTERVAL_SECONDS` | Idle-session sweep interval. Defaults to `15`; allowed range `5-300`.                 |
+
+The same values can be persisted under `mcpSessions` in
+`~/.devspace/config.json`, or set with:
+
+```bash
+devspace config set mcpSessionIdleTtlSeconds 90
+devspace config set mcpSessionMaxSessions 64
+devspace config set mcpSessionSweepIntervalSeconds 15
+```
+
+The sweep interval must not exceed the idle TTL. Lower values reduce memory
+pressure from clients that initialize short-lived transports without sending a
+close request. Capacity remains a hard safety boundary; eviction may cause a
+client that reuses an older session to reinitialize.
 
 ## OAuth
 

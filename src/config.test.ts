@@ -14,6 +14,47 @@ const baseEnv = {
 };
 
 assert.equal(loadConfig(baseEnv).widgets, "full");
+assert.equal(loadConfig(baseEnv).mcpSessionIdleTtlMs, 90_000);
+assert.equal(loadConfig(baseEnv).mcpSessionMaxSessions, 64);
+assert.equal(loadConfig(baseEnv).mcpSessionSweepIntervalMs, 15_000);
+assert.deepEqual(
+  {
+    idleTtlMs: loadConfig({
+      ...baseEnv,
+      DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS: "120",
+    }).mcpSessionIdleTtlMs,
+    maxSessions: loadConfig({
+      ...baseEnv,
+      DEVSPACE_MCP_SESSION_MAX_SESSIONS: "48",
+    }).mcpSessionMaxSessions,
+    sweepIntervalMs: loadConfig({
+      ...baseEnv,
+      DEVSPACE_MCP_SESSION_SWEEP_INTERVAL_SECONDS: "10",
+    }).mcpSessionSweepIntervalMs,
+  },
+  {
+    idleTtlMs: 120_000,
+    maxSessions: 48,
+    sweepIntervalMs: 10_000,
+  },
+);
+assert.throws(
+  () =>
+    loadConfig({
+      ...baseEnv,
+      DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS: "20",
+    }),
+  /MCP session idle TTL seconds/,
+);
+assert.throws(
+  () =>
+    loadConfig({
+      ...baseEnv,
+      DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS: "30",
+      DEVSPACE_MCP_SESSION_SWEEP_INTERVAL_SECONDS: "31",
+    }),
+  /must not exceed the idle TTL/,
+);
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "changes" }).widgets,
   "changes",
@@ -62,7 +103,15 @@ const fullToolConfigDir = mkdtempSync(
 );
 writeFileSync(
   join(fullToolConfigDir, "config.json"),
-  JSON.stringify({ toolMode: "full", widgets: "review_only" }),
+  JSON.stringify({
+    toolMode: "full",
+    widgets: "review_only",
+    mcpSessions: {
+      idleTtlSeconds: 120,
+      maxSessions: 48,
+      sweepIntervalSeconds: 10,
+    },
+  }),
 );
 assert.equal(
   loadConfig({
@@ -77,6 +126,27 @@ assert.equal(
     DEVSPACE_CONFIG_DIR: fullToolConfigDir,
   }).widgets,
   "review_only",
+);
+assert.deepEqual(
+  {
+    idleTtlMs: loadConfig({
+      ...baseEnv,
+      DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+    }).mcpSessionIdleTtlMs,
+    maxSessions: loadConfig({
+      ...baseEnv,
+      DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+    }).mcpSessionMaxSessions,
+    sweepIntervalMs: loadConfig({
+      ...baseEnv,
+      DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+    }).mcpSessionSweepIntervalMs,
+  },
+  {
+    idleTtlMs: 120_000,
+    maxSessions: 48,
+    sweepIntervalMs: 10_000,
+  },
 );
 assert.equal(
   loadConfig({
