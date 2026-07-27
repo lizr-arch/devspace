@@ -23,6 +23,10 @@ assert.equal(
   "full",
 );
 assert.equal(
+  loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "review_only" }).widgets,
+  "review_only",
+);
+assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "off" }).widgets,
   "off",
 );

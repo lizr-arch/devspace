@@ -22,7 +22,17 @@ export type ToolName =
   | "start_job"
   | "start_capture"
   | "poll_job"
-  | "cancel_job";
+  | "cancel_job"
+  | "git_diff"
+  | "list_artifacts"
+  | "inspect_artifact"
+  | "publish_artifact"
+  | "preview_artifact"
+  | "inspect_glb"
+  | "inspect_blend"
+  | "inspect_audio"
+  | "render_model_preview"
+  | "capture_game_frame";
 
 export type HostContext = NonNullable<ReturnType<App["getHostContext"]>>;
 
@@ -95,7 +105,17 @@ export function isToolName(value: unknown): value is ToolName {
     value === "start_job" ||
     value === "start_capture" ||
     value === "poll_job" ||
-    value === "cancel_job"
+    value === "cancel_job" ||
+    value === "git_diff" ||
+    value === "list_artifacts" ||
+    value === "inspect_artifact" ||
+    value === "publish_artifact" ||
+    value === "preview_artifact" ||
+    value === "inspect_glb" ||
+    value === "inspect_blend" ||
+    value === "inspect_audio" ||
+    value === "render_model_preview" ||
+    value === "capture_game_frame"
   );
 }
 
@@ -142,7 +162,19 @@ export function isShellTool(tool: string): boolean {
 }
 
 export function isReviewTool(tool: string): boolean {
-  return tool === "show_changes";
+  return (
+    tool === "show_changes" ||
+    tool === "git_diff" ||
+    tool === "list_artifacts" ||
+    tool === "inspect_artifact" ||
+    tool === "publish_artifact" ||
+    tool === "preview_artifact" ||
+    tool === "inspect_glb" ||
+    tool === "inspect_blend" ||
+    tool === "inspect_audio" ||
+    tool === "render_model_preview" ||
+    tool === "capture_game_frame"
+  );
 }
 
 export function payloadText(payload: ToolPayload | undefined): string {

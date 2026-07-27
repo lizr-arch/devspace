@@ -7,7 +7,7 @@ import { loadDevspaceFiles } from "./user-config.js";
 import type { RunnerRegistryConfig } from "./runner-registry.js";
 
 export type ToolNamingMode = "legacy" | "short";
-export type WidgetMode = "off" | "changes" | "full";
+export type WidgetMode = "off" | "changes" | "review_only" | "full";
 export interface ProjectMemoryRepositoryConfig {
   root: string;
   command: [string, ...string[]];
@@ -471,7 +471,9 @@ function parseBoundedInteger(
 
 function parseWidgetMode(value: string | undefined): WidgetMode {
   if (!value || value === "full") return "full";
-  if (value === "off" || value === "changes") return value;
+  if (value === "off" || value === "changes" || value === "review_only") {
+    return value;
+  }
 
   throw new Error(`Invalid DEVSPACE_WIDGETS: ${value}`);
 }

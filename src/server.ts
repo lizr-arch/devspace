@@ -272,7 +272,23 @@ type ToolWidgetKind =
   | "directory"
   | "shell"
   | "job"
-  | "show_changes";
+  | "show_changes"
+  | "review";
+
+export const REVIEW_ONLY_WIDGET_TOOLS = [
+  "git_diff",
+  "list_artifacts",
+  "inspect_artifact",
+  "publish_artifact",
+  "preview_artifact",
+  "inspect_glb",
+  "inspect_blend",
+  "inspect_audio",
+  "render_model_preview",
+  "capture_game_frame",
+] as const;
+
+const reviewOnlyWidgetToolNames = new Set<string>(REVIEW_ONLY_WIDGET_TOOLS);
 
 interface ToolDefinitionMeta extends Record<string, unknown> {
   ui: {
@@ -289,7 +305,11 @@ interface ToolWidgetDescriptorMeta {
   _meta: ToolDefinitionMeta | EmptyToolDefinitionMeta;
 }
 
-function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
+export function shouldAttachWidget(
+  mode: WidgetMode,
+  toolName: string,
+  kind: ToolWidgetKind,
+): boolean {
   switch (mode) {
     case "off":
       return false;
@@ -299,6 +319,8 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
         kind === "project_memory" ||
         kind === "show_changes"
       );
+    case "review_only":
+      return reviewOnlyWidgetToolNames.has(toolName);
     case "full":
       return true;
   }
@@ -306,10 +328,11 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
 
 function toolWidgetDescriptorMeta(
   config: ServerConfig,
+  toolName: string,
   kind: ToolWidgetKind,
   workspaceApp: WorkspaceAppBuild | undefined,
 ): ToolWidgetDescriptorMeta {
-  if (!shouldAttachWidget(config.widgets, kind)) return { _meta: {} };
+  if (!shouldAttachWidget(config.widgets, toolName, kind)) return { _meta: {} };
   if (!workspaceApp) {
     throw new Error(
       `Workspace App build is required when DEVSPACE_WIDGETS=${config.widgets}.`,
@@ -1327,8 +1350,11 @@ function createMcpServer(
   workspaceApp: WorkspaceAppBuild | undefined,
 ): McpServer {
   const toolNames = toolNamesFor(config);
-  const widgetMeta = (kind: ToolWidgetKind): ToolWidgetDescriptorMeta =>
-    toolWidgetDescriptorMeta(config, kind, workspaceApp);
+  const widgetMeta = (
+    toolName: string,
+    kind: ToolWidgetKind,
+  ): ToolWidgetDescriptorMeta =>
+    toolWidgetDescriptorMeta(config, toolName, kind, workspaceApp);
   const server = new McpServer(
     {
       name: "devspace",
@@ -1394,7 +1420,7 @@ function createMcpServer(
         readOnly: z.boolean(),
         toolMode: z.enum(["minimal", "full"]),
         toolNaming: z.enum(["legacy", "short"]),
-        widgets: z.enum(["off", "changes", "full"]),
+        widgets: z.enum(["off", "changes", "review_only", "full"]),
         workspaceApp: z
           .object({
             resourceUri: z.string(),
@@ -1655,7 +1681,7 @@ function createMcpServer(
       outputSchema: resultOutputSchema({
         artifacts: z.array(artifactOutputSchema),
       }),
-      _meta: {},
+      ...widgetMeta("list_artifacts", "review"),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -1734,7 +1760,7 @@ function createMcpServer(
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema({ inspection: z.unknown() }),
-      _meta: {},
+      ...widgetMeta("inspect_artifact", "review"),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -1830,7 +1856,7 @@ function createMcpServer(
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema({ diff: z.unknown() }),
-      _meta: {},
+      ...widgetMeta("git_diff", "review"),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -1920,7 +1946,7 @@ function createMcpServer(
           sha256: z.string(),
           previewType: z.enum(["image", "audio", "text", "json", "download"]),
         }),
-        _meta: {},
+        ...widgetMeta("publish_artifact", "review"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
@@ -2116,7 +2142,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({ preview: z.unknown() }),
-        _meta: {},
+        ...widgetMeta("preview_artifact", "review"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
@@ -2747,7 +2773,7 @@ function createMcpServer(
           ),
       },
       outputSchema: workspaceContextOutputSchema,
-      ...widgetMeta("workspace"),
+      ...widgetMeta("resume_workspace", "workspace"),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -2804,7 +2830,7 @@ function createMcpServer(
           ),
       },
       outputSchema: workspaceContextOutputSchema,
-      ...widgetMeta("workspace"),
+      ...widgetMeta("open_workspace", "workspace"),
       annotations: { readOnlyHint: true },
     },
     async ({ path, mode, baseRef, task }) => {
@@ -2845,7 +2871,7 @@ function createMcpServer(
         result: z.string(),
         projectMemory: projectMemoryPreflightOutputSchema,
       },
-      ...widgetMeta("project_memory"),
+      ...widgetMeta("project_memory_preflight", "project_memory"),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ workspaceId, task }) => {
@@ -2930,7 +2956,7 @@ function createMcpServer(
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema(),
-      ...widgetMeta("read"),
+      ...widgetMeta(toolNames.read, "read"),
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3022,7 +3048,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...widgetMeta("write"),
+        ...widgetMeta(toolNames.write, "write"),
         annotations: WRITE_TOOL_ANNOTATIONS,
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3295,7 +3321,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           status: z.literal("applied"),
         }),
-        ...widgetMeta("edit"),
+        ...widgetMeta(toolNames.edit, "edit"),
         annotations: EDIT_TOOL_ANNOTATIONS,
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3394,7 +3420,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...widgetMeta("show_changes"),
+        ...widgetMeta("show_changes", "show_changes"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, since, markReviewed, projectMemoryReceiptId }) => {
@@ -3465,7 +3491,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...widgetMeta("search"),
+        ...widgetMeta(toolNames.grep, "search"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3547,7 +3573,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...widgetMeta("search"),
+        ...widgetMeta(toolNames.glob, "search"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3629,7 +3655,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
-        ...widgetMeta("directory"),
+        ...widgetMeta(toolNames.ls, "directory"),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
@@ -3723,7 +3749,7 @@ function createMcpServer(
             projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
           },
           outputSchema: resultOutputSchema(),
-          ...widgetMeta("shell"),
+          ...widgetMeta(toolNames.shell, "shell"),
           annotations: SHELL_TOOL_ANNOTATIONS,
         },
         async ({
@@ -3853,7 +3879,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           job: jobSnapshotOutputSchema,
         }),
-        ...widgetMeta("job"),
+        ...widgetMeta("start_job", "job"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -3939,7 +3965,7 @@ function createMcpServer(
           job: jobSnapshotOutputSchema,
           profile: captureProfileOutputSchema,
         }),
-        ...widgetMeta("job"),
+        ...widgetMeta("start_capture", "job"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -4037,7 +4063,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           job: jobSnapshotOutputSchema,
         }),
-        ...widgetMeta("job"),
+        ...widgetMeta("poll_job", "job"),
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -4111,7 +4137,7 @@ function createMcpServer(
         outputSchema: resultOutputSchema({
           job: jobSnapshotOutputSchema,
         }),
-        ...widgetMeta("job"),
+        ...widgetMeta("cancel_job", "job"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -4301,7 +4327,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({ frame: z.unknown() }),
-        _meta: {},
+        ...widgetMeta("capture_game_frame", "review"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
@@ -4437,7 +4463,7 @@ function createMcpServer(
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema({ inspection: z.unknown() }),
-      _meta: {},
+      ...widgetMeta("inspect_glb", "review"),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -4475,7 +4501,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({ inspection: z.unknown() }),
-        _meta: {},
+        ...widgetMeta("inspect_blend", "review"),
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -4512,7 +4538,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({ inspection: z.unknown() }),
-        _meta: {},
+        ...widgetMeta("inspect_audio", "review"),
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -4552,7 +4578,7 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({ preview: z.unknown() }),
-        _meta: {},
+        ...widgetMeta("render_model_preview", "review"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
