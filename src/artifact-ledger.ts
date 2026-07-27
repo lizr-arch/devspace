@@ -36,7 +36,15 @@ export const MAX_LIST_ARTIFACTS = 100;
 const MAX_JSON_VALIDATION_BYTES = 4 * 1024 * 1024;
 
 export type ArtifactType =
-  "blend" | "glb" | "image" | "audio" | "json" | "text";
+  | "blend"
+  | "glb"
+  | "houdini"
+  | "geometry"
+  | "scene"
+  | "image"
+  | "audio"
+  | "json"
+  | "text";
 export type ArtifactChange = "created" | "modified";
 export type ArtifactCompletion = "complete" | "incomplete";
 export type ArtifactPresence =
@@ -147,6 +155,61 @@ const ARTIFACT_FORMATS: Record<
     artifactType: "glb",
     mimeType: "model/gltf-binary",
     format: "GLB",
+  },
+  ".hip": {
+    artifactType: "houdini",
+    mimeType: "application/octet-stream",
+    format: "HIP",
+  },
+  ".hiplc": {
+    artifactType: "houdini",
+    mimeType: "application/octet-stream",
+    format: "HIPLC",
+  },
+  ".hipnc": {
+    artifactType: "houdini",
+    mimeType: "application/octet-stream",
+    format: "HIPNC",
+  },
+  ".hda": {
+    artifactType: "houdini",
+    mimeType: "application/octet-stream",
+    format: "HDA",
+  },
+  ".hdalc": {
+    artifactType: "houdini",
+    mimeType: "application/octet-stream",
+    format: "HDALC",
+  },
+  ".hdanc": {
+    artifactType: "houdini",
+    mimeType: "application/octet-stream",
+    format: "HDANC",
+  },
+  ".bgeo.sc": {
+    artifactType: "geometry",
+    mimeType: "application/octet-stream",
+    format: "BGEO.SC",
+  },
+  ".abc": {
+    artifactType: "geometry",
+    mimeType: "application/vnd.abc",
+    format: "ABC",
+  },
+  ".usd": {
+    artifactType: "scene",
+    mimeType: "model/vnd.usd",
+    format: "USD",
+  },
+  ".usda": {
+    artifactType: "scene",
+    mimeType: "model/vnd.usd",
+    format: "USDA",
+  },
+  ".usdc": {
+    artifactType: "scene",
+    mimeType: "model/vnd.usd",
+    format: "USDC",
   },
   ".png": { artifactType: "image", mimeType: "image/png", format: "PNG" },
   ".jpg": { artifactType: "image", mimeType: "image/jpeg", format: "JPEG" },
@@ -634,7 +697,9 @@ function artifactFormat(
   relativePath: string,
 ):
   { artifactType: ArtifactType; mimeType: string; format: string } | undefined {
-  return ARTIFACT_FORMATS[extname(relativePath).toLowerCase()];
+  const lower = relativePath.toLowerCase();
+  const extension = lower.endsWith(".bgeo.sc") ? ".bgeo.sc" : extname(lower);
+  return ARTIFACT_FORMATS[extension];
 }
 
 function assertArtifactFileSafe(
@@ -720,6 +785,50 @@ function validateArtifactSignature(
   if (format === "OGG" && header.subarray(0, 4).toString("ascii") !== "OggS") {
     throw new Error(
       `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not OGG.`,
+    );
+  }
+  if (
+    format === "ABC" &&
+    header.subarray(0, 5).toString("ascii") !== "Ogawa" &&
+    !header.subarray(0, 8).equals(HDF5_SIGNATURE)
+  ) {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not Alembic.`,
+    );
+  }
+  if (
+    format === "USDA" &&
+    header.subarray(0, 5).toString("ascii") !== "#usda"
+  ) {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not USDA.`,
+    );
+  }
+  if (
+    format === "USDC" &&
+    header.subarray(0, 8).toString("ascii") !== "PXR-USDC"
+  ) {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not USDC.`,
+    );
+  }
+  if (
+    format === "USD" &&
+    header.subarray(0, 5).toString("ascii") !== "#usda" &&
+    header.subarray(0, 8).toString("ascii") !== "PXR-USDC"
+  ) {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is not USD.`,
+    );
+  }
+  if (
+    ["HIP", "HIPLC", "HIPNC", "HDA", "HDALC", "HDANC", "BGEO.SC"].includes(
+      format,
+    ) &&
+    size === 0
+  ) {
+    throw new Error(
+      `ARTIFACT_MIME_REJECTED: ${basename(absolutePath)} is empty.`,
     );
   }
   if (format === "JSON") {
@@ -839,4 +948,7 @@ function validateWorkspaceId(workspaceId: string): void {
 
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+const HDF5_SIGNATURE = Buffer.from([
+  0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);

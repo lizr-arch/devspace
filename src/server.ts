@@ -47,6 +47,7 @@ import {
   type JobSnapshot,
 } from "./background-jobs.js";
 import { RunnerRegistry, type RunnerInspection } from "./runner-registry.js";
+import { inspectHoudini } from "./houdini.js";
 import {
   ArtifactLedger,
   MAX_ARTIFACT_ROOTS,
@@ -141,8 +142,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION =
-  "devspacemac-workspace-app-telemetry-v1.2026-07-27";
+export const TOOL_SCHEMA_REVISION = "devspacemac-houdini-runner-v1.2026-07-27";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -433,6 +433,7 @@ function exposedToolNames(
 ): string[] {
   const tools = [
     "devspace_info",
+    "houdini_info",
     "list_workspaces",
     "list_artifacts",
     "inspect_artifact",
@@ -511,6 +512,7 @@ function createServiceRuntime(
         widgets: config.widgets,
         toolNaming: config.toolNaming,
         requiredCapabilities,
+        runnerNames: JOB_RUNNERS,
         gitRemoteWrite: config.gitRemoteWrite,
         workspaceApp: workspaceApp
           ? {
@@ -784,6 +786,7 @@ const jobSnapshotOutputSchema = z.object({
       "JOB_CANCELLED",
       "JOB_INTERRUPTED",
       "BLENDER_FAILED",
+      "HOUDINI_FAILED",
       "CAPTURE_FAILED",
       "RUNNER_FAILED",
     ])
@@ -808,6 +811,9 @@ const jobSnapshotOutputSchema = z.object({
 const artifactTypeSchema = z.enum([
   "blend",
   "glb",
+  "houdini",
+  "geometry",
+  "scene",
   "image",
   "audio",
   "json",
@@ -1740,6 +1746,17 @@ function createMcpServer(
           supportedFormats: [
             "BLEND",
             "GLB",
+            "HIP",
+            "HIPLC",
+            "HIPNC",
+            "HDA",
+            "HDALC",
+            "HDANC",
+            "BGEO.SC",
+            "ABC",
+            "USD",
+            "USDA",
+            "USDC",
             "PNG",
             "JPEG",
             "WEBP",
@@ -1776,6 +1793,61 @@ function createMcpServer(
       return {
         content: [textBlock(result)],
         _meta: { tool: "devspace_info" },
+        structuredContent: { result, ...details },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "houdini_info",
+    {
+      title: "Houdini info",
+      description:
+        "Inspect trusted Houdini executable discovery, version, architecture, safe product classification, and read-only license availability. The bounded preflight never logs in, activates, modifies licensing, or returns keys, accounts, credentials, environment variables, or raw diagnostic output.",
+      inputSchema: {},
+      outputSchema: resultOutputSchema({
+        detectedExecutable: z.string().optional(),
+        version: z.string().optional(),
+        hostArchitecture: z.string(),
+        executableArchitecture: z.string().optional(),
+        productEdition: z.enum([
+          "commercial",
+          "indie",
+          "education",
+          "apprentice_non_commercial",
+          "engine",
+          "unknown",
+        ]),
+        licenseStatus: z.enum(["available", "unavailable", "unknown"]),
+        hythonAvailable: z.boolean(),
+        hbatchAvailable: z.boolean(),
+        hythonExecutable: z.string().optional(),
+        hbatchExecutable: z.string().optional(),
+        diagnostic: z.string(),
+      }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const details = await inspectHoudini(runners);
+      const result = [
+        `Houdini version: ${details.version ?? "not detected"}`,
+        `Host architecture: ${details.hostArchitecture}`,
+        `Executable architecture: ${details.executableArchitecture ?? "unknown"}`,
+        `Product edition: ${details.productEdition}`,
+        `License: ${details.licenseStatus}`,
+        `hython: ${details.hythonAvailable ? "available" : "unavailable"}`,
+        `hbatch: ${details.hbatchAvailable ? "available" : "unavailable"}`,
+        `Diagnostic: ${details.diagnostic}`,
+      ].join("\n");
+      return {
+        content: [textBlock(result)],
+        _meta: { tool: "houdini_info" },
         structuredContent: { result, ...details },
       };
     },

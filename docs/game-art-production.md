@@ -106,6 +106,7 @@ Tool errors and Job snapshots use stable codes before human-readable detail:
 | `JOB_CANCELLED` | Client cancellation reached a terminal state. |
 | `JOB_INTERRUPTED` | DevSpace stopped/restarted during execution. |
 | `BLENDER_FAILED` | Blender exited unsuccessfully. |
+| `HOUDINI_FAILED` | Hython or hbatch exited unsuccessfully. |
 | `CAPTURE_PROFILE_INVALID` | Capture profile/schema/path/limit validation failed. |
 | `CAPTURE_FAILED` | Project capture adapter or Godot exited unsuccessfully. |
 

@@ -180,6 +180,18 @@ timeout and concurrency caps:
       "enabled": true,
       "maxTimeoutSeconds": 1800,
       "maxConcurrent": 1
+    },
+    "hython": {
+      "executable": "/trusted/houdini/bin/hython",
+      "enabled": true,
+      "maxTimeoutSeconds": 1800,
+      "maxConcurrent": 1
+    },
+    "hbatch": {
+      "executable": "/trusted/houdini/bin/hbatch",
+      "enabled": true,
+      "maxTimeoutSeconds": 1800,
+      "maxConcurrent": 1
     }
   }
 }
@@ -187,7 +199,8 @@ timeout and concurrency caps:
 
 The MCP client cannot provide executable paths. Invalid override entries are
 reported by `devspace_info` without preventing the service from starting. See
-[Runner Registry](runner-registry.md) for the policy and containment contract.
+[Runner Registry](runner-registry.md) and
+[Houdini runners](houdini-runners.md) for the policy and containment contract.
 
 ## Project Memory SHADOW Preflight
 

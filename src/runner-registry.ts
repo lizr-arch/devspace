@@ -3,6 +3,7 @@ import {
   existsSync,
   constants as fsConstants,
   lstatSync,
+  readdirSync,
   realpathSync,
   statSync,
 } from "node:fs";
@@ -29,6 +30,8 @@ export const RUNNER_NAMES = [
   "godot",
   "godot-mono",
   "blender",
+  "hython",
+  "hbatch",
 ] as const;
 
 export type RunnerName = (typeof RUNNER_NAMES)[number];
@@ -133,6 +136,16 @@ DEFAULT_DEFINITIONS.blender.maxTimeoutSeconds = MAX_JOB_TIMEOUT_SECONDS;
 DEFAULT_DEFINITIONS.blender.maxConcurrent = 1;
 DEFAULT_DEFINITIONS.blender.networkPolicy = "offline_requested";
 
+for (const name of ["hython", "hbatch"] as const) {
+  DEFAULT_DEFINITIONS[name].supportedPlatforms = ["darwin", "linux", "win32"];
+  DEFAULT_DEFINITIONS[name].defaultTimeoutSeconds = 30 * 60;
+  DEFAULT_DEFINITIONS[name].maxTimeoutSeconds = MAX_JOB_TIMEOUT_SECONDS;
+  DEFAULT_DEFINITIONS[name].maxConcurrent = 1;
+  DEFAULT_DEFINITIONS[name].networkPolicy = "offline_requested";
+}
+DEFAULT_DEFINITIONS.hython.argumentPolicy = "hython_workspace_script_v1";
+DEFAULT_DEFINITIONS.hbatch.argumentPolicy = "hbatch_workspace_source_v1";
+
 export class RunnerRegistry {
   private readonly definitions = new Map<RunnerName, RunnerDefinition>();
   private readonly configuredExecutables = new Map<RunnerName, string>();
@@ -193,11 +206,12 @@ export class RunnerRegistry {
       this.env,
       this.platform,
     );
-    const version = await probeVersion(
+    const probedVersion = await probeVersion(
       executable,
       definition.versionArgs,
       environment,
     ).catch(() => undefined);
+    const version = normalizeRunnerVersion(name, executable, probedVersion);
     const resolved = { definition, executable, environment, version };
     this.resolvedCache.set(name, resolved);
     return {
@@ -414,7 +428,11 @@ export class RunnerRegistry {
       );
     }
 
-    for (const candidate of executableCandidates(name, this.env)) {
+    for (const candidate of executableCandidates(
+      name,
+      this.env,
+      this.platform,
+    )) {
       if (await isExecutableFile(candidate)) return resolve(candidate);
     }
     throw new Error(
@@ -461,6 +479,14 @@ function validateActionPolicy(
     validateBlenderArguments(args, context);
     return;
   }
+  if (runner === "hython") {
+    validateHythonArguments(args, context);
+    return;
+  }
+  if (runner === "hbatch") {
+    validateHbatchArguments(args, context);
+    return;
+  }
   const action = args[0];
   const allowedActions: Partial<Record<RunnerName, string[]>> = {
     npm: ["test", "run"],
@@ -500,6 +526,94 @@ function validateActionPolicy(
     throw new Error(
       `RUNNER_ARGUMENT_REJECTED: ${runner} background jobs cannot open the editor.`,
     );
+  }
+}
+
+function validateHythonArguments(
+  args: string[],
+  context?: RunnerValidationContext,
+): void {
+  const script = args[0];
+  if (
+    !script ||
+    script.startsWith("-") ||
+    !script.toLowerCase().endsWith(".py")
+  ) {
+    throw new Error(
+      "RUNNER_ARGUMENT_REJECTED: hython requires one workspace-local .py script as its first argument.",
+    );
+  }
+  if (context) {
+    assertExistingRegularWorkspaceFile(script, context, "Hython script");
+  }
+  for (const argument of args.slice(1)) {
+    if (["-c", "-m", "-i", "-"].includes(argument)) {
+      throw new Error(
+        `RUNNER_ARGUMENT_REJECTED: hython option ${argument} is disabled by the V1 policy.`,
+      );
+    }
+  }
+}
+
+function validateHbatchArguments(
+  args: string[],
+  context?: RunnerValidationContext,
+): void {
+  let commandScript: string | undefined;
+  let hipFile: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "-j") {
+      const value = args[index + 1];
+      const parsed = Number(value);
+      if (!value || !Number.isInteger(parsed) || parsed < 1 || parsed > 256) {
+        throw new Error(
+          "RUNNER_ARGUMENT_REJECTED: hbatch -j must be an integer from 1 to 256.",
+        );
+      }
+      index += 1;
+      continue;
+    }
+    if (argument === "-c") {
+      if (commandScript) {
+        throw new Error(
+          "RUNNER_ARGUMENT_REJECTED: hbatch accepts exactly one -c source command.",
+        );
+      }
+      const value = args[index + 1];
+      const match = /^source ([A-Za-z0-9._/-]+\.(?:cmd|hscript))$/i.exec(
+        value ?? "",
+      );
+      if (!match?.[1]) {
+        throw new Error(
+          "RUNNER_ARGUMENT_REJECTED: hbatch -c must be exactly 'source <workspace-relative .cmd or .hscript>'.",
+        );
+      }
+      commandScript = match[1];
+      rejectExternalPathSyntax(commandScript);
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("-")) {
+      throw new Error(
+        `RUNNER_ARGUMENT_REJECTED: hbatch option ${argument} is not allowed.`,
+      );
+    }
+    if (!/\.(?:hip|hiplc|hipnc)$/i.test(argument) || hipFile) {
+      throw new Error(
+        `RUNNER_ARGUMENT_REJECTED: Unexpected hbatch positional argument: ${argument}.`,
+      );
+    }
+    hipFile = argument;
+  }
+  if (!commandScript || !hipFile) {
+    throw new Error(
+      "RUNNER_ARGUMENT_REJECTED: hbatch requires one workspace-local HIP file and one bounded source command.",
+    );
+  }
+  if (context) {
+    assertExistingRegularWorkspaceFile(commandScript, context, "Hbatch script");
+    assertExistingRegularWorkspaceFile(hipFile, context, "Houdini scene");
   }
 }
 
@@ -611,7 +725,9 @@ function validateBlenderOptionValue(
         "RUNNER_ARGUMENT_REJECTED: Blender --python must reference a .py file.",
       );
     }
-    if (context) assertExistingRegularWorkspaceFile(value, context);
+    if (context) {
+      assertExistingRegularWorkspaceFile(value, context, "Blender script");
+    }
     return;
   }
   if (option === "--python-exit-code") {
@@ -659,18 +775,19 @@ function validateBlenderOptionValue(
 function assertExistingRegularWorkspaceFile(
   candidate: string,
   context: RunnerValidationContext,
+  description: string,
 ): void {
   const workspaceRoot = canonicalExistingPath(context.workspaceRoot);
   const target = resolve(context.workingDirectory, candidate);
   const canonical = canonicalExistingPath(target);
   if (!isPathInsideRoot(canonical, workspaceRoot)) {
     throw new Error(
-      `WORKSPACE_ESCAPE: Blender script is outside the workspace: ${candidate}`,
+      `WORKSPACE_ESCAPE: ${description} is outside the workspace: ${candidate}`,
     );
   }
   if (!statSync(canonical).isFile()) {
     throw new Error(
-      `RUNNER_ARGUMENT_REJECTED: Blender script is not a regular file: ${candidate}`,
+      `RUNNER_ARGUMENT_REJECTED: ${description} is not a regular file: ${candidate}`,
     );
   }
 }
@@ -759,6 +876,7 @@ function canonicalExistingPath(target: string): string {
 function executableCandidates(
   runner: RunnerName,
   env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
 ): string[] {
   const home = homedir();
   const fixed: Partial<Record<RunnerName, string[]>> = {
@@ -793,12 +911,86 @@ function executableCandidates(
       "/opt/homebrew/bin/blender",
       "/usr/local/bin/blender",
     ],
+    hython: houdiniExecutableCandidates("hython", platform),
+    hbatch: houdiniExecutableCandidates("hbatch", platform),
   };
   const fromPath = (env.PATH ?? "")
     .split(delimiter)
     .filter(Boolean)
     .map((directory) => join(directory, runner));
   return Array.from(new Set([...(fixed[runner] ?? []), ...fromPath]));
+}
+
+function houdiniExecutableCandidates(
+  executableName: "hython" | "hbatch",
+  platform: NodeJS.Platform,
+): string[] {
+  const executable =
+    platform === "win32" ? `${executableName}.exe` : executableName;
+  const candidates: string[] = [];
+  if (platform === "darwin") {
+    const root = "/Applications/Houdini";
+    for (const installation of safeDirectoryEntries(root)) {
+      const installRoot = join(root, installation);
+      candidates.push(
+        join(
+          installRoot,
+          "Frameworks",
+          "Houdini.framework",
+          "Resources",
+          "bin",
+          executable,
+        ),
+        join(
+          installRoot,
+          "Frameworks",
+          "Houdini.framework",
+          "Versions",
+          "Current",
+          "Resources",
+          "bin",
+          executable,
+        ),
+      );
+      const versionsRoot = join(
+        installRoot,
+        "Frameworks",
+        "Houdini.framework",
+        "Versions",
+      );
+      for (const version of safeDirectoryEntries(versionsRoot)) {
+        candidates.push(
+          join(versionsRoot, version, "Resources", "bin", executable),
+        );
+      }
+    }
+  } else if (platform === "linux") {
+    for (const root of ["/opt", "/usr/local"]) {
+      for (const installation of safeDirectoryEntries(root)) {
+        if (!/^hfs\d/i.test(installation)) continue;
+        candidates.push(join(root, installation, "bin", executable));
+      }
+    }
+  } else if (platform === "win32") {
+    const root = "C:\\Program Files\\Side Effects Software";
+    for (const installation of safeDirectoryEntries(root)) {
+      if (!/^Houdini/i.test(installation)) continue;
+      candidates.push(join(root, installation, "bin", executable));
+    }
+  }
+  return candidates;
+}
+
+function safeDirectoryEntries(path: string): string[] {
+  try {
+    return readdirSync(path, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+  } catch {
+    return [];
+  }
 }
 
 function environmentForExecutable(
@@ -879,6 +1071,26 @@ async function probeVersion(
   });
 }
 
+function normalizeRunnerVersion(
+  name: RunnerName,
+  executable: string,
+  probedVersion: string | undefined,
+): string | undefined {
+  if (name !== "hython" && name !== "hbatch") return probedVersion;
+  for (const candidate of [probedVersion, executable]) {
+    if (!candidate) continue;
+    const match =
+      /\bHoudini(?:\s+(?:FX|Core|Indie|Education|Apprentice))?\s+(\d+\.\d+(?:\.\d+)?)/i.exec(
+        candidate,
+      ) ??
+      /(?:Houdini|Versions)[/\\](?:Houdini)?(\d+\.\d+(?:\.\d+)?)/i.exec(
+        candidate,
+      );
+    if (match?.[1]) return match[1];
+  }
+  return undefined;
+}
+
 function applyBoundedOverride(input: {
   rawOverride: Record<string, unknown>;
   key: "maxTimeoutSeconds" | "maxConcurrent";
@@ -910,6 +1122,8 @@ function argumentPolicyName(name: RunnerName): string {
   if (name === "cargo") return "cargo_validation_v1";
   if (name === "pytest") return "pytest_validation_v1";
   if (name === "blender") return "blender_background_v1";
+  if (name === "hython") return "hython_workspace_script_v1";
+  if (name === "hbatch") return "hbatch_workspace_source_v1";
   return "godot_headless_v1";
 }
 

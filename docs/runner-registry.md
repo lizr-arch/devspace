@@ -30,6 +30,8 @@ pytest
 godot
 godot-mono
 blender
+hython
+hbatch
 ```
 
 Each code-owned definition specifies:
@@ -92,6 +94,21 @@ environment access, automatic add-on or extension commands, autoexec enabling,
 unknown switches, external paths, and symlink escape. Recommended jobs include
 `--offline-mode` and `--disable-autoexec` explicitly; these are command-line
 requests to Blender, not an OS firewall or sandbox.
+
+## Houdini policy
+
+Houdini uses the same registry and Job lifecycle through the `hython` and
+`hbatch` built-ins. Both are single-concurrency, background-only
+`trusted_local` runners with workspace-scoped scripts/scenes, bounded runtime
+and output, and `offline_requested` metadata. `houdini_info` performs fixed,
+sanitized, non-mutating discovery and license preflight; executable discovery
+does not by itself prove a usable license.
+
+Hython accepts one workspace-local Python script and rejects inline/module/
+interactive execution. Hbatch accepts one HIP file and exactly one constrained
+`source` command referencing a workspace-local `.cmd` or `.hscript`; arbitrary
+hscript expressions and license-management flags are not accepted. See
+[Houdini runners](houdini-runners.md).
 
 ## Execution checks
 

@@ -108,11 +108,16 @@ Repository-owned build or test scripts can still execute code as the local
 user. Only run jobs in trusted approved repositories, and use `cancel_job` when
 a process behaves unexpectedly.
 
-Blender, Godot, package, compiler, and test runners are classified
+Blender, Houdini, Godot, package, compiler, and test runners are classified
 `trusted_local`, not `strict`: workspace/argument checks do not prevent trusted
 project code from using the local user's filesystem or network authority.
 `devspace_info` reports this containment level and runner availability
 explicitly.
+
+`houdini_info` uses a fixed bounded probe and returns only safe product/license
+classification, executable availability, version/architecture evidence, and a
+sanitized diagnostic. It does not call license administration, log in, accept
+an EULA, activate a product, read license files, or return raw license output.
 
 When a job declares narrow `artifactRoots`, DevSpace snapshots and scans those
 workspace-relative directories, rejects symbolic-link escape, validates

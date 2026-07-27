@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import {
   createServer,
   resolveWorkspaceAppBuild,
+  TOOL_SCHEMA_REVISION,
   workspaceAppUiMetadata,
 } from "./server.js";
 import { loadConfig } from "./config.js";
@@ -22,6 +23,7 @@ import {
 
 const tempRoot = mkdtempSync(join(tmpdir(), "devspace-doctor-test-"));
 const testWorkspaceAppBuild = createWorkspaceAppFixture("shared");
+assert.equal(TOOL_SCHEMA_REVISION, "devspacemac-houdini-runner-v1.2026-07-27");
 
 try {
   await testWorkspaceAppBuildResolution();
@@ -401,7 +403,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionConcurrentCalls, 20);
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
-    assert.equal(probe.toolNames?.length, 48);
+    assert.equal(probe.toolNames?.length, 49);
     assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
     assert.equal(probe.workspaceAppTelemetryTool.ok, true);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
@@ -477,6 +479,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.mcpAppAssetCors.ok, true);
     assert.equal(probe.mcpAppBuildFingerprint.ok, true);
     assert.equal(probe.devspaceInfo.ok, true);
+    assert.equal(probe.houdiniInfo.ok, true);
     assert.equal(probe.openWorkspace.ok, true);
     assert.equal(probe.listWorkspaces.ok, true);
     assert.equal(probe.resumeWorkspace.ok, true);
@@ -502,6 +505,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.backgroundJobStatus, "succeeded");
     assert.match(probe.backgroundJobOutput ?? "", /typecheck/);
     assert.match(probe.schemaFingerprint ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(probe.toolNames?.includes("houdini_info"), true);
     assert.match(
       probe.workspaceAppResourceUri ?? "",
       /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/,
@@ -519,6 +523,8 @@ async function testPublicExternalClientProbe(): Promise<void> {
       "godot",
       "godot-mono",
       "blender",
+      "hython",
+      "hbatch",
     ]);
     assert.equal(probe.workspaceRoot, process.cwd());
     assert.match(probe.workspaceId ?? "", /^ws_/);
@@ -601,6 +607,7 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
     assert.equal(probe.workspaceAppResourceUri, undefined);
     assert.deepEqual(probe.toolNames, [
       "devspace_info",
+      "houdini_info",
       "list_workspaces",
       "list_artifacts",
       "inspect_artifact",

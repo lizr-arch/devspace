@@ -80,6 +80,66 @@ try {
   assert.equal(restoredList.length, 4);
   assert.ok(restoredList.every((artifact) => artifact.presence === "present"));
 
+  const houdiniOutputRoot = join(workspaceRoot, "artifacts", "houdini");
+  mkdirSync(houdiniOutputRoot, { recursive: true });
+  const houdiniBaseline = restored.captureBaseline(workspaceRoot, [
+    "artifacts/houdini",
+  ]);
+  const houdiniFixtures: Record<string, Buffer | string> = {
+    "source.hip": "houdini hip fixture",
+    "source.hiplc": "houdini hip limited commercial fixture",
+    "source.hipnc": "houdini hip non-commercial fixture",
+    "tool.hda": "houdini digital asset fixture",
+    "tool.hdalc": "houdini digital asset limited commercial fixture",
+    "tool.hdanc": "houdini digital asset non-commercial fixture",
+    "pieces.bgeo.sc": "compressed bgeo fixture",
+    "cache.abc": "Ogawa alembic fixture",
+    "cache_hdf5.abc": Buffer.concat([
+      Buffer.from([0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("alembic fixture"),
+    ]),
+    "stage.usd": "#usda 1.0\n",
+    "stage.usda": "#usda 1.0\n",
+    "stage.usdc": "PXR-USDC fixture",
+  };
+  for (const [name, contents] of Object.entries(houdiniFixtures)) {
+    writeFileSync(join(houdiniOutputRoot, name), contents);
+  }
+  const houdiniDiscovery = await restored.discoverArtifacts({
+    workspaceId,
+    workspaceRoot,
+    jobId: "job_88888888-8888-8888-8888-888888888888",
+    runner: "hython",
+    runnerVersion: "20.5.410",
+    status: "succeeded",
+    artifactRoots: ["artifacts/houdini"],
+    baseline: houdiniBaseline,
+  });
+  assert.equal(houdiniDiscovery.errors.length, 0);
+  assert.equal(
+    houdiniDiscovery.artifacts.length,
+    Object.keys(houdiniFixtures).length,
+  );
+  assert.equal(
+    houdiniDiscovery.artifacts.find((artifact) =>
+      artifact.relativePath.endsWith(".bgeo.sc"),
+    )?.format,
+    "BGEO.SC",
+  );
+  assert.equal(
+    houdiniDiscovery.artifacts.find((artifact) =>
+      artifact.relativePath.endsWith(".bgeo.sc"),
+    )?.artifactType,
+    "geometry",
+  );
+  assert.ok(
+    houdiniDiscovery.artifacts
+      .filter((artifact) =>
+        /\.(?:hip|hiplc|hipnc|hda|hdalc|hdanc)$/.test(artifact.relativePath),
+      )
+      .every((artifact) => artifact.artifactType === "houdini"),
+  );
+
   const secondBaseline = restored.captureBaseline(workspaceRoot, [
     "artifacts/blender",
   ]);

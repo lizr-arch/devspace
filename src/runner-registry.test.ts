@@ -35,6 +35,8 @@ try {
     "godot",
     "godot-mono",
     "blender",
+    "hython",
+    "hbatch",
   ]);
 
   for (const [runner, args] of [
@@ -55,8 +57,14 @@ try {
   }
 
   const blenderScript = join(workspaceRoot, "create_asset.py");
+  const hythonScript = join(workspaceRoot, "build_asset.py");
+  const hbatchScript = join(workspaceRoot, "build_asset.hscript");
+  const hipScene = join(workspaceRoot, "wall.hip");
   mkdirSync(join(workspaceRoot, "render"), { recursive: true });
   writeFileSync(blenderScript, "# fixture");
+  writeFileSync(hythonScript, "# fixture");
+  writeFileSync(hbatchScript, "# fixture");
+  writeFileSync(hipScene, "fixture");
   validateRunnerArguments(
     "blender",
     [
@@ -120,6 +128,71 @@ try {
         { workspaceRoot, workingDirectory: workspaceRoot },
       ),
     /must appear before --python/,
+  );
+  validateRunnerArguments("hython", ["build_asset.py", "render/output.json"], {
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+  });
+  validateRunnerArguments(
+    "hbatch",
+    ["-j", "4", "-c", "source build_asset.hscript", "wall.hip"],
+    {
+      workspaceRoot,
+      workingDirectory: workspaceRoot,
+    },
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments("hython", ["-c", "import hou"], {
+        workspaceRoot,
+        workingDirectory: workspaceRoot,
+      }),
+    /requires one workspace-local \.py script/,
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments(
+        "hbatch",
+        ["-c", "source build_asset.hscript; unix whoami", "wall.hip"],
+        { workspaceRoot, workingDirectory: workspaceRoot },
+      ),
+    /shell control characters/,
+  );
+  for (const injected of ["$(whoami)", "|", ">outside.log"]) {
+    assert.throws(
+      () =>
+        validateRunnerArguments("hython", ["build_asset.py", injected], {
+          workspaceRoot,
+          workingDirectory: workspaceRoot,
+        }),
+      /shell control characters/,
+    );
+  }
+  assert.throws(
+    () =>
+      validateRunnerArguments(
+        "hbatch",
+        ["-c", "source ../outside.hscript", "wall.hip"],
+        { workspaceRoot, workingDirectory: workspaceRoot },
+      ),
+    /parent paths/,
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments("hbatch", ["-c", "unix whoami", "wall.hip"], {
+        workspaceRoot,
+        workingDirectory: workspaceRoot,
+      }),
+    /must be exactly 'source/,
+  );
+  assert.throws(
+    () =>
+      validateRunnerArguments(
+        "hbatch",
+        ["-c", "source build_asset.hscript", "/tmp/outside.hip"],
+        { workspaceRoot, workingDirectory: workspaceRoot },
+      ),
+    /absolute or parent paths/,
   );
 
   assert.throws(
