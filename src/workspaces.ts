@@ -10,13 +10,23 @@ import type {
   ProjectMemoryActiveState,
   ProjectMemoryPreflightView,
 } from "./project-memory.js";
-import { ProjectMemoryController } from "./project-memory.js";
 import {
+  type AdditionalRoot,
+  AccessDeniedError,
   assertAllowedPath,
+  assertWriteAllowed,
   expandHomePath,
+  isPathInsideAnyRoot,
   isPathInsideRoot,
+  normalizeAdditionalRoots,
   resolveAllowedPath,
 } from "./roots.js";
+import { ProjectMemoryController } from "./project-memory.js";
+import {
+  type ApprovedTasks,
+  computeManifestSha256,
+  loadTaskManifest,
+} from "./task-manifest.js";
 import {
   loadWorkspaceSkills,
   markSkillActivated,
@@ -50,6 +60,8 @@ export interface Workspace {
   mode: WorkspaceMode;
   sourceRoot?: string;
   worktree?: WorkspaceWorktree;
+  additionalRoots: AdditionalRoot[];
+  approvedTasks?: ApprovedTasks;
   skills: LoadedSkills["skills"];
   skillDiagnostics: LoadedSkills["diagnostics"];
   activatedSkillDirs: Set<string>;
@@ -68,6 +80,7 @@ export interface WorkspaceSessionSummary {
   root: string;
   mode: WorkspaceMode;
   sourceRoot?: string;
+  additionalRoots: AdditionalRoot[];
   managed: boolean;
   status: string;
   createdAt: string;
@@ -87,6 +100,7 @@ export interface OpenWorkspaceInput {
   mode?: WorkspaceMode;
   baseRef?: string;
   task?: string;
+  additionalRoots?: AdditionalRoot[];
 }
 
 export class WorkspaceRegistry {
@@ -103,23 +117,33 @@ export class WorkspaceRegistry {
   ): Promise<WorkspaceContext> {
     const options = typeof input === "string" ? { path: input } : input;
     const mode = options.mode ?? "checkout";
+    const additionalRoots = options.additionalRoots ?? [];
 
     if (mode === "worktree") {
       return this.openWorktreeWorkspace(
         options.path,
         options.baseRef,
         options.task,
+        additionalRoots,
       );
     }
 
-    return this.openCheckoutWorkspace(options.path, options.task);
+    return this.openCheckoutWorkspace(
+      options.path,
+      options.task,
+      additionalRoots,
+    );
   }
 
   async resumeWorkspace(
     workspaceId: string,
     task?: string,
+    additionalRoots?: AdditionalRoot[],
   ): Promise<WorkspaceContext> {
     const workspace = this.getWorkspace(workspaceId);
+    if (additionalRoots && additionalRoots.length > 0) {
+      workspace.additionalRoots = additionalRoots;
+    }
     const rootStats = await stat(workspace.root).catch(() => undefined);
     if (!rootStats?.isDirectory()) {
       throw new Error(
@@ -178,6 +202,7 @@ export class WorkspaceRegistry {
         root: session.root,
         mode: session.mode,
         sourceRoot: session.sourceRoot,
+        additionalRoots: [],
         managed: session.managed,
         status: session.status,
         createdAt: session.createdAt,
@@ -216,6 +241,7 @@ export class WorkspaceRegistry {
       root,
       mode: session.mode,
       sourceRoot: session.sourceRoot,
+      additionalRoots: [],
       worktree:
         session.mode === "worktree"
           ? {
@@ -239,19 +265,23 @@ export class WorkspaceRegistry {
   }
 
   resolvePath(workspace: Workspace, inputPath: string): string {
+    const allRoots = [
+      workspace.root,
+      ...workspace.additionalRoots.map((r) => r.path),
+    ];
     const absolutePath = resolveAllowedPath(
       expandHomePath(inputPath),
       workspace.root,
-      [workspace.root],
+      allRoots,
     );
-    if (!isPathInsideRoot(absolutePath, workspace.root)) {
-      throw new Error(`Path is outside workspace root: ${inputPath}`);
-    }
-
     return absolutePath;
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
+    const allRoots = [
+      workspace.root,
+      ...workspace.additionalRoots.map((r) => r.path),
+    ];
     const skillRead = resolveSkillReadPath(
       workspace.skills,
       workspace.activatedSkillDirs,
@@ -268,7 +298,7 @@ export class WorkspaceRegistry {
     try {
       return {
         absolutePath: this.resolvePath(workspace, inputPath),
-        readRoots: [workspace.root],
+        readRoots: allRoots,
       };
     } catch (workspaceError) {
       throw workspaceError;
@@ -333,6 +363,7 @@ export class WorkspaceRegistry {
   private async openCheckoutWorkspace(
     path: string,
     task: string | undefined,
+    additionalRoots: AdditionalRoot[],
   ): Promise<WorkspaceContext> {
     const root = assertAllowedPath(path, this.config.allowedRoots);
     await mkdir(root, { recursive: true });
@@ -342,13 +373,19 @@ export class WorkspaceRegistry {
       throw new Error(`Workspace root must be a directory: ${path}`);
     }
 
-    return this.createWorkspaceContext({ root, mode: "checkout", task });
+    return this.createWorkspaceContext({
+      root,
+      mode: "checkout",
+      task,
+      additionalRoots,
+    });
   }
 
   private async openWorktreeWorkspace(
     path: string,
     baseRef: string | undefined,
     task: string | undefined,
+    additionalRoots: AdditionalRoot[],
   ): Promise<WorkspaceContext> {
     const worktree = await createManagedWorktree({
       sourcePath: path,
@@ -362,6 +399,7 @@ export class WorkspaceRegistry {
       sourceRoot: worktree.sourceRoot,
       worktree,
       task,
+      additionalRoots,
     });
   }
 
@@ -371,13 +409,16 @@ export class WorkspaceRegistry {
     sourceRoot?: string;
     worktree?: WorkspaceWorktree;
     task?: string;
+    additionalRoots?: AdditionalRoot[];
   }): Promise<WorkspaceContext> {
+    const additionalRoots = input.additionalRoots ?? [];
     const workspace: Workspace = {
       id: `ws_${randomUUID()}`,
       root: input.root,
       mode: input.mode,
       sourceRoot: input.sourceRoot,
       worktree: input.worktree,
+      additionalRoots,
       ...this.loadSkillsForWorkspace(input.root),
       activatedSkillDirs: new Set(),
     };
@@ -465,6 +506,38 @@ export class WorkspaceRegistry {
     });
 
     return discovered.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  // -----------------------------------------------------------------------
+  // Task manifest approval
+  // -----------------------------------------------------------------------
+
+  approveTaskManifest(
+    workspaceId: string,
+    taskIds: string[],
+  ): ApprovedTasks | null {
+    const workspace = this.getWorkspace(workspaceId);
+    const manifest = loadTaskManifest(workspace.root);
+    if (!manifest) return null;
+
+    // Validate that all requested taskIds exist in the manifest
+    for (const id of taskIds) {
+      if (!manifest.tasks[id]) return null;
+    }
+
+    const sha = computeManifestSha256(workspace.root);
+    if (!sha) return null;
+
+    const approved: ApprovedTasks = {
+      manifestSha256: sha,
+      taskIds,
+    };
+    workspace.approvedTasks = approved;
+    return approved;
+  }
+
+  getApprovedTasks(workspaceId: string): ApprovedTasks | undefined {
+    return this.getWorkspace(workspaceId).approvedTasks;
   }
 }
 

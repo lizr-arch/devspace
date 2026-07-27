@@ -233,20 +233,79 @@ export async function manageGitBranch(input: {
   workspaceRoot: string;
   action: "list" | "create" | "switch";
   name?: string;
+  checkout?: boolean;
+  startPoint?: string;
 }): Promise<{
   current?: string;
+  currentBranch: string | null;
+  detached: boolean;
   branches: string[];
   action: "list" | "create" | "switch";
+  branchCreated?: boolean;
+  checkedOut?: boolean;
 }> {
   const root = await assertWorkspaceGitRoot(input.workspaceRoot);
+  let branchCreated: boolean | undefined;
+  let checkedOut: boolean | undefined;
+
   if (input.action !== "list") {
     if (!input.name) {
       throw new Error("GIT_INPUT_INVALID: Branch name is required.");
     }
     await runGit(root, ["check-ref-format", "--branch", input.name]);
+
     if (input.action === "create") {
-      await runGit(root, ["branch", "--", input.name, "HEAD"]);
+      const shouldCheckout = input.checkout !== false; // default true
+      const startPoint = input.startPoint || "HEAD";
+      let branchExists = false;
+      try {
+        await runGit(root, [
+          "show-ref",
+          "--verify",
+          "--quiet",
+          `refs/heads/${input.name}`,
+        ]);
+        branchExists = true;
+      } catch {
+        branchExists = false;
+      }
+
+      if (shouldCheckout) {
+        if (!branchExists) {
+          // Atomic: create + checkout — only creates ref if checkout succeeds.
+          await runGit(root, [
+            "switch",
+            "-c",
+            input.name,
+            startPoint,
+          ]);
+          branchCreated = true;
+        } else {
+          // Branch already exists — switch to it.
+          const status = await inspectGitStatus(root);
+          if (!status.clean) {
+            throw new Error(
+              "GIT_DIRTY: Switching branches requires a clean workspace.",
+            );
+          }
+          await assertNoExecutableGitFilters(root);
+          await runGit(root, ["switch", "--", input.name]);
+          branchCreated = false;
+        }
+        checkedOut = true;
+      } else {
+        // checkout=false: create ref only, stay where we are.
+        if (branchExists) {
+          throw new Error(
+            `GIT_BRANCH_EXISTS: Branch ${input.name} already exists.`,
+          );
+        }
+        await runGit(root, ["branch", "--", input.name, startPoint]);
+        branchCreated = true;
+        checkedOut = false;
+      }
     } else {
+      // action === "switch"
       const status = await inspectGitStatus(root);
       if (!status.clean) {
         throw new Error(
@@ -258,6 +317,7 @@ export async function manageGitBranch(input: {
       await runGit(root, ["switch", "--", input.name]);
     }
   }
+
   const branches = (
     await runGit(root, [
       "for-each-ref",
@@ -269,15 +329,21 @@ export async function manageGitBranch(input: {
     .map((value) => value.trim())
     .filter(Boolean)
     .sort();
+
   const current = (
     await runGit(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(
       () => ({ stdout: "", stderr: "" }),
     )
   ).stdout.trim();
+
   return {
     current: current || undefined,
+    currentBranch: current || null,
+    detached: !current,
     branches,
     action: input.action,
+    branchCreated,
+    checkedOut,
   };
 }
 

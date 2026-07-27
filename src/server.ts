@@ -118,6 +118,15 @@ import {
   type WorkspaceContext,
 } from "./workspaces.js";
 import {
+  type AdditionalRoot,
+  normalizeAdditionalRoots,
+} from "./roots.js";
+import { TaskRunner } from "./task-runner.js";
+import {
+  checkManifestIntegrity,
+  isTaskApproved,
+} from "./task-manifest.js";
+import {
   McpSessionRegistry,
   type McpSessionSnapshot,
 } from "./mcp-session-registry.js";
@@ -429,6 +438,7 @@ function exposedToolNames(
     "open_workspace",
     "project_memory_preflight",
     toolNames.read,
+    "poll_task",
   ];
   if (!config.readOnly) {
     tools.splice(3, 0, "publish_artifact");
@@ -457,6 +467,9 @@ function exposedToolNames(
       "inspect_blend",
       "inspect_audio",
       "render_model_preview",
+      "project_task",
+      "stop_task",
+      "approve_task_manifest",
     );
     if (config.gitRemoteWrite.enabled) {
       tools.splice(tools.indexOf("git_merge") + 1, 0, "git_push");
@@ -583,12 +596,16 @@ function requiredCapabilityForTool(tool: string): ToolCapability {
       "start_capture",
       "poll_job",
       "cancel_job",
+      "project_task",
+      "stop_task",
       "bash",
       "run_shell",
     ].includes(tool)
   ) {
     return "runner.execute";
   }
+  if (tool === "poll_task") return "workspace.read";
+  if (tool === "approve_task_manifest") return "workspace.write";
   if (
     [
       "start_game_session",
@@ -1419,6 +1436,7 @@ function createMcpServer(
   publisher: ArtifactPublisher,
   runtime: ServiceRuntime,
   workspaceApp: WorkspaceAppBuild | undefined,
+  tasks: TaskRunner,
 ): McpServer {
   const toolNames = toolNamesFor(config);
   const widgetMeta = (
@@ -2576,11 +2594,24 @@ function createMcpServer(
       {
         title: "Manage local Git branch",
         description:
-          "List, create from HEAD, or switch to an existing local branch. Switching requires a clean workspace; deletion, force, merge, and remote operations are unsupported.",
+          "List, create (with optional checkout), or switch to an existing local branch. By default, create also checks out the new branch atomically via git switch -c. Set checkout=false to create the ref without switching. Switching requires a clean workspace; deletion, force, merge, and remote operations are unsupported.",
         inputSchema: {
           workspaceId: z.string(),
           action: z.enum(["list", "create", "switch"]),
           name: z.string().max(255).optional(),
+          checkout: z
+            .boolean()
+            .optional()
+            .describe(
+              "When action=create, whether to also switch to the new branch. Defaults to true.",
+            ),
+          startPoint: z
+            .string()
+            .max(255)
+            .optional()
+            .describe(
+              "When action=create, the starting commit for the new branch. Defaults to HEAD.",
+            ),
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({ branch: z.unknown() }),
@@ -2592,7 +2623,14 @@ function createMcpServer(
           openWorldHint: false,
         },
       },
-      async ({ workspaceId, action, name, projectMemoryReceiptId }) => {
+      async ({
+        workspaceId,
+        action,
+        name,
+        checkout,
+        startPoint,
+        projectMemoryReceiptId,
+      }) => {
         const workspace = workspaces.getWorkspace(workspaceId);
         const projectMemory = workspaces.observeProjectMemoryAccess(
           workspaceId,
@@ -2603,8 +2641,13 @@ function createMcpServer(
           workspaceRoot: workspace.root,
           action,
           name,
+          checkout,
+          startPoint,
         });
-        const result = `Current branch: ${branch.current ?? "(detached)"}; local branches: ${branch.branches.join(", ")}.`;
+        const statusLine = branch.detached
+          ? "detached"
+          : `on ${branch.currentBranch}`;
+        const result = `Current: ${statusLine}; local branches: ${branch.branches.join(", ")}.`;
         return {
           content: [textBlock(result)],
           _meta: { tool: "git_branch", projectMemory },
@@ -2858,6 +2901,19 @@ function createMcpServer(
           .describe(
             "Optional current task for Project Memory SHADOW preflight.",
           ),
+        additionalRoots: z
+          .array(
+            z.object({
+              path: z.string().describe("Absolute path to an additional root directory."),
+              access: z.enum(["read_only", "read_write"]).describe(
+                "Access mode for this root.",
+              ),
+            }),
+          )
+          .optional()
+          .describe(
+            "Additional root directories the workspace may read/write beyond the primary workspace root.",
+          ),
       },
       outputSchema: workspaceContextOutputSchema,
       ...widgetMeta("resume_workspace", "workspace"),
@@ -2867,9 +2923,14 @@ function createMcpServer(
         openWorldHint: false,
       },
     },
-    async ({ workspaceId, task }) => {
+    async ({ workspaceId, task, additionalRoots }) => {
       const startedAt = performance.now();
-      const context = await workspaces.resumeWorkspace(workspaceId, task);
+      const parsedRoots = normalizeAdditionalRoots(additionalRoots);
+      const context = await workspaces.resumeWorkspace(
+        workspaceId,
+        task,
+        parsedRoots,
+      );
       return workspaceContextToolResponse({
         action: "resume_workspace",
         actionLabel: "Resumed",
@@ -2915,18 +2976,33 @@ function createMcpServer(
           .describe(
             "Current coding task. For an operator-configured repository, DevSpace runs SHADOW Project Memory preflight and returns the bounded bundle once. Task text is not persisted.",
           ),
+        additionalRoots: z
+          .array(
+            z.object({
+              path: z.string().describe("Absolute path to an additional root directory."),
+              access: z.enum(["read_only", "read_write"]).describe(
+                "Access mode for this root.",
+              ),
+            }),
+          )
+          .optional()
+          .describe(
+            "Additional root directories the workspace may read/write beyond the primary workspace root. Each root must specify an access mode. Junction and symlink targets are resolved before access checks.",
+          ),
       },
       outputSchema: workspaceContextOutputSchema,
       ...widgetMeta("open_workspace", "workspace"),
       annotations: { readOnlyHint: true },
     },
-    async ({ path, mode, baseRef, task }) => {
+    async ({ path, mode, baseRef, task, additionalRoots }) => {
       const startedAt = performance.now();
+      const parsedRoots = normalizeAdditionalRoots(additionalRoots);
       const context = await workspaces.openWorkspace({
         path,
         mode,
         baseRef,
         task,
+        additionalRoots: parsedRoots,
       });
       return workspaceContextToolResponse({
         action: "open_workspace",
@@ -4698,6 +4774,100 @@ function createMcpServer(
     );
   }
 
+  // -----------------------------------------------------------------------
+  // project_task / poll_task / stop_task / approve_task_manifest
+  // -----------------------------------------------------------------------
+
+  registerAppTool(
+    server,
+    "project_task",
+    {
+      title: "Run a declared project task",
+      description:
+        "Execute a task declared in the workspace's .devspace/tasks.yaml. Tasks are named, pre-approved commands with fixed arguments and optional declared parameters.",
+      inputSchema: {
+        workspaceId: z.string(),
+        task: z.string().describe("Task ID from .devspace/tasks.yaml."),
+        params: z.record(z.string(), z.string()).optional().describe("Parameter values."),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+      },
+      outputSchema: resultOutputSchema({ task: z.unknown() }),
+      _meta: {},
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ workspaceId, task: taskId, params, projectMemoryReceiptId }) => {
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const projectMemory = workspaces.observeProjectMemoryAccess(workspaceId, "project_task", projectMemoryReceiptId);
+      const approved = workspace.approvedTasks;
+      if (!approved) throw new Error("TASK_NOT_APPROVED: No manifest approved.");
+      if (!checkManifestIntegrity(workspace.root, approved)) throw new Error("TASK_MANIFEST_CHANGED: Re-approve required.");
+      if (!isTaskApproved(taskId, approved)) throw new Error(`TASK_NOT_APPROVED: ${taskId}.`);
+
+      const result = await tasks.runTask({ workspaceId, workspaceRoot: workspace.root, taskId, params: params ?? {}, additionalRoots: workspace.additionalRoots });
+      const text = result.mode === "run"
+        ? `Task ${result.taskId}: ${result.status} (exit ${result.exitCode}) in ${result.durationMs}ms.`
+        : `Task ${result.taskId}: session ${result.sessionId} started (pid ${result.pid}).`;
+      return { content: [textBlock(text)], _meta: { tool: "project_task", projectMemory }, structuredContent: { result: text, task: result } };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "poll_task",
+    {
+      title: "Poll a running task session",
+      description: "Check the status and recent output of a running task session.",
+      inputSchema: { sessionId: z.string().describe("Task session ID from project_task.") },
+      outputSchema: resultOutputSchema({ session: z.unknown() }),
+      _meta: {},
+      annotations: { readOnlyHint: true },
+    },
+    async ({ sessionId }) => {
+      const session = tasks.getSession(sessionId);
+      if (!session) throw new Error(`TASK_SESSION_NOT_FOUND: ${sessionId}`);
+      const output = session.stdout.slice(-8000) + session.stderr.slice(-2000);
+      return { content: [textBlock(`Task ${session.taskId}: ${session.status}
+${output}`)], _meta: {}, structuredContent: { result: output, session } };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "stop_task",
+    {
+      title: "Stop a running task session",
+      description: "Terminate a running task session.",
+      inputSchema: { sessionId: z.string().describe("Task session ID from project_task.") },
+      outputSchema: resultOutputSchema({ stopped: z.boolean() }),
+      _meta: {},
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ sessionId }) => {
+      const stopped = tasks.stopSession(sessionId);
+      return { content: [textBlock(stopped ? "Stopped." : "Not found.")], _meta: {}, structuredContent: { result: stopped ? "stopped" : "not_found", stopped } };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "approve_task_manifest",
+    {
+      title: "Approve task manifest",
+      description: "Approve tasks from .devspace/tasks.yaml. Records manifest SHA; changes invalidate approval.",
+      inputSchema: { workspaceId: z.string(), taskIds: z.array(z.string()), projectMemoryReceiptId: projectMemoryReceiptInputSchema() },
+      outputSchema: resultOutputSchema({ approved: z.unknown() }),
+      _meta: {},
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ workspaceId, taskIds, projectMemoryReceiptId }) => {
+      const projectMemory = workspaces.observeProjectMemoryAccess(workspaceId, "approve_task_manifest", projectMemoryReceiptId);
+      const approved = workspaces.approveTaskManifest(workspaceId, taskIds);
+      if (!approved) throw new Error("TASK_APPROVAL_FAILED.");
+      const result = `Approved ${taskIds.length} task(s). SHA: ${approved.manifestSha256}.`;
+      return { content: [textBlock(result)], _meta: { tool: "approve_task_manifest", projectMemory }, structuredContent: { result, approved } };
+    },
+  );
+
   return server;
 }
 
@@ -4731,6 +4901,7 @@ export function createServer(
     },
   });
   const runners = new RunnerRegistry(config.runners);
+  const tasks = new TaskRunner();
   const runtime = createServiceRuntime(config, workspaceApp, () =>
     mcpSessions.snapshot(),
   );
@@ -4931,6 +5102,7 @@ export function createServer(
         publisher,
         runtime,
         workspaceApp,
+        tasks,
       );
       let statelessClosed = false;
       const closeStatelessServer = (): void => {
@@ -5026,6 +5198,7 @@ export function createServer(
           publisher,
           runtime,
           workspaceApp,
+          tasks,
         );
         await server.connect(createdTransport);
       } else {
