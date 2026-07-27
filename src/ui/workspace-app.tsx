@@ -25,6 +25,13 @@ import {
 } from "./card-types.js";
 import { normalizeToolResult } from "./normalize-tool-result.js";
 import { RenderGenerationGate } from "./render-generation.js";
+import {
+  WORKSPACE_APP_VERSION,
+  WorkspaceAppTelemetry,
+  errorName as telemetryErrorName,
+  resourceType as telemetryResourceType,
+  type WorkspaceAppErrorPhase,
+} from "./workspace-app-telemetry.js";
 import "./workspace-app.css";
 
 interface ToolDisplay {
@@ -55,6 +62,15 @@ let errorMessage: string | null = null;
 let currentPayload: MountedPayload | null = null;
 let currentPayloadContainer: HTMLElement | null = null;
 const renderGate = new RenderGenerationGate();
+const telemetry = new WorkspaceAppTelemetry();
+let telemetryPhase: WorkspaceAppErrorPhase = "bootstrap";
+
+window.addEventListener("error", captureWindowError, true);
+window.addEventListener("unhandledrejection", (event) => {
+  telemetry.capture("unhandled_rejection", telemetryPhase, {
+    errorName: telemetryErrorName(event.reason),
+  });
+});
 
 const maybeAppRoot = document.querySelector<HTMLElement>("#app");
 
@@ -69,15 +85,29 @@ void boot();
 async function boot(): Promise<void> {
   render();
 
-  app = new App({ name: "devspace-tool-cards", version: "0.4.0" }, {});
+  app = new App(
+    { name: "devspace-tool-cards", version: WORKSPACE_APP_VERSION },
+    {},
+  );
 
   app.ontoolresult = (result) => {
-    renderGate.nextResult();
-    card = normalizeToolResult(result);
-    expanded = false;
-    reviewFilesExpanded = false;
-    errorMessage = null;
-    render();
+    telemetryPhase = "tool_result";
+    try {
+      renderGate.nextResult();
+      card = normalizeToolResult(result);
+      expanded = false;
+      reviewFilesExpanded = false;
+      errorMessage = null;
+      render();
+    } catch (resultError) {
+      telemetry.capture("render_error", "tool_result", {
+        errorName: telemetryErrorName(resultError),
+      });
+      errorMessage = "Unable to render this tool result.";
+      render();
+    } finally {
+      telemetryPhase = "render";
+    }
   };
 
   app.onhostcontextchanged = (ctx) => {
@@ -95,19 +125,47 @@ async function boot(): Promise<void> {
   };
 
   try {
+    telemetryPhase = "connect";
     await app.connect();
     const initialContext = app.getHostContext();
     if (initialContext) hostContext = initialContext;
     applyHostContext();
     connected = true;
+    telemetry.connect(async (diagnostic) => {
+      if (!app) throw new Error("Workspace App bridge unavailable");
+      const response = await app.callServerTool({
+        name: "report_workspace_app_error",
+        arguments: { ...diagnostic },
+      });
+      if (response.isError) {
+        throw new Error("Workspace App diagnostic rejected");
+      }
+    });
   } catch (connectError) {
+    telemetry.capture("connect_error", "connect", {
+      errorName: telemetryErrorName(connectError),
+    });
     connectionError =
       connectError instanceof Error
         ? connectError.message
         : String(connectError);
+  } finally {
+    telemetryPhase = "render";
   }
 
   render();
+}
+
+function captureWindowError(event: Event): void {
+  if (event instanceof ErrorEvent) {
+    telemetry.capture("script_error", telemetryPhase, {
+      errorName: telemetryErrorName(event.error),
+    });
+    return;
+  }
+  telemetry.capture("resource_error", telemetryPhase, {
+    resourceType: telemetryResourceType(event.target),
+  });
 }
 
 function applyHostContext(): void {
@@ -271,6 +329,9 @@ async function renderPayloadIfNeeded(): Promise<void> {
       }
 
       setPayloadLoading(target, false);
+      telemetry.capture("render_error", "payload_load", {
+        errorName: telemetryErrorName(loadError),
+      });
       renderStatus(
         target,
         loadError instanceof Error
@@ -315,6 +376,9 @@ async function renderPayloadIfNeeded(): Promise<void> {
       if (!renderGate.isCurrent(renderToken, card, currentPayloadContainer)) {
         return;
       }
+      telemetry.capture("render_error", "payload_load", {
+        errorName: telemetryErrorName(loadError),
+      });
       renderStatus(
         target,
         loadError instanceof Error

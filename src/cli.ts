@@ -434,6 +434,9 @@ async function runDoctor(args: string[] = []): Promise<void> {
           `    MCP App build fingerprint: ${external.mcpAppBuildFingerprint.ok ? "OK" : "FAIL"}${external.mcpAppBuildFingerprint.status ? ` (${external.mcpAppBuildFingerprint.status})` : ""} - ${external.mcpAppBuildFingerprint.detail}`,
         );
         console.log(
+          `    Workspace App telemetry: ${external.workspaceAppTelemetryTool.ok ? "OK" : "FAIL"}${external.workspaceAppTelemetryTool.status ? ` (${external.workspaceAppTelemetryTool.status})` : ""} - ${external.workspaceAppTelemetryTool.detail}`,
+        );
+        console.log(
           `    MCP devspace_info: ${external.devspaceInfo.ok ? "OK" : "FAIL"}${external.devspaceInfo.status ? ` (${external.devspaceInfo.status})` : ""} - ${external.devspaceInfo.detail}`,
         );
         console.log(

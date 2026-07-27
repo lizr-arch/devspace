@@ -139,7 +139,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 const TOOL_SCHEMA_REVISION =
-  "devspacemac-mcp-app-session-stability-v1.2026-07-27";
+  "devspacemac-workspace-app-telemetry-v1.2026-07-27";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -1486,6 +1486,71 @@ function createMcpServer(
           },
         ],
       }),
+    );
+
+    registerAppTool(
+      server,
+      "report_workspace_app_error",
+      {
+        title: "Report Workspace App diagnostic",
+        description:
+          "Records a bounded, sanitized Workspace App runtime diagnostic. This tool is available only to the embedded App and does not accept messages, URLs, stack traces, chat content, or tool arguments.",
+        inputSchema: {
+          kind: z.enum([
+            "script_error",
+            "unhandled_rejection",
+            "resource_error",
+            "connect_error",
+            "render_error",
+          ]),
+          phase: z.enum([
+            "bootstrap",
+            "connect",
+            "tool_result",
+            "render",
+            "payload_load",
+            "teardown",
+          ]),
+          errorName: z
+            .string()
+            .max(48)
+            .regex(/^[A-Za-z0-9_.-]+$/)
+            .optional(),
+          resourceType: z
+            .enum(["script", "style", "image", "font", "other"])
+            .optional(),
+          appVersion: z
+            .string()
+            .max(16)
+            .regex(/^\d{1,3}\.\d{1,3}\.\d{1,3}$/),
+          instanceId: z.uuid().optional(),
+        },
+        _meta: {
+          ui: {
+            visibility: ["app"],
+          },
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async (diagnostic) => {
+        const result =
+          runtime.monitorEvents.recordWorkspaceAppError(diagnostic);
+        return {
+          content: [
+            textBlock(
+              result.accepted
+                ? "Workspace App diagnostic recorded."
+                : `Workspace App diagnostic skipped (${result.reason}).`,
+            ),
+          ],
+          structuredContent: result,
+        };
+      },
     );
   }
 

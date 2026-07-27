@@ -176,6 +176,24 @@ actions before testing in a new chat. `devspace_info` reports the current
 resource URI and build fingerprint so a cached template can be distinguished
 from the running build.
 
+## Workspace App Runtime Diagnostics
+
+When widgets are enabled, the Workspace App can report bounded runtime
+diagnostics through an app-only MCP tool. Reports travel through the existing
+authenticated MCP connection and are stored only in the local DevSpace monitor
+event file.
+
+The report schema accepts controlled error categories, lifecycle phases, an
+error class name, the App version, and a random App instance identifier. It
+does not accept error messages, stack traces, URLs, chat content, tool
+arguments, source code, or local paths. Identical reports are deduplicated and
+the server limits the global report rate.
+
+This covers errors after the Workspace App JavaScript starts running. It cannot
+capture ChatGPT host-page failures, OpenAI backend failures, or template and
+entry-script failures that prevent the App from starting at all. Use browser
+inspection and the public doctor checks for those layers.
+
 ## Pinggy Note
 
 If you use a free Pinggy tunnel, you may see a browser caution page before the

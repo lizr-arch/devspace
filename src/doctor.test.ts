@@ -402,6 +402,8 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
     assert.equal(probe.toolNames?.length, 44);
+    assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
+    assert.equal(probe.workspaceAppTelemetryTool.ok, true);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
     assert.equal(probe.toolNames?.includes("git_merge"), true);
     assert.equal(probe.toolNames?.includes("git_push"), true);

@@ -46,6 +46,69 @@ try {
   );
   assert.equal(safeMonitorPath("/mcp"), "/mcp");
   assert.equal(safeMonitorPath("/secret-token"), "/other");
+
+  const webAppResult = store.recordWorkspaceAppError(
+    {
+      kind: "script_error",
+      phase: "render",
+      errorName: "TypeError/private path",
+      appVersion: "0.5.0",
+      instanceId: "018f4e53-3a31-7abc-8def-0123456789ab",
+    },
+    1_000,
+  );
+  assert.deepEqual(webAppResult, { accepted: true, reason: "recorded" });
+  assert.deepEqual(
+    store.recordWorkspaceAppError(
+      {
+        kind: "script_error",
+        phase: "render",
+        errorName: "TypeError/private path",
+        appVersion: "0.5.0",
+        instanceId: "018f4e53-3a31-7abc-8def-111111111111",
+      },
+      2_000,
+    ),
+    { accepted: false, reason: "duplicate" },
+  );
+  const webAppEvent = store.snapshot()[0];
+  assert.equal(webAppEvent?.source, "web_app");
+  assert.equal(webAppEvent?.code, "WEB_APP_SCRIPT_ERROR");
+  assert.equal(
+    webAppEvent?.message,
+    "Workspace App script_error during render · TypeError_private_path · v0.5.0",
+  );
+  assert.equal(
+    webAppEvent?.correlationId,
+    "018f4e53-3a31-7abc-8def-0123456789ab",
+  );
+
+  for (let index = 0; index < 11; index += 1) {
+    assert.equal(
+      store.recordWorkspaceAppError(
+        {
+          kind: "render_error",
+          phase: "payload_load",
+          errorName: `RenderError${index}`,
+          appVersion: "0.5.0",
+        },
+        3_000 + index,
+      ).accepted,
+      true,
+    );
+  }
+  assert.deepEqual(
+    store.recordWorkspaceAppError(
+      {
+        kind: "connect_error",
+        phase: "connect",
+        errorName: "ConnectionError",
+        appVersion: "0.5.0",
+      },
+      4_000,
+    ),
+    { accepted: false, reason: "rate_limited" },
+  );
 } finally {
   rmSync(stateDir, { recursive: true, force: true });
 }
