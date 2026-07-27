@@ -7,18 +7,23 @@ import {
   isToolName,
   isWorkspaceTool,
   payloadText,
+  TOOL_NAMES,
 } from "./card-types.js";
 import { normalizeToolResult } from "./normalize-tool-result.js";
+import { attachRegisteredToolName } from "../tool-result-metadata.js";
 
-for (const tool of [
-  "resume_workspace",
-  "project_memory_preflight",
-  "start_job",
-  "start_capture",
-  "poll_job",
-  "cancel_job",
-]) {
+for (const tool of TOOL_NAMES) {
   assert.equal(isToolName(tool), true, `${tool} should be supported`);
+  const normalized = normalizeToolResult(
+    toolResult(
+      attachRegisteredToolName(tool, {
+        content: [{ type: "text", text: `${tool} completed` }],
+        structuredContent: { result: `${tool} completed` },
+      }) as CallToolResult,
+    ),
+  );
+  assert.equal(normalized.tool, tool);
+  assert.match(payloadText(normalized.payload), new RegExp(tool));
 }
 
 const resumed = normalizeToolResult(
@@ -126,6 +131,19 @@ const failedUnknown = normalizeToolResult(
 assert.equal(failedUnknown.success, false);
 assert.equal(failedUnknown.status, "error");
 
+const missingToolMeta = normalizeToolResult(
+  toolResult({
+    content: [{ type: "text", text: "Result without tool metadata." }],
+    structuredContent: { result: "still readable" },
+  }),
+);
+assert.equal(missingToolMeta.tool, "unknown_tool");
+assert.equal(missingToolMeta.status, "success");
+assert.match(
+  genericPayloadText(missingToolMeta),
+  /Result without tool metadata/,
+);
+
 const structuredPayloadWins = normalizeToolResult(
   toolResult({
     content: [{ type: "text", text: "raw content" }],
@@ -152,6 +170,34 @@ const metaPayloadWins = normalizeToolResult(
   }),
 );
 assert.equal(payloadText(metaPayloadWins.payload), "meta payload");
+
+const gitDiff = normalizeToolResult(
+  toolResult({
+    content: [{ type: "text", text: "diff --git a/a.ts b/a.ts" }],
+    _meta: { tool: "git_diff" },
+    structuredContent: {
+      result: "diff available",
+      diff: { patch: "diff --git a/a.ts b/a.ts\n+const stable = true;" },
+    },
+  }),
+);
+assert.match(gitDiff.payload?.patch ?? "", /stable = true/);
+
+const rapidResults = [
+  "resume_workspace",
+  "project_memory_preflight",
+  "read",
+  "grep",
+].map((tool) =>
+  normalizeToolResult(
+    toolResult({
+      content: [{ type: "text", text: `${tool} result` }],
+      _meta: { tool },
+    }),
+  ),
+);
+assert.equal(rapidResults.at(-1)?.tool, "grep");
+assert.notEqual(rapidResults[1].tool, rapidResults[0].tool);
 
 function toolResult(result: CallToolResult): CallToolResult {
   return result;

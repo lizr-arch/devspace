@@ -23,6 +23,7 @@ import {
   type ToolResultCard,
 } from "./card-types.js";
 import { normalizeToolResult } from "./normalize-tool-result.js";
+import { RenderGenerationGate } from "./render-generation.js";
 import "./workspace-app.css";
 
 interface ToolDisplay {
@@ -52,6 +53,7 @@ let reviewFilesExpanded = false;
 let errorMessage: string | null = null;
 let currentPayload: MountedPayload | null = null;
 let currentPayloadContainer: HTMLElement | null = null;
+const renderGate = new RenderGenerationGate();
 
 const maybeAppRoot = document.querySelector<HTMLElement>("#app");
 
@@ -66,12 +68,10 @@ void boot();
 async function boot(): Promise<void> {
   render();
 
-  app = new App(
-    { name: "devspace-tool-cards", version: "0.4.0" },
-    {},
-  );
+  app = new App({ name: "devspace-tool-cards", version: "0.4.0" }, {});
 
   app.ontoolresult = (result) => {
+    renderGate.nextResult();
     card = normalizeToolResult(result);
     expanded = false;
     reviewFilesExpanded = false;
@@ -100,9 +100,10 @@ async function boot(): Promise<void> {
     applyHostContext();
     connected = true;
   } catch (connectError) {
-    connectionError = connectError instanceof Error
-      ? connectError.message
-      : String(connectError);
+    connectionError =
+      connectError instanceof Error
+        ? connectError.message
+        : String(connectError);
   }
 
   render();
@@ -137,7 +138,10 @@ function render(): void {
   }
 
   if (!card) {
-    renderEmpty(errorMessage ?? "Waiting for a tool result.", errorMessage ? "error" : "muted");
+    renderEmpty(
+      errorMessage ?? "Waiting for a tool result.",
+      errorMessage ? "error" : "muted",
+    );
     return;
   }
 
@@ -149,7 +153,9 @@ function render(): void {
 
   const expandable = isExpandableCard(card);
   const main = element("main", { className: "shell" });
-  const section = element("section", { className: `tool-card ${display.tone}` });
+  const section = element("section", {
+    className: `tool-card ${display.tone}`,
+  });
   const button = element("button", {
     className: "tool-header",
     type: "button",
@@ -168,7 +174,10 @@ function render(): void {
   icon.innerHTML = display.icon;
 
   const toolMain = element("span", { className: "tool-main" });
-  const title = element("span", { className: "tool-title", text: display.title });
+  const title = element("span", {
+    className: "tool-title",
+    text: display.title,
+  });
   const label = element("span", {
     className: "tool-label",
     text: display.label,
@@ -197,28 +206,41 @@ function render(): void {
 
 function renderEmpty(message: string, tone: "muted" | "error" = "muted"): void {
   const main = element("main", { className: "shell" });
-  main.append(element("section", { className: `empty ${tone}`, text: message }));
+  main.append(
+    element("section", { className: `empty ${tone}`, text: message }),
+  );
   appRoot.replaceChildren(main);
 }
 
 async function renderPayloadIfNeeded(): Promise<void> {
-  if (!card || !currentPayloadContainer || (!expanded && !isReviewTool(card.tool))) return;
+  if (
+    !card ||
+    !currentPayloadContainer ||
+    (!expanded && !isReviewTool(card.tool))
+  )
+    return;
 
   const target = currentPayloadContainer;
+  const activeCard = card;
+  const renderToken = renderGate.beginPayload(activeCard, target);
 
   if (errorMessage) {
     renderStatus(target, errorMessage, "error");
     return;
   }
 
-  if (isWorkspaceTool(card.tool)) {
-    renderPrePayload(target, workspacePayloadText(card), "open_workspace");
+  if (isWorkspaceTool(activeCard.tool)) {
+    renderPrePayload(
+      target,
+      workspacePayloadText(activeCard),
+      "open_workspace",
+    );
     return;
   }
 
-  if (shouldUseHeavyPayload(card)) {
+  if (shouldUseHeavyPayload(activeCard)) {
     if (currentPayload) {
-      currentPayload.update({ card, hostContext, errorMessage });
+      currentPayload.update({ card: activeCard, hostContext, errorMessage });
       return;
     }
 
@@ -226,67 +248,102 @@ async function renderPayloadIfNeeded(): Promise<void> {
 
     try {
       const { mountHeavyPayload } = await import("./heavy-payload.js");
-      if (target !== currentPayloadContainer || !expanded || !card) return;
+      if (
+        !renderGate.isCurrent(renderToken, card, currentPayloadContainer) ||
+        !expanded
+      ) {
+        return;
+      }
 
       setPayloadLoading(target, false);
       currentPayload = mountHeavyPayload(target, {
-        card,
+        card: activeCard,
         hostContext,
         errorMessage,
       });
     } catch (loadError) {
-      if (target !== currentPayloadContainer || !expanded) return;
+      if (
+        !renderGate.isCurrent(renderToken, card, currentPayloadContainer) ||
+        !expanded
+      ) {
+        return;
+      }
 
       setPayloadLoading(target, false);
       renderStatus(
         target,
-        loadError instanceof Error ? loadError.message : "Unable to load details.",
+        loadError instanceof Error
+          ? loadError.message
+          : "Unable to load details.",
         "error",
       );
     }
     return;
   }
 
-  if (isReviewTool(card.tool)) {
+  if (isReviewTool(activeCard.tool)) {
     const visibleFileCount = reviewFilesExpanded
       ? undefined
-      : Math.max(3, (card.files ?? []).slice(0, 3).length);
+      : Math.max(3, (activeCard.files ?? []).slice(0, 3).length);
 
     if (currentPayload) {
-      currentPayload.update({ card, hostContext, errorMessage, visibleFileCount });
+      currentPayload.update({
+        card: activeCard,
+        hostContext,
+        errorMessage,
+        visibleFileCount,
+      });
       return;
     }
 
     renderStatus(target, "Loading review...");
 
-    const { mountReviewPayload } = await import("./review-payload.js");
-    if (target !== currentPayloadContainer || !card) return;
+    try {
+      const { mountReviewPayload } = await import("./review-payload.js");
+      if (!renderGate.isCurrent(renderToken, card, currentPayloadContainer)) {
+        return;
+      }
 
-    currentPayload = mountReviewPayload(target, {
-      card,
-      hostContext,
-      errorMessage,
-      visibleFileCount,
-    });
+      currentPayload = mountReviewPayload(target, {
+        card: activeCard,
+        hostContext,
+        errorMessage,
+        visibleFileCount,
+      });
+    } catch (loadError) {
+      if (!renderGate.isCurrent(renderToken, card, currentPayloadContainer)) {
+        return;
+      }
+      renderStatus(
+        target,
+        loadError instanceof Error
+          ? loadError.message
+          : "Unable to load review.",
+        "error",
+      );
+    }
     return;
   }
 
-  const text = isToolName(card.tool)
-    ? payloadText(card.payload)
-    : genericPayloadText(card);
+  const text = isToolName(activeCard.tool)
+    ? payloadText(activeCard.payload)
+    : genericPayloadText(activeCard);
   if (!text) {
     renderStatus(target, "No details available.");
     return;
   }
 
-  renderPrePayload(target, text, card.tool);
+  renderPrePayload(target, text, activeCard.tool);
 }
 
 function shouldUseHeavyPayload(card: ToolResultCard): boolean {
-  return isReadTool(card.tool) || isEditTool(card.tool) || isWriteTool(card.tool);
+  return (
+    isReadTool(card.tool) || isEditTool(card.tool) || isWriteTool(card.tool)
+  );
 }
 
 function unmountPayload(): void {
+  renderGate.invalidatePayload();
   unmountCurrentPayload();
   currentPayload = null;
   currentPayloadContainer = null;
@@ -303,7 +360,9 @@ function renderStatus(
   tone: "muted" | "error" = "muted",
 ): void {
   unmountCurrentPayload();
-  container.replaceChildren(element("div", { className: `status ${tone}`, text: message }));
+  container.replaceChildren(
+    element("div", { className: `status ${tone}`, text: message }),
+  );
 }
 
 function renderPrePayload(
@@ -312,7 +371,9 @@ function renderPrePayload(
   tool: string,
 ): void {
   unmountCurrentPayload();
-  container.replaceChildren(element("pre", { className: `text-payload ${tool}`, text }));
+  container.replaceChildren(
+    element("pre", { className: `text-payload ${tool}`, text }),
+  );
 }
 
 function renderSummaryBadge(card: ToolResultCard): HTMLElement {
@@ -322,8 +383,14 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
     const stats = element("span", { className: "stats" });
     stats.setAttribute("aria-label", "Review diff statistics");
     stats.append(
-      element("span", { className: "add", text: `+${String(summary.additions ?? 0)}` }),
-      element("span", { className: "remove", text: `-${String(summary.removals ?? 0)}` }),
+      element("span", {
+        className: "add",
+        text: `+${String(summary.additions ?? 0)}`,
+      }),
+      element("span", {
+        className: "remove",
+        text: `-${String(summary.removals ?? 0)}`,
+      }),
     );
     return stats;
   }
@@ -332,8 +399,14 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
     const stats = element("span", { className: "stats" });
     stats.setAttribute("aria-label", "Diff statistics");
     stats.append(
-      element("span", { className: "add", text: `+${String(summary.additions ?? 0)}` }),
-      element("span", { className: "remove", text: `-${String(summary.removals ?? 0)}` }),
+      element("span", {
+        className: "add",
+        text: `+${String(summary.additions ?? 0)}`,
+      }),
+      element("span", {
+        className: "remove",
+        text: `-${String(summary.removals ?? 0)}`,
+      }),
     );
     return stats;
   }
@@ -352,12 +425,18 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
       agentsBadge.insertAdjacentHTML("afterbegin", checkCircleIcon());
     }
 
-    group.append(agentsBadge, element("span", { className: "badge", text: `${skills} skills` }));
+    group.append(
+      agentsBadge,
+      element("span", { className: "badge", text: `${skills} skills` }),
+    );
     return group;
   }
 
   if (isShellTool(card.tool)) {
-    return element("span", { className: "badge", text: `ran · ${String(summary.lines ?? 0)} lines` });
+    return element("span", {
+      className: "badge",
+      text: `ran · ${String(summary.lines ?? 0)} lines`,
+    });
   }
 
   if (isJobTool(card.tool)) {
@@ -382,10 +461,16 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
   }
 
   if (isSearchTool(card.tool)) {
-    return element("span", { className: "badge", text: `${String(summary.lines ?? 0)} lines` });
+    return element("span", {
+      className: "badge",
+      text: `${String(summary.lines ?? 0)} lines`,
+    });
   }
 
-  return element("span", { className: "badge", text: `${String(summary.lines ?? 0)} lines` });
+  return element("span", {
+    className: "badge",
+    text: `${String(summary.lines ?? 0)} lines`,
+  });
 }
 
 function renderReviewCard(card: ToolResultCard, display: ToolDisplay): void {
@@ -404,7 +489,11 @@ function renderReviewCard(card: ToolResultCard, display: ToolDisplay): void {
 
   titleGroup.append(
     element("span", { className: "tool-title", text: display.title }),
-    element("span", { className: "tool-label", text: display.label, title: display.label }),
+    element("span", {
+      className: "tool-label",
+      text: display.label,
+      title: display.label,
+    }),
   );
   header.append(icon, titleGroup, renderSummaryBadge(card));
 
@@ -490,7 +579,9 @@ function formatAgentsFilesForPayload(
     .map((file) => {
       const path = file.path ?? "AGENTS.md";
       const content = file.content?.trim();
-      return content ? `${path}\n\n${content}` : `${path}\n\nNo content loaded.`;
+      return content
+        ? `${path}\n\n${content}`
+        : `${path}\n\nNo content loaded.`;
     })
     .join("\n\n");
 }
@@ -501,7 +592,12 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
   switch (card.tool) {
     case "open_workspace":
     case "resume_workspace":
-      return { icon: folderIcon(), title: "Workspace", label, tone: "workspace" };
+      return {
+        icon: folderIcon(),
+        title: "Workspace",
+        label,
+        tone: "workspace",
+      };
     case "project_memory_preflight":
       return {
         icon: projectMemoryIcon(),
@@ -514,7 +610,12 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
       return { icon: fileIcon(), title: "Read File", label, tone: "read" };
     case "write_file":
     case "write":
-      return { icon: filePlusIcon(), title: "Write File", label, tone: "write" };
+      return {
+        icon: filePlusIcon(),
+        title: "Write File",
+        label,
+        tone: "write",
+      };
     case "edit_file":
     case "edit":
       return { icon: editIcon(), title: "Edit File", label, tone: "edit" };
@@ -526,12 +627,22 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
       return { icon: filesIcon(), title: "Glob", label, tone: "search" };
     case "list_directory":
     case "ls":
-      return { icon: listIcon(), title: "List Directory", label, tone: "directory" };
+      return {
+        icon: listIcon(),
+        title: "List Directory",
+        label,
+        tone: "directory",
+      };
     case "run_shell":
     case "bash":
       return { icon: terminalIcon(), title: "Bash", label, tone: "shell" };
     case "show_changes":
-      return { icon: reviewIcon(), title: "Show Changes", label, tone: "review" };
+      return {
+        icon: reviewIcon(),
+        title: "Show Changes",
+        label,
+        tone: "review",
+      };
     case "start_job":
     case "start_capture":
     case "poll_job":
@@ -553,7 +664,9 @@ function getToolLabel(card: ToolResultCard): string {
   }
   if (isReviewTool(card.tool)) {
     const count = Number(card.summary?.files ?? card.files?.length ?? 0);
-    return count === 0 ? "No changes since last review" : `${count} changed ${count === 1 ? "file" : "files"}`;
+    return count === 0
+      ? "No changes since last review"
+      : `${count} changed ${count === 1 ? "file" : "files"}`;
   }
   if (isJobTool(card.tool)) {
     const jobId = card.summary?.jobId;
@@ -588,10 +701,13 @@ function element<K extends keyof HTMLElementTagNameMap>(
   const node = document.createElement(tag);
   if (options.className) node.className = options.className;
   if (options.text !== undefined) node.textContent = options.text;
-  if (options.type !== undefined && "type" in node) node.setAttribute("type", options.type);
+  if (options.type !== undefined && "type" in node)
+    node.setAttribute("type", options.type);
   if (options.title !== undefined) node.title = options.title;
-  if (options.ariaHidden !== undefined) node.setAttribute("aria-hidden", options.ariaHidden);
-  if (options.ariaExpanded !== undefined) node.setAttribute("aria-expanded", options.ariaExpanded);
+  if (options.ariaHidden !== undefined)
+    node.setAttribute("aria-hidden", options.ariaHidden);
+  if (options.ariaExpanded !== undefined)
+    node.setAttribute("aria-expanded", options.ariaExpanded);
   if (options.disabled !== undefined && "disabled" in node) {
     (node as HTMLButtonElement).disabled = options.disabled;
   }
@@ -603,19 +719,27 @@ function iconSvg(children: string): string {
 }
 
 function folderIcon(): string {
-  return iconSvg('<path d="M3 7.5h6l2 2h10" /><path d="M3 7.5v10A2.5 2.5 0 0 0 5.5 20h13a2.5 2.5 0 0 0 2.5-2.5v-8H3" />');
+  return iconSvg(
+    '<path d="M3 7.5h6l2 2h10" /><path d="M3 7.5v10A2.5 2.5 0 0 0 5.5 20h13a2.5 2.5 0 0 0 2.5-2.5v-8H3" />',
+  );
 }
 
 function fileIcon(): string {
-  return iconSvg('<path d="M14 3v5h5" /><path d="M6 3h8l5 5v13H6z" /><path d="M9 13h6" /><path d="M9 17h4" />');
+  return iconSvg(
+    '<path d="M14 3v5h5" /><path d="M6 3h8l5 5v13H6z" /><path d="M9 13h6" /><path d="M9 17h4" />',
+  );
 }
 
 function filePlusIcon(): string {
-  return iconSvg('<path d="M14 3v5h5" /><path d="M6 3h8l5 5v13H6z" /><path d="M12 12v6" /><path d="M9 15h6" />');
+  return iconSvg(
+    '<path d="M14 3v5h5" /><path d="M6 3h8l5 5v13H6z" /><path d="M12 12v6" /><path d="M9 15h6" />',
+  );
 }
 
 function editIcon(): string {
-  return iconSvg('<path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16z" /><path d="m13.5 6.5 4 4" />');
+  return iconSvg(
+    '<path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16z" /><path d="m13.5 6.5 4 4" />',
+  );
 }
 
 function searchIcon(): string {
@@ -623,7 +747,9 @@ function searchIcon(): string {
 }
 
 function filesIcon(): string {
-  return iconSvg('<path d="M8 7V4h9l4 4v10h-3" /><path d="M12 4v5h5" /><path d="M4 7h9l4 4v10H4z" /><path d="M13 7v5h4" />');
+  return iconSvg(
+    '<path d="M8 7V4h9l4 4v10h-3" /><path d="M12 4v5h5" /><path d="M4 7h9l4 4v10H4z" /><path d="M13 7v5h4" />',
+  );
 }
 
 function checkCircleIcon(): string {
@@ -631,7 +757,9 @@ function checkCircleIcon(): string {
 }
 
 function listIcon(): string {
-  return iconSvg('<path d="M8 6h12" /><path d="M8 12h12" /><path d="M8 18h12" /><path d="M4 6h.01" /><path d="M4 12h.01" /><path d="M4 18h.01" />');
+  return iconSvg(
+    '<path d="M8 6h12" /><path d="M8 12h12" /><path d="M8 18h12" /><path d="M4 6h.01" /><path d="M4 12h.01" /><path d="M4 18h.01" />',
+  );
 }
 
 function terminalIcon(): string {
@@ -639,7 +767,9 @@ function terminalIcon(): string {
 }
 
 function reviewIcon(): string {
-  return iconSvg('<path d="M5 4h14v16H5z" /><path d="M8 8h8" /><path d="M8 12h5" /><path d="M8 16h7" />');
+  return iconSvg(
+    '<path d="M5 4h14v16H5z" /><path d="M8 8h8" /><path d="M8 12h5" /><path d="M8 16h7" />',
+  );
 }
 
 function projectMemoryIcon(): string {

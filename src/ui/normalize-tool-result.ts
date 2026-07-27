@@ -14,10 +14,13 @@ export function normalizeToolResult(result: CallToolResult): ToolResultCard {
 
   const structured = objectValue(result.structuredContent);
   const metaCard = objectValue(metaValue(result)?.card);
-  const payload =
+  const basePayload =
     payloadValue(structured?.payload) ??
     payloadValue(metaCard?.payload) ??
     contentPayload(result);
+  const patch = nestedString(structured?.diff, "patch");
+  const payload =
+    patch && !basePayload?.patch ? { ...basePayload, patch } : basePayload;
 
   return {
     ...structured,
@@ -67,6 +70,11 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
 
 function payloadValue(value: unknown): ToolPayload | undefined {
   return objectValue(value) as ToolPayload | undefined;
+}
+
+function nestedString(value: unknown, key: string): string | undefined {
+  const nested = objectValue(value)?.[key];
+  return typeof nested === "string" && nested ? nested : undefined;
 }
 
 function contentPayload(result: CallToolResult): ToolPayload | undefined {

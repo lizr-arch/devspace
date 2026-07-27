@@ -1,38 +1,64 @@
 import type { App } from "@modelcontextprotocol/ext-apps";
 
-export type ToolName =
-  | "open_workspace"
-  | "resume_workspace"
-  | "project_memory_preflight"
-  | "read_file"
-  | "write_file"
-  | "edit_file"
-  | "grep_files"
-  | "find_files"
-  | "list_directory"
-  | "run_shell"
-  | "show_changes"
-  | "read"
-  | "write"
-  | "edit"
-  | "grep"
-  | "glob"
-  | "ls"
-  | "bash"
-  | "start_job"
-  | "start_capture"
-  | "poll_job"
-  | "cancel_job"
-  | "git_diff"
-  | "list_artifacts"
-  | "inspect_artifact"
-  | "publish_artifact"
-  | "preview_artifact"
-  | "inspect_glb"
-  | "inspect_blend"
-  | "inspect_audio"
-  | "render_model_preview"
-  | "capture_game_frame";
+export const TOOL_NAMES = [
+  "devspace_info",
+  "list_workspaces",
+  "list_artifacts",
+  "inspect_artifact",
+  "publish_artifact",
+  "git_status",
+  "git_diff",
+  "inspect_glb",
+  "resume_workspace",
+  "open_workspace",
+  "project_memory_preflight",
+  "read",
+  "read_file",
+  "write",
+  "write_file",
+  "import_asset",
+  "import_png",
+  "edit",
+  "edit_file",
+  "preview_artifact",
+  "mkdir",
+  "copy",
+  "move",
+  "move_to_trash",
+  "git_stage_paths",
+  "git_unstage_paths",
+  "git_commit",
+  "git_branch",
+  "git_fetch",
+  "git_merge",
+  "git_push",
+  "start_game_session",
+  "inspect_game_session",
+  "send_game_input",
+  "capture_game_frame",
+  "read_game_logs",
+  "stop_game_session",
+  "inspect_blend",
+  "inspect_audio",
+  "render_model_preview",
+  "show_changes",
+  "grep",
+  "grep_files",
+  "glob",
+  "find_files",
+  "ls",
+  "list_directory",
+  "bash",
+  "run_shell",
+  "start_job",
+  "start_capture",
+  "poll_job",
+  "cancel_job",
+] as const;
+
+export type ToolName = (typeof TOOL_NAMES)[number];
+
+const toolNameSet = new Set<string>(TOOL_NAMES);
 
 export type HostContext = NonNullable<ReturnType<App["getHostContext"]>>;
 
@@ -83,40 +109,7 @@ export interface ToolPayload {
 }
 
 export function isToolName(value: unknown): value is ToolName {
-  return (
-    value === "open_workspace" ||
-    value === "resume_workspace" ||
-    value === "project_memory_preflight" ||
-    value === "read_file" ||
-    value === "write_file" ||
-    value === "edit_file" ||
-    value === "grep_files" ||
-    value === "find_files" ||
-    value === "list_directory" ||
-    value === "run_shell" ||
-    value === "show_changes" ||
-    value === "read" ||
-    value === "write" ||
-    value === "edit" ||
-    value === "grep" ||
-    value === "glob" ||
-    value === "ls" ||
-    value === "bash" ||
-    value === "start_job" ||
-    value === "start_capture" ||
-    value === "poll_job" ||
-    value === "cancel_job" ||
-    value === "git_diff" ||
-    value === "list_artifacts" ||
-    value === "inspect_artifact" ||
-    value === "publish_artifact" ||
-    value === "preview_artifact" ||
-    value === "inspect_glb" ||
-    value === "inspect_blend" ||
-    value === "inspect_audio" ||
-    value === "render_model_preview" ||
-    value === "capture_game_frame"
-  );
+  return typeof value === "string" && toolNameSet.has(value);
 }
 
 export function isWorkspaceTool(tool: string): boolean {
@@ -162,19 +155,7 @@ export function isShellTool(tool: string): boolean {
 }
 
 export function isReviewTool(tool: string): boolean {
-  return (
-    tool === "show_changes" ||
-    tool === "git_diff" ||
-    tool === "list_artifacts" ||
-    tool === "inspect_artifact" ||
-    tool === "publish_artifact" ||
-    tool === "preview_artifact" ||
-    tool === "inspect_glb" ||
-    tool === "inspect_blend" ||
-    tool === "inspect_audio" ||
-    tool === "render_model_preview" ||
-    tool === "capture_game_frame"
-  );
+  return tool === "show_changes" || tool === "git_diff";
 }
 
 export function payloadText(payload: ToolPayload | undefined): string {

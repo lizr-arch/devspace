@@ -24,6 +24,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
+import { attachRegisteredToolName } from "./tool-result-metadata.js";
 import {
   logEvent,
   requestIp,
@@ -233,7 +234,14 @@ const registerAppTool: typeof registerMcpAppTool = ((
         devspace: { requiredCapability: capability },
       },
     },
-    handler,
+    (async (...args: unknown[]) => {
+      const result = await Reflect.apply(
+        handler as (...handlerArgs: unknown[]) => unknown,
+        undefined,
+        args,
+      );
+      return attachRegisteredToolName(String(name), result);
+    }) as typeof handler,
   );
 }) as typeof registerMcpAppTool;
 
