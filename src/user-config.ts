@@ -11,6 +11,7 @@ export interface DevspaceUserConfig {
   publicBaseUrl?: string | null;
   allowedHosts?: string[];
   toolMode?: "minimal" | "full";
+  widgets?: "off" | "changes" | "review_only" | "full";
   trustProxy?: boolean;
   stateDir?: string;
   worktreeRoot?: string;

@@ -31,30 +31,30 @@ npx @waishnav/devspace config set toolMode full
 
 ## Core Environment Variables
 
-| Variable | Purpose |
-| --- | --- |
-| `HOST` | Local bind host. Defaults to `127.0.0.1`. |
-| `PORT` | Local port. Defaults to `7676`. |
-| `DEVSPACE_ALLOWED_ROOTS` | Comma-separated local roots that workspaces may open. |
-| `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the MCP endpoint and built-in OAuth pages, without `/mcp`. |
-| `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
-| `DEVSPACE_TOOL_MODE` | `minimal` (default) or `full`; full exposes dedicated grep, glob, and ls tools. |
-| `DEVSPACE_TRUST_PROXY` | Set to `1` only when DevSpace is behind one local tunnel/reverse-proxy hop. |
-| `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
-| `DEVSPACE_READ_ONLY` | Set to `1` to expose a read-only MCP surface with no mutation, publication, Runner, or game-session tools. |
-| `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
-| `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
+| Variable                     | Purpose                                                                                                    |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `HOST`                       | Local bind host. Defaults to `127.0.0.1`.                                                                  |
+| `PORT`                       | Local port. Defaults to `7676`.                                                                            |
+| `DEVSPACE_ALLOWED_ROOTS`     | Comma-separated local roots that workspaces may open.                                                      |
+| `DEVSPACE_PUBLIC_BASE_URL`   | Public origin for the MCP endpoint and built-in OAuth pages, without `/mcp`.                               |
+| `DEVSPACE_ALLOWED_HOSTS`     | Optional Host header allowlist override.                                                                   |
+| `DEVSPACE_TOOL_MODE`         | `minimal` (default) or `full`; full exposes dedicated grep, glob, and ls tools.                            |
+| `DEVSPACE_TRUST_PROXY`       | Set to `1` only when DevSpace is behind one local tunnel/reverse-proxy hop.                                |
+| `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters.                                         |
+| `DEVSPACE_READ_ONLY`         | Set to `1` to expose a read-only MCP surface with no mutation, publication, Runner, or game-session tools. |
+| `DEVSPACE_WORKTREE_ROOT`     | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`.                                  |
+| `DEVSPACE_STATE_DIR`         | Directory for SQLite state. Defaults to `~/.local/share/devspace`.                                         |
 
 ## OAuth
 
 DevSpace uses a single-user OAuth approval flow.
 
-| Variable | Default |
-| --- | --- |
-| `DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS` | `3600` |
-| `DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS` | `2592000` |
-| `DEVSPACE_OAUTH_SCOPES` | `devspace` |
-| `DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS` | `chatgpt.com,localhost,127.0.0.1` |
+| Variable                                   | Default                           |
+| ------------------------------------------ | --------------------------------- |
+| `DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS`  | `3600`                            |
+| `DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS` | `2592000`                         |
+| `DEVSPACE_OAUTH_SCOPES`                    | `devspace`                        |
+| `DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS`    | `chatgpt.com,localhost,127.0.0.1` |
 
 MCP clients discover metadata from:
 
@@ -71,17 +71,17 @@ origin during OAuth approval.
 
 `DEVSPACE_TOOL_NAMING` controls tool names.
 
-| Value | Behavior |
-| --- | --- |
-| `short` | Default. Uses `read`, `edit`, `bash`, and related names. |
+| Value    | Behavior                                                       |
+| -------- | -------------------------------------------------------------- |
+| `short`  | Default. Uses `read`, `edit`, `bash`, and related names.       |
 | `legacy` | Uses `read_file`, `edit_file`, `run_shell`, and related names. |
 
 `DEVSPACE_TOOL_MODE` controls the tool surface.
 
-| Value | Behavior |
-| --- | --- |
+| Value     | Behavior                                                                                                                                 |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `minimal` | Default. Disables dedicated search and list tools. Clients use the shell tool with `rg`, `grep`, `find`, `ls`, or `tree` for inspection. |
-| `full` | Enables dedicated `grep`, `glob`, and `ls` tools. |
+| `full`    | Enables dedicated `grep`, `glob`, and `ls` tools.                                                                                        |
 
 The persisted equivalent is `"toolMode": "minimal"` or
 `"toolMode": "full"` in `~/.devspace/config.json`. An environment variable
@@ -121,20 +121,23 @@ remote write without URL bindings fails closed.
 
 `DEVSPACE_WIDGETS` controls ChatGPT Apps iframe usage.
 
-| Value | Behavior |
-| --- | --- |
-| `off` | Disables Workspace App metadata for every tool. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to workspace context, Project Memory, and `show_changes`. |
+Persist it with `devspace config set widgets <mode>` or override it for one
+process with the environment variable.
+
+| Value         | Behavior                                                                                                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `off`         | Disables Workspace App metadata for every tool.                                                                                            |
+| `changes`     | Enables the aggregate `show_changes` tool and attaches widget UI to workspace context, Project Memory, and `show_changes`.                 |
 | `review_only` | Recommended for production. Attaches the Workspace App only to the centralized diff, artifact, media, model, and capture review allowlist. |
-| `full` | Compatibility default. Attaches the Workspace App to every tool definition that supports it. |
+| `full`        | Compatibility default. Attaches the Workspace App to every tool definition that supports it.                                               |
 
 ## Skills
 
-| Variable | Purpose |
-| --- | --- |
-| `DEVSPACE_SKILLS` | Set to `0` to hide skills. Enabled by default. |
-| `DEVSPACE_AGENT_DIR` | Defaults to `~/.codex`. |
-| `DEVSPACE_SKILL_PATHS` | Optional comma-separated skill directories. |
+| Variable               | Purpose                                        |
+| ---------------------- | ---------------------------------------------- |
+| `DEVSPACE_SKILLS`      | Set to `0` to hide skills. Enabled by default. |
+| `DEVSPACE_AGENT_DIR`   | Defaults to `~/.codex`.                        |
+| `DEVSPACE_SKILL_PATHS` | Optional comma-separated skill directories.    |
 
 Example:
 
@@ -207,15 +210,15 @@ recorded but never block existing read, edit, write, or shell tools.
 
 ## Logging
 
-| Variable | Default |
-| --- | --- |
-| `DEVSPACE_LOG_LEVEL` | `info` |
-| `DEVSPACE_LOG_FORMAT` | `json` |
-| `DEVSPACE_LOG_REQUESTS` | `1` |
-| `DEVSPACE_LOG_ASSETS` | `0` |
-| `DEVSPACE_LOG_TOOL_CALLS` | `1` |
-| `DEVSPACE_LOG_SHELL_COMMANDS` | `0` |
-| `DEVSPACE_TRUST_PROXY` | `0` |
+| Variable                      | Default |
+| ----------------------------- | ------- |
+| `DEVSPACE_LOG_LEVEL`          | `info`  |
+| `DEVSPACE_LOG_FORMAT`         | `json`  |
+| `DEVSPACE_LOG_REQUESTS`       | `1`     |
+| `DEVSPACE_LOG_ASSETS`         | `0`     |
+| `DEVSPACE_LOG_TOOL_CALLS`     | `1`     |
+| `DEVSPACE_LOG_SHELL_COMMANDS` | `0`     |
+| `DEVSPACE_TRUST_PROXY`        | `0`     |
 
 Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 

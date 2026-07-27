@@ -564,7 +564,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     minimalTools: parseMinimalTools(env, files.config.toolMode),
     readOnly: parseReadOnly(env),
     toolNaming: parseToolNaming(env.DEVSPACE_TOOL_NAMING),
-    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
+    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS ?? files.config.widgets),
     stateDir: resolve(
       expandHomePath(
         env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir(),

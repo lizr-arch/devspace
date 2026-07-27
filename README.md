@@ -195,6 +195,12 @@ while ordinary workspace, read, search, Git mutation, and job calls remain
 plain MCP results. `off`, `changes`, and the compatibility-oriented `full` mode
 remain available.
 
+Persist the setting with:
+
+```bash
+devspace config set widgets review_only
+```
+
 A verified quick path is Cloudflare Quick Tunnel:
 
 ```bash

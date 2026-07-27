@@ -62,7 +62,7 @@ const fullToolConfigDir = mkdtempSync(
 );
 writeFileSync(
   join(fullToolConfigDir, "config.json"),
-  JSON.stringify({ toolMode: "full" }),
+  JSON.stringify({ toolMode: "full", widgets: "review_only" }),
 );
 assert.equal(
   loadConfig({
@@ -70,6 +70,21 @@ assert.equal(
     DEVSPACE_CONFIG_DIR: fullToolConfigDir,
   }).minimalTools,
   false,
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+  }).widgets,
+  "review_only",
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+    DEVSPACE_WIDGETS: "off",
+  }).widgets,
+  "off",
 );
 assert.equal(
   loadConfig({

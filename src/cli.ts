@@ -504,9 +504,27 @@ function runConfigCommand(args: string[]): void {
     console.log(`Updated ${files.configPath}`);
     return;
   }
+  if (key === "widgets") {
+    if (
+      value !== "off" &&
+      value !== "changes" &&
+      value !== "review_only" &&
+      value !== "full"
+    ) {
+      throw new Error(
+        "widgets must be `off`, `changes`, `review_only`, or `full`.",
+      );
+    }
+    writeDevspaceConfig({
+      ...files.config,
+      widgets: value,
+    });
+    console.log(`Updated ${files.configPath}`);
+    return;
+  }
 
   throw new Error(
-    "Supported configuration keys are `publicBaseUrl` and `toolMode`.",
+    "Supported configuration keys are `publicBaseUrl`, `toolMode`, and `widgets`.",
   );
 }
 
@@ -1452,6 +1470,7 @@ function printHelp(): void {
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace config set toolMode <minimal|full>",
+      "  devspace config set widgets <off|changes|review_only|full>",
       '  devspace coach-pack --path <repo> --task "..." --out coach_pack.md',
       "                           Build a bounded read-only context pack and manifest",
       "  devspace coach-ingest <reply.md> [--out summary.json]",
