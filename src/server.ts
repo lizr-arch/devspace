@@ -5089,12 +5089,23 @@ if (await isMainModule()) {
     );
   });
 
-  const shutdown = () => {
+  const shutdown = (reason: string, err?: Error) => {
+    if (err) {
+      const ts = new Date().toISOString();
+      const label = reason === "uncaughtException" ? "UNCAUGHT EXCEPTION" : "UNHANDLED REJECTION";
+      console.error(`[${ts}] ${label}`);
+      console.error(err.stack ?? err.message ?? String(err));
+    }
     httpServer.close(() => {
       close();
-      process.exit(0);
+      process.exit(reason === "SIGTERM" || reason === "SIGINT" ? 0 : 1);
     });
   };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("uncaughtException", (err) => shutdown("uncaughtException", err));
+  process.on("unhandledRejection", (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    shutdown("unhandledRejection", err);
+  });
 }
