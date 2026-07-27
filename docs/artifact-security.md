@@ -54,6 +54,17 @@ The ledger recognizes:
 ```text
 BLEND
 GLB
+HIP
+HIPLC
+HIPNC
+HDA
+HDALC
+HDANC
+BGEO.SC
+ABC
+USD
+USDA
+USDC
 PNG
 JPEG
 WEBP
@@ -68,6 +79,11 @@ native Blender file header can be verified. Individual registered artifacts are
 limited to 512 MiB for hashing; JSON signature validation is limited to 4 MiB.
 Files above these limits produce an explicit `ARTIFACT_TOO_LARGE` error instead
 of an incomplete hash.
+
+`.bgeo.sc` is recognized as one compound extension, not as `.sc`. Houdini
+HIP/HDA variants and BGEO caches are opaque, non-empty, hashed attachment
+downloads. Alembic Ogawa/HDF5 and USD variants receive bounded header validation.
+Registration never executes or loads these source assets.
 
 ## Standard 3D review outputs
 

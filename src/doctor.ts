@@ -62,6 +62,7 @@ export interface PublicExternalClientProbe {
   mcpAppBuildFingerprint: DoctorProbeCheck;
   workspaceAppTelemetryTool: DoctorProbeCheck;
   devspaceInfo: DoctorProbeCheck;
+  houdiniInfo: DoctorProbeCheck;
   openWorkspace: DoctorProbeCheck;
   listWorkspaces: DoctorProbeCheck;
   resumeWorkspace: DoctorProbeCheck;
@@ -282,6 +283,10 @@ export async function probePublicExternalClientFlow(
   let devspaceInfoCheck: DoctorProbeCheck = {
     ok: false,
     detail: "MCP devspace_info did not run.",
+  };
+  let houdiniInfoCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "MCP houdini_info did not run.",
   };
   let listWorkspacesCheck: DoctorProbeCheck = {
     ok: false,
@@ -990,6 +995,59 @@ export async function probePublicExternalClientFlow(
         }
       }
 
+      if (toolNames.includes("houdini_info")) {
+        const houdiniInfo = await postMcpJsonRpc(
+          info.publicMcpUrl,
+          accessToken,
+          {
+            jsonrpc: "2.0",
+            id: 11,
+            method: "tools/call",
+            params: { name: "houdini_info", arguments: {} },
+          },
+          sessionId,
+        );
+        const houdiniInfoResult = asRecord(
+          asRecord(parseMcpResponseJson(houdiniInfo.text))?.result,
+        );
+        const structured = asRecord(houdiniInfoResult?.structuredContent);
+        const productEdition = stringField(structured, "productEdition");
+        const licenseStatus = stringField(structured, "licenseStatus");
+        const diagnostic = stringField(structured, "diagnostic");
+        const valid =
+          typeof structured?.hythonAvailable === "boolean" &&
+          typeof structured?.hbatchAvailable === "boolean" &&
+          [
+            "commercial",
+            "indie",
+            "education",
+            "apprentice_non_commercial",
+            "engine",
+            "unknown",
+          ].includes(productEdition ?? "") &&
+          ["available", "unavailable", "unknown"].includes(
+            licenseStatus ?? "",
+          ) &&
+          Boolean(diagnostic) &&
+          !/(?:license_?key|password|secret|bearer\s+[A-Za-z0-9])/i.test(
+            diagnostic ?? "",
+          );
+        houdiniInfoCheck =
+          houdiniInfo.ok && valid
+            ? okCheck(
+                houdiniInfo.status,
+                "MCP houdini_info returned sanitized discovery and license-safe preflight state.",
+              )
+            : houdiniInfo.ok
+              ? {
+                  ok: false,
+                  status: houdiniInfo.status,
+                  detail:
+                    "MCP houdini_info responded, but its safe structured contract was incomplete.",
+                }
+              : failedCheck(houdiniInfo, "MCP houdini_info did not succeed.");
+      }
+
       if (hasOpenWorkspace) {
         const openWorkspace = await postMcpJsonRpc(
           info.publicMcpUrl,
@@ -1627,6 +1685,7 @@ export async function probePublicExternalClientFlow(
     mcpAppBuildFingerprint: mcpAppBuildFingerprintCheck,
     workspaceAppTelemetryTool: workspaceAppTelemetryToolCheck,
     devspaceInfo: devspaceInfoCheck,
+    houdiniInfo: houdiniInfoCheck,
     openWorkspace: openWorkspaceCheck,
     listWorkspaces: listWorkspacesCheck,
     resumeWorkspace: resumeWorkspaceCheck,
@@ -1686,6 +1745,7 @@ export async function probePublicExternalClientFlow(
       mcpAppBuildFingerprintCheck.ok &&
       workspaceAppTelemetryToolCheck.ok &&
       devspaceInfoCheck.ok &&
+      houdiniInfoCheck.ok &&
       openWorkspaceCheck.ok &&
       listWorkspacesCheck.ok &&
       resumeWorkspaceCheck.ok &&

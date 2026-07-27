@@ -111,6 +111,7 @@ export type JobErrorCode =
   | "JOB_CANCELLED"
   | "JOB_INTERRUPTED"
   | "BLENDER_FAILED"
+  | "HOUDINI_FAILED"
   | "CAPTURE_FAILED"
   | "RUNNER_FAILED";
 
@@ -774,6 +775,9 @@ function failureCode(
 ): JobErrorCode {
   if (job.captureProfile) return "CAPTURE_FAILED";
   if (job.runner === "blender") return "BLENDER_FAILED";
+  if (job.runner === "hython" || job.runner === "hbatch") {
+    return "HOUDINI_FAILED";
+  }
   return "RUNNER_FAILED";
 }
 

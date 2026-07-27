@@ -15,6 +15,7 @@ import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   BackgroundJobManager,
+  MAX_JOB_OUTPUT_BYTES,
   validateJobArguments,
 } from "./background-jobs.js";
 import { RunnerRegistry } from "./runner-registry.js";
@@ -340,6 +341,177 @@ if (script === "wait.py") {
   assert.equal(blenderCancelled.errorCode, "JOB_CANCELLED");
   assert.equal(blenderCancelled.artifactStatus, "incomplete");
   blenderManager.close();
+
+  const fakeHoudiniPath = join(root, "fake-houdini");
+  writeFileSync(
+    fakeHoudiniPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+if (process.argv.includes("--version")) {
+  console.log("Houdini 20.5.410 Test");
+  process.exit(0);
+}
+const args = process.argv.slice(2);
+const selected = args.find((value) => /\\.(?:py|hip|hiplc|hipnc)$/i.test(value)) || "";
+const script = path.basename(selected);
+if (script === "houdini_wait.py") {
+  setInterval(() => {}, 1000);
+} else if (script === "houdini_output.py") {
+  process.stdout.write(Buffer.alloc(${MAX_JOB_OUTPUT_BYTES + 1024}, 0x78));
+} else if (script === "houdini_fail.py") {
+  process.exit(5);
+} else {
+  const output = path.join(process.cwd(), "artifacts", "houdini");
+  fs.mkdirSync(output, { recursive: true });
+  fs.writeFileSync(path.join(output, "source.hip"), "houdini source fixture");
+  fs.writeFileSync(path.join(output, "pieces.bgeo.sc"), "bgeo fixture");
+  fs.writeFileSync(path.join(output, "manifest.json"), JSON.stringify({ runner: script || "hbatch" }));
+  console.log("houdini-job-ok");
+}
+`,
+  );
+  chmodSync(fakeHoudiniPath, 0o755);
+  for (const script of [
+    "houdini_job.py",
+    "houdini_wait.py",
+    "houdini_output.py",
+    "houdini_fail.py",
+  ]) {
+    writeFileSync(join(workspaceRoot, script), "# fake hython fixture");
+  }
+  writeFileSync(
+    join(workspaceRoot, "houdini_build.hscript"),
+    "# fake hbatch fixture",
+  );
+  writeFileSync(join(workspaceRoot, "houdini_scene.hip"), "fake hip fixture");
+  const houdiniState = join(root, "houdini-state");
+  const houdiniArtifacts = new ArtifactLedger(houdiniState);
+  const houdiniManager = new BackgroundJobManager(
+    houdiniState,
+    new RunnerRegistry({
+      hython: {
+        executable: fakeHoudiniPath,
+        maxConcurrent: 1,
+        maxTimeoutSeconds: 2,
+      },
+      hbatch: {
+        executable: fakeHoudiniPath,
+        maxConcurrent: 1,
+        maxTimeoutSeconds: 2,
+      },
+    }),
+    houdiniArtifacts,
+  );
+  const hythonSuccess = await houdiniManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "hython",
+    args: ["houdini_job.py"],
+    artifactRoots: ["artifacts/houdini"],
+    timeoutSeconds: 2,
+  });
+  const hythonCompleted = await waitForArtifacts(
+    houdiniManager,
+    hythonSuccess.jobId,
+  );
+  assert.equal(hythonCompleted.status, "succeeded");
+  assert.equal(hythonCompleted.artifactStatus, "complete");
+  assert.equal(hythonCompleted.artifactCount, 3);
+  assert.match(hythonCompleted.output ?? "", /houdini-job-ok/);
+
+  const hbatchSuccess = await houdiniManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "hbatch",
+    args: [
+      "-j",
+      "2",
+      "-c",
+      "source houdini_build.hscript",
+      "houdini_scene.hip",
+    ],
+    timeoutSeconds: 2,
+  });
+  assert.equal(
+    (await waitForTerminal(houdiniManager, hbatchSuccess.jobId)).status,
+    "succeeded",
+  );
+
+  const hythonFailure = await houdiniManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "hython",
+    args: ["houdini_fail.py"],
+    timeoutSeconds: 2,
+  });
+  const houdiniFailed = await waitForTerminal(
+    houdiniManager,
+    hythonFailure.jobId,
+  );
+  assert.equal(houdiniFailed.status, "failed");
+  assert.equal(houdiniFailed.errorCode, "HOUDINI_FAILED");
+
+  const hythonOutput = await houdiniManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "hython",
+    args: ["houdini_output.py"],
+    timeoutSeconds: 2,
+  });
+  const outputCapped = await waitForTerminal(
+    houdiniManager,
+    hythonOutput.jobId,
+  );
+  assert.equal(outputCapped.status, "succeeded");
+  assert.equal(outputCapped.outputBytes, MAX_JOB_OUTPUT_BYTES);
+  assert.equal(outputCapped.outputTruncated, true);
+
+  const hythonLong = await houdiniManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "hython",
+    args: ["houdini_wait.py"],
+    timeoutSeconds: 2,
+  });
+  await assert.rejects(
+    () =>
+      houdiniManager.start({
+        workspaceId: "ws_test",
+        workspaceRoot,
+        workingDirectory: workspaceRoot,
+        runner: "hython",
+        args: ["houdini_job.py"],
+        timeoutSeconds: 2,
+      }),
+    /At most 1 hython job/,
+  );
+  houdiniManager.cancel(hythonLong.jobId);
+  assert.equal(
+    (await waitForTerminal(houdiniManager, hythonLong.jobId)).status,
+    "cancelled",
+  );
+
+  const hythonTimed = await houdiniManager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "hython",
+    args: ["houdini_wait.py"],
+    timeoutSeconds: 1,
+  });
+  const houdiniTimedOut = await waitForTerminal(
+    houdiniManager,
+    hythonTimed.jobId,
+  );
+  assert.equal(houdiniTimedOut.status, "timed_out");
+  assert.equal(houdiniTimedOut.errorCode, "JOB_TIMEOUT");
+  houdiniManager.close();
 
   const restoredBlenderArtifacts = new ArtifactLedger(blenderState);
   const restoredBlenderList = await restoredBlenderArtifacts.listArtifacts({
