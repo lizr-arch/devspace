@@ -320,6 +320,12 @@ export const REVIEW_ONLY_WIDGET_TOOLS = [
   "list_artifacts",
   "inspect_artifact",
   "publish_artifact",
+  "import_png",
+  "archive_approved_image",
+  "find_approved_assets",
+  "verify_approved_asset",
+  "recover_approved_asset",
+  "reindex_approved_assets",
   "preview_artifact",
   "inspect_glb",
   "inspect_blend",
@@ -1483,6 +1489,29 @@ function createMcpServer(
     kind: ToolWidgetKind,
   ): ToolWidgetDescriptorMeta =>
     toolWidgetDescriptorMeta(config, toolName, kind, workspaceApp);
+  const interactiveWidgetMeta = (
+    toolName: string,
+    kind: ToolWidgetKind,
+    extraMeta: Record<string, unknown> = {},
+  ): ToolWidgetDescriptorMeta => {
+    const base = widgetMeta(toolName, kind)._meta as Record<string, unknown>;
+    const ui = base.ui as
+      { resourceUri: string; visibility: string[] } | undefined;
+    return {
+      _meta: {
+        ...extraMeta,
+        ...base,
+        ...(ui
+          ? {
+              ui: {
+                ...ui,
+                visibility: ["model", "app"],
+              },
+            }
+          : {}),
+      },
+    };
+  };
   const server = new McpServer(
     {
       name: "devspace",
@@ -2155,7 +2184,7 @@ function createMcpServer(
           sha256: z.string(),
           previewType: z.enum(["image", "audio", "text", "json", "download"]),
         }),
-        ...widgetMeta("publish_artifact", "review"),
+        ...interactiveWidgetMeta("publish_artifact", "review"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
@@ -2279,7 +2308,11 @@ function createMcpServer(
           supersedesAssetReceiptId: z.string().optional(),
           readyForPipeline: z.literal(true),
         }),
-        _meta: IMPORT_PNG_FILE_PARAMS_META,
+        ...interactiveWidgetMeta(
+          "archive_approved_image",
+          "review",
+          IMPORT_PNG_FILE_PARAMS_META,
+        ),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -2600,7 +2633,7 @@ function createMcpServer(
           assets: z.array(z.unknown()),
           count: z.number().int().nonnegative(),
         }),
-        _meta: {},
+        ...interactiveWidgetMeta("find_approved_assets", "review"),
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -2682,7 +2715,7 @@ function createMcpServer(
           supersededByAssetReceiptId: z.string().optional(),
           readyForPipeline: z.boolean(),
         }),
-        _meta: {},
+        ...interactiveWidgetMeta("verify_approved_asset", "review"),
         annotations: {
           readOnlyHint: true,
           destructiveHint: false,
@@ -2832,7 +2865,11 @@ function createMcpServer(
           importReceiptId: z.string(),
           readyForPipeline: z.literal(true),
         }),
-        _meta: IMPORT_PNG_FILE_PARAMS_META,
+        ...interactiveWidgetMeta(
+          "recover_approved_asset",
+          "review",
+          IMPORT_PNG_FILE_PARAMS_META,
+        ),
         annotations: {
           readOnlyHint: false,
           destructiveHint: true,
@@ -3033,7 +3070,7 @@ function createMcpServer(
           existing: z.number().int().nonnegative(),
           errors: z.array(z.string()),
         }),
-        _meta: {},
+        ...interactiveWidgetMeta("reindex_approved_assets", "review"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
@@ -4340,7 +4377,11 @@ function createMcpServer(
           projectMemoryReceiptId: z.string().optional(),
           displacedTrashId: z.string().optional(),
         }),
-        _meta: IMPORT_PNG_FILE_PARAMS_META,
+        ...interactiveWidgetMeta(
+          "import_png",
+          "review",
+          IMPORT_PNG_FILE_PARAMS_META,
+        ),
         annotations: IMPORT_PNG_TOOL_ANNOTATIONS,
       },
       async ({

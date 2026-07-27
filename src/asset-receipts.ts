@@ -445,7 +445,9 @@ export class AssetReceiptStore {
            left join approved_asset_supersessions s
              on s.superseded_asset_receipt_id = r.asset_receipt_id
           ${conditions.length > 0 ? `where ${conditions.join(" and ")}` : ""}
-          order by r.created_at desc
+          order by (s.superseding_asset_receipt_id is null) desc,
+                   r.created_at desc,
+                   r.asset_receipt_id desc
           limit ?`,
       )
       .all(...values, limit) as Array<{
