@@ -4,7 +4,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createServer, resolveWorkspaceAppBuild } from "./server.js";
+import {
+  createServer,
+  resolveWorkspaceAppBuild,
+  workspaceAppUiMetadata,
+} from "./server.js";
 import { loadConfig } from "./config.js";
 import { canonicalJson } from "./project-memory.js";
 import { isToolName } from "./ui/card-types.js";
@@ -21,6 +25,7 @@ const testWorkspaceAppBuild = createWorkspaceAppFixture("shared");
 
 try {
   await testWorkspaceAppBuildResolution();
+  testWorkspaceAppUiMetadata();
   await testWorkspaceAppStartupValidation();
   await testDerivedChatGptUrls();
   await testPublicProbeHeaders();
@@ -32,6 +37,22 @@ try {
   await testPublicProbeExplainsInvalidHost();
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
+}
+
+function testWorkspaceAppUiMetadata(): void {
+  assert.deepEqual(
+    workspaceAppUiMetadata({
+      publicBaseUrl: "https://devspace.example.com/",
+    }),
+    {
+      prefersBorder: true,
+      domain: "https://devspace.example.com",
+      csp: {
+        resourceDomains: ["https://devspace.example.com"],
+        connectDomains: ["https://devspace.example.com"],
+      },
+    },
+  );
 }
 
 function createWorkspaceAppFixture(prefix: string): {

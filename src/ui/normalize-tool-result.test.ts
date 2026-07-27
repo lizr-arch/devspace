@@ -7,6 +7,7 @@ import {
   isToolName,
   isWorkspaceTool,
   payloadText,
+  summaryBadgeText,
   TOOL_NAMES,
 } from "./card-types.js";
 import { normalizeToolResult } from "./normalize-tool-result.js";
@@ -170,6 +171,34 @@ const metaPayloadWins = normalizeToolResult(
   }),
 );
 assert.equal(payloadText(metaPayloadWins.payload), "meta payload");
+
+const artifactList = normalizeToolResult(
+  toolResult({
+    content: [
+      {
+        type: "text",
+        text: "artifact_1 | present | PNG\nartifact_2 | present | PNG",
+      },
+    ],
+    _meta: {
+      tool: "list_artifacts",
+      card: { summary: { count: 2, type: "image" } },
+    },
+    structuredContent: {
+      result: "2 artifacts",
+      artifacts: [{ artifactId: "artifact_1" }, { artifactId: "artifact_2" }],
+    },
+  }),
+);
+assert.equal(summaryBadgeText(artifactList), "2 artifacts");
+
+const payloadLineFallback = normalizeToolResult(
+  toolResult({
+    content: [{ type: "text", text: "first\nsecond" }],
+    _meta: { tool: "ls" },
+  }),
+);
+assert.equal(summaryBadgeText(payloadLineFallback), "2 lines");
 
 const gitDiff = normalizeToolResult(
   toolResult({

@@ -1257,7 +1257,7 @@ ${stylesheets}
 </html>`;
 }
 
-function appCsp(config: ServerConfig): {
+function appCsp(config: Pick<ServerConfig, "publicBaseUrl">): {
   resourceDomains: string[];
   connectDomains: string[];
 } {
@@ -1265,6 +1265,21 @@ function appCsp(config: ServerConfig): {
   return {
     resourceDomains: [publicBaseUrl],
     connectDomains: [publicBaseUrl],
+  };
+}
+
+export function workspaceAppUiMetadata(
+  config: Pick<ServerConfig, "publicBaseUrl">,
+): {
+  prefersBorder: true;
+  domain: string;
+  csp: ReturnType<typeof appCsp>;
+} {
+  const domain = new URL(config.publicBaseUrl).origin;
+  return {
+    prefersBorder: true,
+    domain,
+    csp: appCsp(config),
   };
 }
 
@@ -1433,9 +1448,7 @@ function createMcpServer(
         description:
           "Versioned interactive card for viewing DevSpace workspace and tool results.",
         _meta: {
-          ui: {
-            csp: appCsp(config),
-          },
+          ui: workspaceAppUiMetadata(config),
         },
       },
       async () => ({
@@ -1445,9 +1458,7 @@ function createMcpServer(
             mimeType: RESOURCE_MIME_TYPE,
             text: workspaceAppHtml(config, workspaceApp),
             _meta: {
-              ui: {
-                csp: appCsp(config),
-              },
+              ui: workspaceAppUiMetadata(config),
             },
           },
         ],

@@ -201,6 +201,19 @@ export function summaryNumber(
     : undefined;
 }
 
+export function summaryBadgeText(card: ToolResultCard): string {
+  if (card.tool === "list_artifacts") {
+    const count = summaryNumber(card.summary, "count") ?? 0;
+    return `${count} ${count === 1 ? "artifact" : "artifacts"}`;
+  }
+
+  const explicitLines = summaryNumber(card.summary, "lines");
+  const text = payloadText(card.payload);
+  const lines =
+    explicitLines ?? (text.length === 0 ? 0 : text.split(/\r?\n/u).length);
+  return `${lines} ${lines === 1 ? "line" : "lines"}`;
+}
+
 export function isExpandableCard(card: ToolResultCard): boolean {
   if (isWorkspaceTool(card.tool)) {
     return (

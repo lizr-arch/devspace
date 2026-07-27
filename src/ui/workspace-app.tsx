@@ -18,6 +18,7 @@ import {
   isWorkspaceTool,
   isWriteTool,
   payloadText,
+  summaryBadgeText,
   summaryNumber,
   type HostContext,
   type ToolResultCard,
@@ -435,7 +436,7 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
   if (isShellTool(card.tool)) {
     return element("span", {
       className: "badge",
-      text: `ran · ${String(summary.lines ?? 0)} lines`,
+      text: `ran · ${summaryBadgeText(card)}`,
     });
   }
 
@@ -463,13 +464,13 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
   if (isSearchTool(card.tool)) {
     return element("span", {
       className: "badge",
-      text: `${String(summary.lines ?? 0)} lines`,
+      text: summaryBadgeText(card),
     });
   }
 
   return element("span", {
     className: "badge",
-    text: `${String(summary.lines ?? 0)} lines`,
+    text: summaryBadgeText(card),
   });
 }
 
