@@ -37,6 +37,11 @@ const migrations: Migration[] = [
     name: "approved-asset-receipts",
     up: migrateApprovedAssetReceipts,
   },
+  {
+    version: 7,
+    name: "rebuildable-approved-asset-index",
+    up: migrateRebuildableApprovedAssetIndex,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -336,6 +341,61 @@ function migrateApprovedAssetReceipts(sqlite: Database.Database): void {
         references approved_asset_receipts(asset_receipt_id)
         on delete restrict
     );
+  `);
+}
+
+function migrateRebuildableApprovedAssetIndex(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create temporary table approved_asset_supersessions_backup as
+      select superseded_asset_receipt_id, superseding_asset_receipt_id, created_at
+        from approved_asset_supersessions;
+
+    drop table approved_asset_supersessions;
+    alter table approved_asset_receipts rename to approved_asset_receipts_v6;
+
+    create table approved_asset_receipts (
+      asset_receipt_id text primary key,
+      originating_workspace_session_id text not null,
+      project_id text not null,
+      task_id text not null,
+      asset_role text not null,
+      destination_path text not null,
+      sha256 text not null,
+      source_file_id text,
+      import_receipt_id text not null,
+      project_receipt_path text not null,
+      receipt_json text not null,
+      created_at text not null
+    );
+
+    insert into approved_asset_receipts
+      select * from approved_asset_receipts_v6;
+    drop table approved_asset_receipts_v6;
+
+    create index approved_asset_receipts_project_path_sha_idx
+      on approved_asset_receipts(project_id, destination_path, sha256);
+    create index approved_asset_receipts_project_task_role_idx
+      on approved_asset_receipts(project_id, task_id, asset_role, created_at desc);
+    create index approved_asset_receipts_source_file_idx
+      on approved_asset_receipts(source_file_id);
+    create index approved_asset_receipts_path_idx
+      on approved_asset_receipts(destination_path);
+
+    create table approved_asset_supersessions (
+      superseded_asset_receipt_id text primary key,
+      superseding_asset_receipt_id text not null unique,
+      created_at text not null,
+      foreign key (superseded_asset_receipt_id)
+        references approved_asset_receipts(asset_receipt_id)
+        on delete restrict,
+      foreign key (superseding_asset_receipt_id)
+        references approved_asset_receipts(asset_receipt_id)
+        on delete restrict
+    );
+
+    insert into approved_asset_supersessions
+      select * from approved_asset_supersessions_backup;
+    drop table approved_asset_supersessions_backup;
   `);
 }
 

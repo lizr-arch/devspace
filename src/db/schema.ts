@@ -186,20 +186,16 @@ export const approvedAssetReceipts = sqliteTable(
   "approved_asset_receipts",
   {
     assetReceiptId: text("asset_receipt_id").primaryKey(),
-    originatingWorkspaceSessionId: text("originating_workspace_session_id")
-      .notNull()
-      .references(() => workspaceSessions.id, { onDelete: "restrict" }),
+    originatingWorkspaceSessionId: text(
+      "originating_workspace_session_id",
+    ).notNull(),
     projectId: text("project_id").notNull(),
     taskId: text("task_id").notNull(),
     assetRole: text("asset_role").notNull(),
     destinationPath: text("destination_path").notNull(),
     sha256: text("sha256").notNull(),
     sourceFileId: text("source_file_id"),
-    importReceiptId: text("import_receipt_id")
-      .notNull()
-      .references(() => assetImportReceipts.importReceiptId, {
-        onDelete: "restrict",
-      }),
+    importReceiptId: text("import_receipt_id").notNull(),
     projectReceiptPath: text("project_receipt_path").notNull(),
     receiptJson: text("receipt_json").notNull(),
     createdAt: text("created_at").notNull(),

@@ -94,6 +94,33 @@ export interface RegisterApprovedAssetReceiptInput {
   receiptDirectory: string;
 }
 
+export interface FindApprovedAssetsInput {
+  projectId?: string;
+  taskId?: string;
+  assetRole?: string;
+  sourceFileId?: string;
+  destinationPath?: string;
+  assetReceiptId?: string;
+  limit?: number;
+}
+
+export interface ApprovedAssetSummary {
+  assetReceiptId: string;
+  projectId: string;
+  taskId: string;
+  assetRole: string;
+  destinationPath: string;
+  sha256: string;
+  width: number;
+  height: number;
+  sourceKind: ApprovedAssetSourceKind;
+  sourceFileId?: string;
+  projectReceiptPath: string;
+  createdAt: string;
+  supersededByAssetReceiptId?: string;
+  current: boolean;
+}
+
 export class AssetReceiptStore {
   private readonly database: DatabaseHandle;
 
@@ -388,6 +415,66 @@ export class AssetReceiptStore {
     return row?.superseding_asset_receipt_id;
   }
 
+  findApproved(input: FindApprovedAssetsInput): ApprovedAssetSummary[] {
+    const conditions: string[] = [];
+    const values: string[] = [];
+    const filters: Array<[string, string | undefined]> = [
+      ["r.project_id", input.projectId],
+      ["r.task_id", input.taskId],
+      ["r.asset_role", input.assetRole],
+      ["r.source_file_id", input.sourceFileId],
+      ["r.destination_path", input.destinationPath],
+      ["r.asset_receipt_id", input.assetReceiptId],
+    ];
+    for (const [column, value] of filters) {
+      if (value === undefined) continue;
+      validateTextField(column, value);
+      conditions.push(`${column} = ?`);
+      values.push(value);
+    }
+    const limit = input.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new Error(
+        "APPROVED_ASSET_QUERY_INVALID: limit must be between 1 and 200.",
+      );
+    }
+    const rows = this.database.sqlite
+      .prepare(
+        `select r.receipt_json, s.superseding_asset_receipt_id
+           from approved_asset_receipts r
+           left join approved_asset_supersessions s
+             on s.superseded_asset_receipt_id = r.asset_receipt_id
+          ${conditions.length > 0 ? `where ${conditions.join(" and ")}` : ""}
+          order by r.created_at desc
+          limit ?`,
+      )
+      .all(...values, limit) as Array<{
+      receipt_json: string;
+      superseding_asset_receipt_id: string | null;
+    }>;
+    return rows.map((row) => {
+      const receipt = JSON.parse(row.receipt_json) as ApprovedAssetReceipt;
+      const supersededByAssetReceiptId =
+        row.superseding_asset_receipt_id ?? undefined;
+      return {
+        assetReceiptId: receipt.assetReceiptId,
+        projectId: receipt.project.projectId,
+        taskId: receipt.project.taskId,
+        assetRole: receipt.project.assetRole,
+        destinationPath: receipt.asset.destinationPath,
+        sha256: receipt.asset.sha256,
+        width: receipt.asset.width,
+        height: receipt.asset.height,
+        sourceKind: receipt.source.kind,
+        sourceFileId: receipt.source.fileId,
+        projectReceiptPath: receipt.projectReceiptPath,
+        createdAt: receipt.createdAt,
+        supersededByAssetReceiptId,
+        current: supersededByAssetReceiptId === undefined,
+      };
+    });
+  }
+
   removeApproved(assetReceiptId: string): void {
     validateAssetReceiptId(assetReceiptId);
     const remove = this.database.sqlite.transaction(() => {
@@ -466,6 +553,23 @@ function validateApprovedReceipt(receipt: ApprovedAssetReceipt): void {
   if (!/^[0-9a-f]{64}$/.test(receipt.asset.sha256)) {
     throw new Error("APPROVED_ASSET_RECEIPT_INVALID: Invalid SHA-256.");
   }
+  if (approvedAssetReceiptId(receipt) !== receipt.assetReceiptId) {
+    throw new Error(
+      "APPROVED_ASSET_RECEIPT_INVALID: Receipt ID does not match immutable content.",
+    );
+  }
+}
+
+export function validateApprovedAssetReceipt(
+  receipt: ApprovedAssetReceipt,
+): void {
+  validateApprovedReceipt(receipt);
+}
+
+export function approvedAssetReceiptId(receipt: ApprovedAssetReceipt): string {
+  return `asset_receipt_${createHash("sha256")
+    .update(JSON.stringify(approvedReceiptIdentityFromReceipt(receipt)))
+    .digest("hex")}`;
 }
 
 function approvedReceiptIdentity(

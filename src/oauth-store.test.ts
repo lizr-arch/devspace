@@ -58,6 +58,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 4, name: "workspace-attached-branch-state" },
       { version: 5, name: "asset-import-receipts" },
       { version: 6, name: "approved-asset-receipts" },
+      { version: 7, name: "rebuildable-approved-asset-index" },
     ]);
   } finally {
     database.close();

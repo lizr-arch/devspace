@@ -109,6 +109,21 @@ try {
       ?.assetReceiptId,
     replacement.assetReceiptId,
   );
+  assert.deepEqual(
+    store
+      .findApproved({
+        projectId: "threecountries",
+        assetRole: "approved_reference",
+      })
+      .map((entry) => ({
+        id: entry.assetReceiptId,
+        current: entry.current,
+      })),
+    [
+      { id: replacement.assetReceiptId, current: true },
+      { id: approved.assetReceiptId, current: false },
+    ],
+  );
 
   console.log("asset receipt tests passed");
 } finally {

@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
-import type { ApprovedAssetReceipt } from "./asset-receipts.js";
+import { link, mkdir, open, opendir, readFile, unlink } from "node:fs/promises";
+import { dirname, relative } from "node:path";
+import {
+  AssetReceiptStore,
+  type ApprovedAssetReceipt,
+  validateApprovedAssetReceipt,
+} from "./asset-receipts.js";
 import {
   resolveExistingWorkspacePath,
   resolveWorkspacePath,
@@ -95,4 +99,123 @@ export function serializeApprovedReceipt(
   receipt: ApprovedAssetReceipt,
 ): string {
   return `${JSON.stringify(receipt, null, 2)}\n`;
+}
+
+export interface ReindexApprovedAssetsResult {
+  scanned: number;
+  indexed: number;
+  existing: number;
+  errors: string[];
+}
+
+export async function reindexApprovedAssetReceipts(input: {
+  workspaceRoot: string;
+  receiptRoot: string;
+  store: AssetReceiptStore;
+  maxReceipts?: number;
+  maxDepth?: number;
+}): Promise<ReindexApprovedAssetsResult> {
+  const maxReceipts = input.maxReceipts ?? 1_000;
+  const maxDepth = input.maxDepth ?? 8;
+  if (
+    !Number.isInteger(maxReceipts) ||
+    maxReceipts < 1 ||
+    maxReceipts > 5_000
+  ) {
+    throw new Error(
+      "APPROVED_ASSET_REINDEX_INVALID: maxReceipts must be between 1 and 5000.",
+    );
+  }
+  if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > 16) {
+    throw new Error(
+      "APPROVED_ASSET_REINDEX_INVALID: maxDepth must be between 0 and 16.",
+    );
+  }
+  const root = resolveExistingWorkspacePath(
+    input.workspaceRoot,
+    input.receiptRoot,
+    "directory",
+  );
+  const files: string[] = [];
+  const errors: string[] = [];
+
+  async function scan(directory: string, depth: number): Promise<void> {
+    const entries = await opendir(directory);
+    for await (const entry of entries) {
+      const absolute = `${directory}/${entry.name}`;
+      if (entry.isSymbolicLink()) {
+        errors.push(
+          `WORKSPACE_ESCAPE: Skipped symbolic link ${relative(root.canonicalWorkspaceRoot, absolute)}.`,
+        );
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (depth < maxDepth) await scan(absolute, depth + 1);
+        continue;
+      }
+      if (
+        entry.isFile() &&
+        entry.name.endsWith(".approved-asset-receipt.json")
+      ) {
+        if (files.length >= maxReceipts) {
+          throw new Error(
+            `APPROVED_ASSET_REINDEX_LIMIT: More than ${maxReceipts} receipts were found.`,
+          );
+        }
+        files.push(absolute);
+      }
+    }
+  }
+  await scan(root.absolutePath, 0);
+
+  const receipts: ApprovedAssetReceipt[] = [];
+  for (const absolute of files) {
+    const receiptPath = relative(root.canonicalWorkspaceRoot, absolute)
+      .split("\\")
+      .join("/");
+    try {
+      const receipt = JSON.parse(
+        await readFile(absolute, "utf8"),
+      ) as ApprovedAssetReceipt;
+      validateApprovedAssetReceipt(receipt);
+      if (receipt.projectReceiptPath !== receiptPath) {
+        throw new Error(
+          "APPROVED_ASSET_RECEIPT_INVALID: Embedded projectReceiptPath does not match the scanned file.",
+        );
+      }
+      receipts.push(receipt);
+    } catch (error) {
+      errors.push(
+        `${receiptPath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  const pending = receipts.sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt),
+  );
+  let indexed = 0;
+  let existing = 0;
+  while (pending.length > 0) {
+    let progressed = false;
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      const receipt = pending[index];
+      const parent = receipt.revision.supersedesAssetReceiptId;
+      if (parent && !input.store.getApproved(parent)) continue;
+      const wasExisting = input.store.getApproved(receipt.assetReceiptId);
+      input.store.registerApproved(receipt);
+      if (wasExisting) existing += 1;
+      else indexed += 1;
+      pending.splice(index, 1);
+      progressed = true;
+    }
+    if (progressed) continue;
+    for (const receipt of pending) {
+      errors.push(
+        `${receipt.projectReceiptPath}: APPROVED_ASSET_SUPERSESSION_INVALID: Missing parent ${receipt.revision.supersedesAssetReceiptId}.`,
+      );
+    }
+    break;
+  }
+  return { scanned: files.length, indexed, existing, errors };
 }
