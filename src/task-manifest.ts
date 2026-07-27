@@ -14,6 +14,11 @@ export type TaskMode = "run" | "session";
 
 export type TaskRuntime = "workspace-python" | "system";
 
+export interface TaskSecretBinding {
+  secret_ref: string;
+  target_env: string;
+}
+
 export interface TaskParameter {
   type: "string" | "path" | "sha256" | "int";
   required?: boolean;
@@ -28,6 +33,7 @@ export interface TaskDefinition {
   runtime?: TaskRuntime;
   timeout_seconds?: number;
   parameters?: Record<string, TaskParameter>;
+  secrets?: TaskSecretBinding[];
 }
 
 export interface TaskManifest {
@@ -51,6 +57,7 @@ export interface CapabilityFingerprint {
   manifestSha256: string | null;
   taskIds: string[];
   environment?: EnvironmentFingerprint;
+  secretRefs: string[];
   computedAt: string;
 }
 
@@ -273,12 +280,67 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest {
       }
     }
 
+    // Validate secret bindings
+    let secrets: TaskSecretBinding[] | undefined;
+    if (d.secrets) {
+      if (!Array.isArray(d.secrets)) {
+        throw new TaskError({
+          code: "TASK_MANIFEST_SCHEMA_ERROR",
+          manifestPath: path,
+          taskId: id,
+          field: "secrets",
+          message: `Task ${id}: secrets must be an array.`,
+          recoverable: true,
+        });
+      }
+      secrets = [];
+      for (let i = 0; i < (d.secrets as unknown[]).length; i++) {
+        const sb = (d.secrets as unknown[])[i];
+        if (typeof sb !== "object" || sb === null) {
+          throw new TaskError({
+            code: "TASK_MANIFEST_SCHEMA_ERROR",
+            manifestPath: path,
+            taskId: id,
+            field: `secrets[${i}]`,
+            message: `Task ${id}: secrets[${i}] must be an object.`,
+            recoverable: true,
+          });
+        }
+        const s = sb as Record<string, unknown>;
+        if (typeof s.secret_ref !== "string" || s.secret_ref.length === 0) {
+          throw new TaskError({
+            code: "TASK_MANIFEST_SCHEMA_ERROR",
+            manifestPath: path,
+            taskId: id,
+            field: `secrets[${i}].secret_ref`,
+            message: `Task ${id}: secrets[${i}].secret_ref must be a non-empty string.`,
+            recoverable: true,
+          });
+        }
+        if (typeof s.target_env !== "string" || s.target_env.length === 0) {
+          throw new TaskError({
+            code: "TASK_MANIFEST_SCHEMA_ERROR",
+            manifestPath: path,
+            taskId: id,
+            field: `secrets[${i}].target_env`,
+            message: `Task ${id}: secrets[${i}].target_env must be a non-empty string.`,
+            recoverable: true,
+          });
+        }
+        secrets.push({
+          secret_ref: s.secret_ref as string,
+          target_env: s.target_env as string,
+        });
+      }
+    }
+
     tasks[id] = {
       mode,
       command: d.command as string[],
       runtime: runtime as TaskRuntime | undefined,
       timeout_seconds: timeout as number | undefined,
       parameters,
+      secrets,
     };
   }
 
@@ -336,6 +398,7 @@ export function computeEnvironmentFingerprint(input: {
 export function computeCapabilityFingerprint(input: {
   manifestSha256: string | null;
   taskIds: string[];
+  secretRefs?: string[];
   environment?: {
     environmentSource: string;
     pythonVersion: string | null;
@@ -346,6 +409,7 @@ export function computeCapabilityFingerprint(input: {
   return {
     manifestSha256: input.manifestSha256,
     taskIds: [...input.taskIds],
+    secretRefs: [...(input.secretRefs ?? [])],
     environment: input.environment
       ? computeEnvironmentFingerprint(input.environment)
       : undefined,

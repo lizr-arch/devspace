@@ -14,6 +14,7 @@ import {
 } from "./task-manifest.js";
 import { type AdditionalRoot } from "./roots.js";
 import { TaskError } from "./task-errors.js";
+import { type SecretResolver, redactSecrets } from "./secret-resolver.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -177,6 +178,20 @@ export function resolveWorkspacePythonEnvironment(
 export class TaskRunner {
   private sessions = new Map<string, TaskSession>();
   private processes = new Map<string, ChildProcess>();
+  private secretResolver?: SecretResolver;
+  /**
+   * Per-session secret values for redaction (keyed by sessionId).
+   * Cleared when the session completes. Values are NEVER persisted.
+   */
+  private sessionSecretValues = new Map<string, string[]>();
+
+  /**
+   * Set the SecretResolver for this runner.
+   * If unset, tasks declaring secrets will fail with TASK_SECRET_UNAUTHORIZED.
+   */
+  setSecretResolver(resolver: SecretResolver): void {
+    this.secretResolver = resolver;
+  }
 
   async runTask(input: {
     workspaceId: string;
@@ -216,6 +231,51 @@ export class TaskRunner {
       );
     }
 
+    // -------------------------------------------------------------------
+    // Resolve secret bindings (M3)
+    // -------------------------------------------------------------------
+    let resolvedSecrets: Map<string, string> = new Map();
+    if (task.secrets && task.secrets.length > 0) {
+      if (!this.secretResolver) {
+        throw new TaskError({
+          code: "TASK_SECRET_NOT_AUTHORIZED",
+          manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+          taskId: input.taskId,
+          message: `Task ${input.taskId} declares secrets but no SecretResolver is configured.`,
+          recoverable: true,
+        });
+      }
+      for (const binding of task.secrets) {
+        let secretValue: string;
+        try {
+          secretValue = this.secretResolver.resolve(binding.secret_ref);
+        } catch (err) {
+          throw new TaskError({
+            code: "TASK_SECRET_UNRESOLVED",
+            manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+            taskId: input.taskId,
+            field: `secrets.${binding.secret_ref}`,
+            message:
+              `Unable to resolve secret '${binding.secret_ref}': ` +
+              (err instanceof Error ? err.message : String(err)),
+            recoverable: true,
+          });
+        }
+        // Validate target_env is a legal env var name
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(binding.target_env)) {
+          throw new TaskError({
+            code: "TASK_MANIFEST_SCHEMA_ERROR",
+            manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+            taskId: input.taskId,
+            field: `secrets.target_env`,
+            message: `Invalid target_env name: '${binding.target_env}'.`,
+            recoverable: true,
+          });
+        }
+        resolvedSecrets.set(binding.target_env, secretValue);
+      }
+    }
+
     // Resolve runtime
     const runtime = this.resolveRuntime(
       task,
@@ -245,9 +305,26 @@ export class TaskRunner {
     };
 
     if (task.mode === "session") {
+      // Merge resolved secrets into child env (NOT global process.env)
+      const childEnv: Record<string, string | undefined> = {
+        ...process.env,
+        ...runtime.env,
+      };
+      for (const [envName, secretValue] of resolvedSecrets) {
+        childEnv[envName] = secretValue;
+      }
+
+      // Store secret values for redaction on poll (cleared on session complete)
+      if (resolvedSecrets.size > 0) {
+        this.sessionSecretValues.set(
+          sessionId,
+          Array.from(resolvedSecrets.values()),
+        );
+      }
+
       const proc = spawn(fullCommand[0], fullCommand.slice(1), {
         cwd: input.workspaceRoot,
-        env: { ...process.env, ...runtime.env },
+        env: childEnv as Record<string, string>,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
@@ -266,6 +343,8 @@ export class TaskRunner {
         session.status = code === 0 ? "succeeded" : "failed";
         session.exitCode = code ?? undefined;
         session.finishedAt = new Date().toISOString();
+        // Clean up secret values — they are no longer needed after exit
+        this.sessionSecretValues.delete(sessionId);
       });
 
       return {
@@ -282,14 +361,27 @@ export class TaskRunner {
       (task.timeout_seconds ?? input.timeoutSeconds ?? 600) * 1000;
     const startTime = performance.now();
 
+    // Merge resolved secrets into child env for run mode
+    const runEnv: Record<string, string | undefined> = { ...runtime.env };
+    for (const [envName, secretValue] of resolvedSecrets) {
+      runEnv[envName] = secretValue;
+    }
+
+    // Collect secret values for redaction (MUST not leak beyond this scope)
+    const secretValuesForRedaction = Array.from(resolvedSecrets.values());
+
     try {
       const result = await this.runAndWait(
         fullCommand[0],
         fullCommand.slice(1),
         input.workspaceRoot,
-        runtime.env,
+        runEnv as Record<string, string>,
         timeoutMs,
       );
+
+      // Redact secrets from stdout/stderr before returning
+      const redactedStdout = redactSecrets(result.stdout, secretValuesForRedaction);
+      const redactedStderr = redactSecrets(result.stderr, secretValuesForRedaction);
 
       const durationMs = Math.round(performance.now() - startTime);
       session.status = result.timedOut
@@ -298,8 +390,8 @@ export class TaskRunner {
           ? "succeeded"
           : "failed";
       session.exitCode = result.exitCode ?? undefined;
-      session.stdout = result.stdout;
-      session.stderr = result.stderr;
+      session.stdout = redactedStdout;
+      session.stderr = redactedStderr;
       session.finishedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
 
@@ -309,8 +401,8 @@ export class TaskRunner {
         sessionId,
         status: session.status,
         exitCode: session.exitCode,
-        stdout: session.stdout,
-        stderr: session.stderr,
+        stdout: redactedStdout,
+        stderr: redactedStderr,
         durationMs,
         runtime: session.runtime,
         environmentInfo: runtime.environmentInfo,
@@ -318,8 +410,11 @@ export class TaskRunner {
       };
     } catch (err) {
       const durationMs = Math.round(performance.now() - startTime);
+      const errorMsg = String(err);
+      const redactedError = redactSecrets(errorMsg, secretValuesForRedaction);
+
       session.status = "interrupted";
-      session.stderr = String(err);
+      session.stderr = redactedError;
       session.finishedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
 
@@ -328,8 +423,8 @@ export class TaskRunner {
         mode: "run",
         sessionId,
         status: "interrupted",
-        stdout: session.stdout,
-        stderr: session.stderr,
+        stdout: redactSecrets(session.stdout, secretValuesForRedaction),
+        stderr: redactedError,
         durationMs,
         runtime: session.runtime,
         environmentInfo: runtime.environmentInfo,
@@ -339,7 +434,18 @@ export class TaskRunner {
   }
 
   getSession(sessionId: string): TaskSession | undefined {
-    return this.sessions.get(sessionId);
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    // Redact secrets from session output before returning
+    const secretValues = this.sessionSecretValues.get(sessionId);
+    if (secretValues && secretValues.length > 0) {
+      return {
+        ...session,
+        stdout: redactSecrets(session.stdout, secretValues),
+        stderr: redactSecrets(session.stderr, secretValues),
+      };
+    }
+    return session;
   }
 
   stopSession(sessionId: string): boolean {
@@ -353,6 +459,8 @@ export class TaskRunner {
     } catch {
       return false;
     }
+    // Clean up secret values
+    this.sessionSecretValues.delete(sessionId);
     return true;
   }
 
