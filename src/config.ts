@@ -7,6 +7,7 @@ import {
   DEFAULT_MCP_SESSION_IDLE_TTL_MS,
   DEFAULT_MCP_SESSION_SWEEP_INTERVAL_MS,
 } from "./mcp-session-registry.js";
+import type { McpTransportMode } from "./mcp-session-registry.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { loadDevspaceFiles } from "./user-config.js";
 import type { RunnerRegistryConfig } from "./runner-registry.js";
@@ -55,6 +56,7 @@ export interface ServerConfig {
   skillPaths: string[];
   agentDir: string;
   logging: LoggingConfig;
+  mcpTransportMode: McpTransportMode;
   mcpSessionIdleTtlMs: number;
   mcpSessionMaxSessions: number;
   mcpSessionSweepIntervalMs: number;
@@ -246,6 +248,12 @@ function parseMcpSessionConfig(
     maxSessions,
     sweepIntervalMs: sweepIntervalSeconds * 1000,
   };
+}
+
+function parseMcpTransportMode(value: string | undefined): McpTransportMode {
+  if (!value || value === "stateless") return "stateless";
+  if (value === "stateful") return "stateful";
+  throw new Error(`Invalid DEVSPACE_MCP_TRANSPORT_MODE: ${value}`);
 }
 
 function parseToolNaming(value: string | undefined): ToolNamingMode {
@@ -651,6 +659,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       ),
     ),
     logging: parseLoggingConfig(env, files.config.trustProxy),
+    mcpTransportMode: parseMcpTransportMode(
+      env.DEVSPACE_MCP_TRANSPORT_MODE ?? files.config.mcpTransportMode,
+    ),
     mcpSessionIdleTtlMs: mcpSessions.idleTtlMs,
     mcpSessionMaxSessions: mcpSessions.maxSessions,
     mcpSessionSweepIntervalMs: mcpSessions.sweepIntervalMs,

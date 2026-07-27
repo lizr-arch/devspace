@@ -14,9 +14,23 @@ const baseEnv = {
 };
 
 assert.equal(loadConfig(baseEnv).widgets, "full");
-assert.equal(loadConfig(baseEnv).mcpSessionIdleTtlMs, 90_000);
+assert.equal(loadConfig(baseEnv).mcpTransportMode, "stateless");
+assert.equal(loadConfig(baseEnv).mcpSessionIdleTtlMs, 300_000);
 assert.equal(loadConfig(baseEnv).mcpSessionMaxSessions, 64);
-assert.equal(loadConfig(baseEnv).mcpSessionSweepIntervalMs, 15_000);
+assert.equal(loadConfig(baseEnv).mcpSessionSweepIntervalMs, 30_000);
+assert.equal(
+  loadConfig({ ...baseEnv, DEVSPACE_MCP_TRANSPORT_MODE: "stateful" })
+    .mcpTransportMode,
+  "stateful",
+);
+assert.throws(
+  () =>
+    loadConfig({
+      ...baseEnv,
+      DEVSPACE_MCP_TRANSPORT_MODE: "invalid",
+    }),
+  /Invalid DEVSPACE_MCP_TRANSPORT_MODE/,
+);
 assert.deepEqual(
   {
     idleTtlMs: loadConfig({
@@ -106,6 +120,7 @@ writeFileSync(
   JSON.stringify({
     toolMode: "full",
     widgets: "review_only",
+    mcpTransportMode: "stateful",
     mcpSessions: {
       idleTtlSeconds: 120,
       maxSessions: 48,
@@ -126,6 +141,13 @@ assert.equal(
     DEVSPACE_CONFIG_DIR: fullToolConfigDir,
   }).widgets,
   "review_only",
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+  }).mcpTransportMode,
+  "stateful",
 );
 assert.deepEqual(
   {

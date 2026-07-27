@@ -342,6 +342,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
     DEVSPACE_LOG_LEVEL: "silent",
     DEVSPACE_LOG_REQUESTS: "0",
     DEVSPACE_LOG_TOOL_CALLS: "0",
+    DEVSPACE_MCP_TRANSPORT_MODE: "stateful",
     HOST: "127.0.0.1",
     PORT: String(port),
   });

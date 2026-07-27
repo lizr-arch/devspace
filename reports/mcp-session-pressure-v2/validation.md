@@ -21,23 +21,41 @@ then retained until idle expiry. The client names were bounded diagnostics
 reported as `openai-mcp` and `openai-mcp _Codex_`; neither client sent a close
 request during the observation.
 
-## Change
+## Falsified mitigation
 
-- Default idle TTL: 300 seconds to 90 seconds.
-- Default sweep interval: 30 seconds to 15 seconds.
-- Default retained-session limit: 256 to 64.
+A first live candidate reduced the default idle TTL from 300 to 90 seconds and
+the sweep interval from 30 to 15 seconds. Public probes and real Connector calls
+passed, but the shorter expiry caused the client to reinitialize aggressively:
+
+- active sessions rose from 13 to 43 in about two minutes;
+- created sessions rose from 13 to 58;
+- the final creation rate was 33 sessions per minute;
+- `unknownSessionRequests`, capacity eviction, and close errors remained zero.
+
+The client treated server-side expiry as a reconnect signal, so a shorter TTL
+amplified churn instead of controlling it. The production default is therefore
+not reduced.
+
+## Final change
+
+- Streamable HTTP transport defaults to SDK-compatible stateless mode.
+- Stateless mode creates and closes one MCP server per POST; it does not retain
+  a session map entry and returns 405 for GET/DELETE.
+- Stateful mode remains available as an explicit compatibility fallback.
+- Stateful defaults remain 300-second idle TTL and 30-second sweep interval.
+- Default retained-session limit is reduced from 256 to 64 as a stateful safety
+  boundary.
 - Added bounded configuration through:
+  - `mcpTransportMode` in `~/.devspace/config.json`
+  - `DEVSPACE_MCP_TRANSPORT_MODE`
   - `mcpSessions` in `~/.devspace/config.json`
   - `DEVSPACE_MCP_SESSION_IDLE_TTL_SECONDS`
   - `DEVSPACE_MCP_SESSION_MAX_SESSIONS`
   - `DEVSPACE_MCP_SESSION_SWEEP_INTERVAL_SECONDS`
   - matching `devspace config set` commands
-- The sweep interval is rejected when it exceeds the idle TTL.
-
-At the observed initialization rate, the new defaults should reduce steady
-state retention from roughly 40-50 sessions to roughly 8-15 sessions. The
-64-session cap is a hard safety boundary; it is not expected to be reached
-during normal operation.
+- The public doctor full-loop understands both stateless and stateful transport
+  contracts.
+- Health and `devspace_info` report transport mode and stateless request count.
 
 ## Automated validation
 
@@ -48,7 +66,7 @@ Passed:
 - focused config, client classification, session registry, and doctor tests
 - `npm run test:mcp`
 - `npm run build`
-- CLI persistence round trip for all three session settings
+- CLI persistence round trip for the transport mode and session settings
 
 The full `npm run test:unit` command twice hit the existing five-second
 `background-jobs.test.ts` lifecycle wait. The same focused test passed in the
@@ -57,11 +75,19 @@ production code changed in this branch.
 
 ## Live validation
 
-Pending deployment and a new production boot. Acceptance requires:
+Passed on DevSpaceMac boot `d563fb75-2ce7-4278-b998-8a975fc2d267`:
 
-- health reports `idleTtlSeconds=90` and `maxSessions=64`;
-- public doctor full loop passes;
-- real Connector calls remain successful;
-- after at least two idle-TTL windows, session expiry increases without
-  `unknownSessionRequests`, capacity eviction, or close errors;
-- active sessions and memory settle materially below the 300-second baseline.
+- local live and public readiness probes passed;
+- public OAuth registration, owner approval, token exchange, initialize,
+  tools/list, Workspace App resource/assets, `devspace_info`,
+  `open_workspace`, `list_workspaces`, and `resume_workspace` passed;
+- real DevSpaceMac Cloudflare Connector calls to `devspace_info` and
+  `list_workspaces` passed;
+- after two minutes of Connector background traffic:
+  - stateless request count increased from 25 to 40;
+  - active, high-water, and created retained-session counts remained zero;
+  - unknown requests, expiry, capacity eviction, and close errors remained zero;
+  - heap used was observed at 60 MiB, 73 MiB, then 61 MiB.
+
+The service is deliberately left on the isolated validation worktree for soak.
+The branch is not merged or pushed by this report.

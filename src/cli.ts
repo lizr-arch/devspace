@@ -522,6 +522,17 @@ function runConfigCommand(args: string[]): void {
     console.log(`Updated ${files.configPath}`);
     return;
   }
+  if (key === "mcpTransportMode") {
+    if (value !== "stateless" && value !== "stateful") {
+      throw new Error("mcpTransportMode must be `stateless` or `stateful`.");
+    }
+    writeDevspaceConfig({
+      ...files.config,
+      mcpTransportMode: value,
+    });
+    console.log(`Updated ${files.configPath}`);
+    return;
+  }
   if (
     key === "mcpSessionIdleTtlSeconds" ||
     key === "mcpSessionMaxSessions" ||
@@ -551,9 +562,9 @@ function runConfigCommand(args: string[]): void {
         ? { sweepIntervalSeconds: parsed }
         : {}),
     };
-    const effectiveIdleTtlSeconds = mcpSessions.idleTtlSeconds ?? 90;
+    const effectiveIdleTtlSeconds = mcpSessions.idleTtlSeconds ?? 300;
     const effectiveSweepIntervalSeconds =
-      mcpSessions.sweepIntervalSeconds ?? 15;
+      mcpSessions.sweepIntervalSeconds ?? 30;
     if (effectiveSweepIntervalSeconds > effectiveIdleTtlSeconds) {
       throw new Error(
         "mcpSessionSweepIntervalSeconds must not exceed mcpSessionIdleTtlSeconds.",
@@ -568,7 +579,7 @@ function runConfigCommand(args: string[]): void {
   }
 
   throw new Error(
-    "Supported configuration keys are `publicBaseUrl`, `toolMode`, `widgets`, `mcpSessionIdleTtlSeconds`, `mcpSessionMaxSessions`, and `mcpSessionSweepIntervalSeconds`.",
+    "Supported configuration keys are `publicBaseUrl`, `toolMode`, `widgets`, `mcpTransportMode`, `mcpSessionIdleTtlSeconds`, `mcpSessionMaxSessions`, and `mcpSessionSweepIntervalSeconds`.",
   );
 }
 
@@ -1515,6 +1526,7 @@ function printHelp(): void {
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace config set toolMode <minimal|full>",
       "  devspace config set widgets <off|changes|review_only|full>",
+      "  devspace config set mcpTransportMode <stateless|stateful>",
       "  devspace config set mcpSessionIdleTtlSeconds <30-3600>",
       "  devspace config set mcpSessionMaxSessions <8-1024>",
       "  devspace config set mcpSessionSweepIntervalSeconds <5-300>",

@@ -1,6 +1,8 @@
-export const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 90 * 1000;
-export const DEFAULT_MCP_SESSION_SWEEP_INTERVAL_MS = 15 * 1000;
+export const DEFAULT_MCP_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
+export const DEFAULT_MCP_SESSION_SWEEP_INTERVAL_MS = 30 * 1000;
 export const DEFAULT_MAX_MCP_SESSIONS = 64;
+
+export type McpTransportMode = "stateful" | "stateless";
 
 export type McpSessionCloseReason =
   "client" | "expired" | "capacity" | "shutdown";
@@ -15,10 +17,12 @@ export interface CloseableMcpTransport {
 }
 
 export interface McpSessionSnapshot {
+  transportMode: McpTransportMode;
   active: number;
   highWaterMark: number;
   created: number;
   initializeRequests: number;
+  statelessRequests: number;
   acquireRequests: number;
   reusedRequests: number;
   unknownSessionRequests: number;
@@ -46,6 +50,7 @@ interface McpSessionRecord<TTransport extends CloseableMcpTransport> {
 }
 
 export interface McpSessionRegistryOptions {
+  transportMode?: McpTransportMode;
   idleTtlMs?: number;
   maxSessions?: number;
   sweepIntervalMs?: number;
@@ -66,6 +71,7 @@ export interface McpSessionRegistryOptions {
 
 export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
   private readonly sessions = new Map<string, McpSessionRecord<TTransport>>();
+  private readonly transportMode: McpTransportMode;
   private readonly idleTtlMs: number;
   private readonly maxSessions: number;
   private readonly now: () => number;
@@ -75,6 +81,7 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
   private created = 0;
   private highWaterMark = 0;
   private initializeRequests = 0;
+  private statelessRequests = 0;
   private acquireRequests = 0;
   private reusedRequests = 0;
   private unknownSessionRequests = 0;
@@ -93,6 +100,7 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
   private stopped = false;
 
   constructor(options: McpSessionRegistryOptions = {}) {
+    this.transportMode = options.transportMode ?? "stateful";
     this.idleTtlMs = options.idleTtlMs ?? DEFAULT_MCP_SESSION_IDLE_TTL_MS;
     this.maxSessions = options.maxSessions ?? DEFAULT_MAX_MCP_SESSIONS;
     const sweepIntervalMs =
@@ -145,6 +153,10 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
 
   recordInitializeRequest(): void {
     this.initializeRequests += 1;
+  }
+
+  recordStatelessRequest(): void {
+    this.statelessRequests += 1;
   }
 
   acquire(sessionId: string): TTransport | undefined {
@@ -209,10 +221,12 @@ export class McpSessionRegistry<TTransport extends CloseableMcpTransport> {
       inFlightRequests += session.inFlightRequests;
     }
     return {
+      transportMode: this.transportMode,
       active: this.sessions.size,
       highWaterMark: this.highWaterMark,
       created: this.created,
       initializeRequests: this.initializeRequests,
+      statelessRequests: this.statelessRequests,
       acquireRequests: this.acquireRequests,
       reusedRequests: this.reusedRequests,
       unknownSessionRequests: this.unknownSessionRequests,

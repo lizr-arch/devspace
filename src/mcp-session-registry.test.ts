@@ -99,6 +99,8 @@ assert.equal(secondActive.closeCalls, 0);
 const clientRegistry = new McpSessionRegistry<FakeTransport>({
   autoSweep: false,
 });
+assert.equal(clientRegistry.snapshot().transportMode, "stateful");
+assert.equal(clientRegistry.snapshot().statelessRequests, 0);
 const clientTransport = new FakeTransport();
 clientRegistry.register("client", clientTransport);
 assert.equal(
@@ -112,6 +114,18 @@ assert.equal(
 assert.equal(clientRegistry.snapshot().closed, 1);
 assert.equal(clientRegistry.snapshot().clientClosed, 1);
 assert.equal(clientTransport.closeCalls, 0);
+
+const statelessRegistry = new McpSessionRegistry<FakeTransport>({
+  transportMode: "stateless",
+  autoSweep: false,
+});
+statelessRegistry.recordInitializeRequest();
+statelessRegistry.recordStatelessRequest();
+statelessRegistry.recordStatelessRequest();
+assert.equal(statelessRegistry.snapshot().transportMode, "stateless");
+assert.equal(statelessRegistry.snapshot().initializeRequests, 1);
+assert.equal(statelessRegistry.snapshot().statelessRequests, 2);
+assert.equal(statelessRegistry.snapshot().active, 0);
 
 const shutdownRegistry = new McpSessionRegistry<FakeTransport>({
   autoSweep: false,

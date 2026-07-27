@@ -12,6 +12,7 @@ export interface DevspaceUserConfig {
   allowedHosts?: string[];
   toolMode?: "minimal" | "full";
   widgets?: "off" | "changes" | "review_only" | "full";
+  mcpTransportMode?: "stateful" | "stateless";
   mcpSessions?: {
     idleTtlSeconds?: number;
     maxSessions?: number;
