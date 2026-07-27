@@ -1,6 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { existsSync, lstatSync, statSync, readFileSync } from "node:fs";
+import { join, delimiter } from "node:path";
 import { resolveWorkspacePytestInvocation } from "./background-jobs.js";
 import {
   type TaskDefinition,
@@ -12,13 +13,19 @@ import {
   type ParamValidationError,
 } from "./task-manifest.js";
 import { type AdditionalRoot } from "./roots.js";
+import { TaskError } from "./task-errors.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type TaskSessionStatus =
-  "running" | "succeeded" | "failed" | "timed_out" | "stopped" | "interrupted";
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "timed_out"
+  | "stopped"
+  | "interrupted";
 
 export interface TaskSession {
   sessionId: string;
@@ -36,6 +43,7 @@ export interface TaskSession {
     interpreter: string;
     environmentSource: string;
   };
+  environmentInfo?: EnvironmentInfo;
   errors: ParamValidationError[];
 }
 
@@ -49,6 +57,7 @@ export interface TaskRunResult {
   stderr: string;
   durationMs: number;
   runtime: TaskSession["runtime"];
+  environmentInfo?: EnvironmentInfo;
   errors: ParamValidationError[];
 }
 
@@ -65,6 +74,105 @@ export interface TaskSessionResult {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TASK_TIMEOUT = 600_000; // 10 minutes
+const VENV_CANDIDATES = [".venv", "venv"];
+const DEPENDENCY_LOCK_CANDIDATES = [
+  "poetry.lock",
+  "Pipfile.lock",
+  "requirements-lock.txt",
+  "requirements.txt",
+];
+
+// ---------------------------------------------------------------------------
+// Environment diagnostics types
+// ---------------------------------------------------------------------------
+
+export interface EnvironmentInfo {
+  resolvedExecutable: string;
+  pythonVersion: string | null;
+  environmentSource: ".venv" | "venv" | "workspace-config" | "system";
+  dependencyLockPath: string | null;
+  dependencyLockSha256: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Python environment resolution (standalone export)
+// ---------------------------------------------------------------------------
+
+export function resolveWorkspacePythonEnvironment(
+  workspaceRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): EnvironmentInfo {
+  const scriptsDir = platform === "win32" ? "Scripts" : "bin";
+  const pythonName = platform === "win32" ? "python.exe" : "python";
+
+  for (const name of VENV_CANDIDATES) {
+    const venvRoot = join(workspaceRoot, name);
+    const venvScripts = join(venvRoot, scriptsDir);
+    const python = join(venvScripts, pythonName);
+
+    if (!existsSync(python)) continue;
+
+    // Reject symlinked venv directories
+    try {
+      if (
+        lstatSync(venvRoot).isSymbolicLink() ||
+        lstatSync(venvScripts).isSymbolicLink() ||
+        !statSync(python).isFile()
+      ) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    // Get Python version via direct exec (no shell)
+    let pythonVersion: string | null = null;
+    try {
+      const versionOutput = execFileSync(python, ["--version"], {
+        cwd: workspaceRoot,
+        encoding: "utf8",
+        timeout: 10_000,
+        windowsHide: true,
+      }).trim();
+      // "Python 3.11.9" → "3.11.9"
+      const match = versionOutput.match(/Python\s+(\S+)/);
+      pythonVersion = match ? match[1] : versionOutput;
+    } catch {
+      // Python --version failed — still usable but without version info
+    }
+
+    // Detect dependency lock file
+    let dependencyLockPath: string | null = null;
+    let dependencyLockSha256: string | null = null;
+    for (const candidate of DEPENDENCY_LOCK_CANDIDATES) {
+      const lockPath = join(workspaceRoot, candidate);
+      if (existsSync(lockPath) && statSync(lockPath).isFile()) {
+        dependencyLockPath = candidate;
+        dependencyLockSha256 = createHash("sha256")
+          .update(readFileSync(lockPath, "utf8"))
+          .digest("hex");
+        break;
+      }
+    }
+
+    return {
+      resolvedExecutable: python,
+      pythonVersion,
+      environmentSource: name as ".venv" | "venv",
+      dependencyLockPath,
+      dependencyLockSha256,
+    };
+  }
+
+  // No .venv found — TASK_ENVIRONMENT_UNAVAILABLE for workspace-python runtime
+  throw new TaskError({
+    code: "TASK_ENVIRONMENT_UNAVAILABLE",
+    manifestPath: join(workspaceRoot, ".devspace/tasks.yaml"),
+    field: "runtime.venv",
+    message: `Workspace requires Python virtual environment but neither .venv nor venv was found at ${workspaceRoot}. Create a venv with 'python -m venv .venv'.`,
+    recoverable: true,
+  });
+}
 
 export class TaskRunner {
   private sessions = new Map<string, TaskSession>();
@@ -79,13 +187,16 @@ export class TaskRunner {
     timeoutSeconds?: number;
   }): Promise<TaskRunResult | TaskSessionResult> {
     const manifest = loadTaskManifest(input.workspaceRoot);
-    if (!manifest) {
-      throw new Error("TASK_MANIFEST_MISSING: No .devspace/tasks.yaml found.");
-    }
 
     const task = manifest.tasks[input.taskId];
     if (!task) {
-      throw new Error(`TASK_NOT_FOUND: Task ${input.taskId} not in manifest.`);
+      throw new TaskError({
+        code: "TASK_ID_UNKNOWN",
+        manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+        taskId: input.taskId,
+        message: `Task ${input.taskId} not found in manifest.`,
+        recoverable: true,
+      });
     }
 
     // Validate params
@@ -106,7 +217,10 @@ export class TaskRunner {
     }
 
     // Resolve runtime
-    const runtime = this.resolveRuntime(task, input.workspaceRoot);
+    const runtime = this.resolveRuntime(
+      task,
+      input.workspaceRoot,
+    );
 
     const fullCommand = [...runtime.prefix, ...command];
     const sessionId = `task_${randomUUID()}`;
@@ -126,6 +240,7 @@ export class TaskRunner {
         interpreter: runtime.interpreter,
         environmentSource: runtime.source,
       },
+      environmentInfo: runtime.environmentInfo,
       errors: [],
     };
 
@@ -198,6 +313,7 @@ export class TaskRunner {
         stderr: session.stderr,
         durationMs,
         runtime: session.runtime,
+        environmentInfo: runtime.environmentInfo,
         errors: [],
       };
     } catch (err) {
@@ -216,6 +332,7 @@ export class TaskRunner {
         stderr: session.stderr,
         durationMs,
         runtime: session.runtime,
+        environmentInfo: runtime.environmentInfo,
         errors: [],
       };
     }
@@ -231,11 +348,7 @@ export class TaskRunner {
     try {
       proc.kill("SIGTERM");
       setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          /* already dead */
-        }
+        try { proc.kill("SIGKILL"); } catch { /* already dead */ }
       }, 5000);
     } catch {
       return false;
@@ -255,29 +368,37 @@ export class TaskRunner {
     prefix: string[];
     env: Record<string, string>;
     source: string;
+    environmentInfo?: EnvironmentInfo;
   } {
     const rt = task.runtime ?? "workspace-python";
 
     if (rt === "workspace-python") {
-      const pytestInv = resolveWorkspacePytestInvocation(workspaceRoot);
-      if (pytestInv) {
-        return {
-          interpreter: pytestInv.executable,
-          prefix: [pytestInv.executable],
-          env: { VIRTUAL_ENV: pytestInv.venvRoot },
-          source: ".venv",
-        };
-      }
-      // Fallback to system python
+      // Use enhanced environment resolution — throws TASK_ENVIRONMENT_UNAVAILABLE
+      // if no .venv is found; never falls back to system Python.
+      const envInfo = resolveWorkspacePythonEnvironment(workspaceRoot);
+
+      const venvScripts = join(
+        workspaceRoot,
+        envInfo.environmentSource,
+        process.platform === "win32" ? "Scripts" : "bin",
+      );
+      const pathKey = Object.keys(process.env).find(
+        (k) => k.toUpperCase() === "PATH",
+      ) ?? "PATH";
+
       return {
-        interpreter: "python",
-        prefix: ["python"],
-        env: {},
-        source: "system (no .venv found)",
+        interpreter: envInfo.resolvedExecutable,
+        prefix: [envInfo.resolvedExecutable],
+        env: {
+          VIRTUAL_ENV: join(workspaceRoot, envInfo.environmentSource),
+          [pathKey]: [venvScripts, process.env[pathKey] ?? ""].join(delimiter),
+        },
+        source: envInfo.environmentSource,
+        environmentInfo: envInfo,
       };
     }
 
-    // system runtime
+    // system runtime — use command's first element directly (no shell)
     return {
       interpreter: task.command[0],
       prefix: [],

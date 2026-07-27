@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { existsSync } from "node:fs";
 import { isPathInsideRoot } from "./roots.js";
+import { TaskError, type TaskErrorCode } from "./task-errors.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,78 +40,233 @@ export interface ApprovedTasks {
   taskIds: string[];
 }
 
+export interface EnvironmentFingerprint {
+  environmentSource: string;
+  pythonVersion: string | null;
+  dependencyLockSha256: string | null;
+  dependencyLockPath: string | null;
+}
+
+export interface CapabilityFingerprint {
+  manifestSha256: string | null;
+  taskIds: string[];
+  environment?: EnvironmentFingerprint;
+  computedAt: string;
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
 const TASKS_FILE = ".devspace/tasks.yaml";
 
-export function loadTaskManifest(workspaceRoot: string): TaskManifest | null {
+export function loadTaskManifest(workspaceRoot: string): TaskManifest {
   const path = join(workspaceRoot, TASKS_FILE);
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) {
+    throw new TaskError({
+      code: "TASK_MANIFEST_NOT_FOUND",
+      manifestPath: path,
+      message: `Task manifest not found: ${TASKS_FILE}`,
+      recoverable: true,
+    });
+  }
   const raw = readFileSync(path, "utf8");
-  const parsed = parseYaml(raw);
-  if (!parsed || typeof parsed !== "object") return null;
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch {
+    throw new TaskError({
+      code: "TASK_MANIFEST_YAML_INVALID",
+      manifestPath: path,
+      message: "Task manifest contains invalid YAML.",
+      recoverable: true,
+    });
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new TaskError({
+      code: "TASK_MANIFEST_SCHEMA_ERROR",
+      manifestPath: path,
+      message: "Task manifest root must be an object.",
+      recoverable: true,
+    });
+  }
   const obj = parsed as Record<string, unknown>;
-  if (typeof obj.version !== "number" || obj.version < 1) return null;
-  if (!obj.tasks || typeof obj.tasks !== "object") return null;
+  if (typeof obj.version !== "number" || obj.version < 1) {
+    throw new TaskError({
+      code: "TASK_MANIFEST_SCHEMA_ERROR",
+      manifestPath: path,
+      field: "version",
+      message: "Task manifest version must be a number >= 1.",
+      recoverable: true,
+    });
+  }
+  if (!obj.tasks || typeof obj.tasks !== "object") {
+    throw new TaskError({
+      code: "TASK_MANIFEST_SCHEMA_ERROR",
+      manifestPath: path,
+      field: "tasks",
+      message: "Task manifest requires a 'tasks' map.",
+      recoverable: true,
+    });
+  }
 
   const tasks: Record<string, TaskDefinition> = {};
-  for (const [id, def] of Object.entries(
-    obj.tasks as Record<string, unknown>,
-  )) {
-    if (typeof def !== "object" || def === null) return null;
+  for (const [id, def] of Object.entries(obj.tasks as Record<string, unknown>)) {
+    if (typeof def !== "object" || def === null) {
+      throw new TaskError({
+        code: "TASK_MANIFEST_SCHEMA_ERROR",
+        manifestPath: path,
+        field: `tasks.${id}`,
+        message: `Task ${id} must be an object.`,
+        recoverable: true,
+      });
+    }
     const d = def as Record<string, unknown>;
     const mode = d.mode;
-    if (mode !== "run" && mode !== "session") return null;
-    if (!Array.isArray(d.command) || d.command.length === 0) return null;
-    if (!d.command.every((a: unknown) => typeof a === "string")) return null;
+    if (mode !== "run" && mode !== "session") {
+      throw new TaskError({
+        code: "TASK_MANIFEST_SCHEMA_ERROR",
+        manifestPath: path,
+        taskId: id,
+        field: "mode",
+        message: `Task ${id}: mode must be 'run' or 'session'.`,
+        recoverable: true,
+      });
+    }
+    if (!Array.isArray(d.command) || d.command.length === 0) {
+      throw new TaskError({
+        code: "TASK_MANIFEST_SCHEMA_ERROR",
+        manifestPath: path,
+        taskId: id,
+        field: "command",
+        message: `Task ${id}: command must be a non-empty array.`,
+        recoverable: true,
+      });
+    }
+    if (!d.command.every((a: unknown) => typeof a === "string")) {
+      throw new TaskError({
+        code: "TASK_MANIFEST_SCHEMA_ERROR",
+        manifestPath: path,
+        taskId: id,
+        field: "command",
+        message: `Task ${id}: all command elements must be strings.`,
+        recoverable: true,
+      });
+    }
 
     const runtime = d.runtime;
-    if (
-      runtime !== undefined &&
-      runtime !== "workspace-python" &&
-      runtime !== "system"
-    )
-      return null;
+    if (runtime !== undefined && runtime !== "workspace-python" && runtime !== "system") {
+      throw new TaskError({
+        code: "TASK_EXECUTOR_UNSUPPORTED",
+        manifestPath: path,
+        taskId: id,
+        field: "runtime",
+        message: `Task ${id}: unsupported runtime '${runtime}'.`,
+        recoverable: true,
+      });
+    }
 
     const timeout = d.timeout_seconds;
-    if (timeout !== undefined && (typeof timeout !== "number" || timeout <= 0))
-      return null;
+    if (timeout !== undefined && (typeof timeout !== "number" || timeout <= 0)) {
+      throw new TaskError({
+        code: "TASK_MANIFEST_SCHEMA_ERROR",
+        manifestPath: path,
+        taskId: id,
+        field: "timeout_seconds",
+        message: `Task ${id}: timeout_seconds must be a positive number.`,
+        recoverable: true,
+      });
+    }
 
     let parameters: Record<string, TaskParameter> | undefined;
     if (d.parameters) {
-      if (typeof d.parameters !== "object" || d.parameters === null)
-        return null;
+      if (typeof d.parameters !== "object" || d.parameters === null) {
+        throw new TaskError({
+          code: "TASK_MANIFEST_SCHEMA_ERROR",
+          manifestPath: path,
+          taskId: id,
+          field: "parameters",
+          message: `Task ${id}: parameters must be an object.`,
+          recoverable: true,
+        });
+      }
       parameters = {};
       for (const [pname, pdef] of Object.entries(
         d.parameters as Record<string, unknown>,
       )) {
-        if (typeof pdef !== "object" || pdef === null) return null;
+        if (typeof pdef !== "object" || pdef === null) {
+          throw new TaskError({
+            code: "TASK_PARAMETER_SCHEMA_INVALID",
+            manifestPath: path,
+            taskId: id,
+            field: `parameters.${pname}`,
+            message: `Task ${id}: parameter ${pname} must be an object.`,
+            recoverable: true,
+          });
+        }
         const pd = pdef as Record<string, unknown>;
         const ptype = pd.type;
-        if (
-          ptype !== "string" &&
-          ptype !== "path" &&
-          ptype !== "sha256" &&
-          ptype !== "int"
-        )
-          return null;
+        if (ptype !== "string" && ptype !== "path" && ptype !== "sha256" && ptype !== "int") {
+          throw new TaskError({
+            code: "TASK_PARAMETER_SCHEMA_INVALID",
+            manifestPath: path,
+            taskId: id,
+            field: `parameters.${pname}.type`,
+            message: `Task ${id}: parameter ${pname} type must be string, path, sha256, or int.`,
+            recoverable: true,
+          });
+        }
         const param: TaskParameter = { type: ptype };
         if (pd.required !== undefined) {
-          if (typeof pd.required !== "boolean") return null;
+          if (typeof pd.required !== "boolean") {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.required`,
+              message: `Task ${id}: parameter ${pname} required must be boolean.`,
+              recoverable: true,
+            });
+          }
           param.required = pd.required;
         }
         if (pd.pattern !== undefined) {
-          if (typeof pd.pattern !== "string") return null;
+          if (typeof pd.pattern !== "string") {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.pattern`,
+              message: `Task ${id}: parameter ${pname} pattern must be a string.`,
+              recoverable: true,
+            });
+          }
           param.pattern = pd.pattern;
         }
         if (pd.min !== undefined) {
-          if (typeof pd.min !== "number") return null;
+          if (typeof pd.min !== "number") {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.min`,
+              message: `Task ${id}: parameter ${pname} min must be a number.`,
+              recoverable: true,
+            });
+          }
           param.min = pd.min;
         }
         if (pd.max !== undefined) {
-          if (typeof pd.max !== "number") return null;
+          if (typeof pd.max !== "number") {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.max`,
+              message: `Task ${id}: parameter ${pname} max must be a number.`,
+              recoverable: true,
+            });
+          }
           param.max = pd.max;
         }
         parameters[pname] = param;
@@ -160,6 +316,44 @@ export function checkManifestIntegrity(
 }
 
 // ---------------------------------------------------------------------------
+// Capability Fingerprint
+// ---------------------------------------------------------------------------
+
+export function computeEnvironmentFingerprint(input: {
+  environmentSource: string;
+  pythonVersion: string | null;
+  dependencyLockPath: string | null;
+  dependencyLockSha256: string | null;
+}): EnvironmentFingerprint {
+  return {
+    environmentSource: input.environmentSource,
+    pythonVersion: input.pythonVersion,
+    dependencyLockSha256: input.dependencyLockSha256,
+    dependencyLockPath: input.dependencyLockPath,
+  };
+}
+
+export function computeCapabilityFingerprint(input: {
+  manifestSha256: string | null;
+  taskIds: string[];
+  environment?: {
+    environmentSource: string;
+    pythonVersion: string | null;
+    dependencyLockPath: string | null;
+    dependencyLockSha256: string | null;
+  };
+}): CapabilityFingerprint {
+  return {
+    manifestSha256: input.manifestSha256,
+    taskIds: [...input.taskIds],
+    environment: input.environment
+      ? computeEnvironmentFingerprint(input.environment)
+      : undefined,
+    computedAt: new Date().toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Parameter validation & substitution
 // ---------------------------------------------------------------------------
 
@@ -189,10 +383,8 @@ export function validateAndSubstitute(
         subst.set(name, value);
         break;
       case "path":
-        if (
-          !isPathInsideRoot(value, workspaceRoot) &&
-          !allowedRoots.some((r) => isPathInsideRoot(value, r))
-        ) {
+        if (!isPathInsideRoot(value, workspaceRoot) &&
+            !allowedRoots.some((r) => isPathInsideRoot(value, r))) {
           errors.push({
             param: name,
             message: `Path parameter ${name} is outside allowed roots: ${value}`,
@@ -219,15 +411,9 @@ export function validateAndSubstitute(
             message: `Int parameter ${name} is not an integer: ${value}`,
           });
         } else if (def.min !== undefined && num < def.min) {
-          errors.push({
-            param: name,
-            message: `${name} must be >= ${def.min}`,
-          });
+          errors.push({ param: name, message: `${name} must be >= ${def.min}` });
         } else if (def.max !== undefined && num > def.max) {
-          errors.push({
-            param: name,
-            message: `${name} must be <= ${def.max}`,
-          });
+          errors.push({ param: name, message: `${name} must be <= ${def.max}` });
         } else {
           subst.set(name, value);
         }
@@ -239,10 +425,7 @@ export function validateAndSubstitute(
   if (task.parameters) {
     for (const [name, def] of Object.entries(task.parameters)) {
       if (def.required && !subst.has(name)) {
-        errors.push({
-          param: name,
-          message: `Required parameter ${name} is missing`,
-        });
+        errors.push({ param: name, message: `Required parameter ${name} is missing` });
       }
     }
   }
