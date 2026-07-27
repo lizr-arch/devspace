@@ -75,6 +75,7 @@ export interface ArtifactRecord {
   jobId?: string;
   runner?: JobRunner;
   runnerVersion?: string;
+  previousArtifactId?: string;
   origin:
     | {
         kind: "job";
@@ -85,8 +86,10 @@ export interface ArtifactRecord {
     | {
         kind: "import";
         importId: string;
-        source: "https" | "base64";
+        source: "openai_file" | "https" | "base64";
         sourceHost?: string;
+        sourceFileId?: string;
+        sourceFileName?: string;
       };
   workspaceId: string;
   createdAt: string;
@@ -129,7 +132,7 @@ export interface ListArtifactsInput {
 }
 
 interface PersistedLedger {
-  schemaVersion: 2;
+  schemaVersion: 3;
   workspaceId: string;
   artifacts: ArtifactRecord[];
 }
@@ -333,8 +336,12 @@ export class ArtifactLedger {
     workspaceRoot: string;
     relativePath: string;
     importId: string;
-    source: "https" | "base64";
+    source: "openai_file" | "https" | "base64";
     sourceHost?: string;
+    sourceFileId?: string;
+    sourceFileName?: string;
+    overwritten?: boolean;
+    previousArtifactId?: string;
   }): Promise<ArtifactRecord> {
     validateWorkspaceId(input.workspaceId);
     const relativePath = normalizeRelativePath(input.relativePath);
@@ -361,13 +368,16 @@ export class ArtifactLedger {
       format: format.format,
       size: info.size,
       sha256: await sha256File(absolutePath),
-      change: "created",
+      change: input.overwritten ? "modified" : "created",
       completion: "complete",
+      previousArtifactId: input.previousArtifactId,
       origin: {
         kind: "import",
         importId: input.importId,
         source: input.source,
         sourceHost: input.sourceHost,
+        sourceFileId: input.sourceFileId,
+        sourceFileName: input.sourceFileName,
       },
       workspaceId: input.workspaceId,
       createdAt: new Date().toISOString(),
@@ -427,6 +437,32 @@ export class ArtifactLedger {
     );
   }
 
+  getLatestArtifactForPath(
+    workspaceId: string,
+    relativePath: string,
+    sha256?: string,
+  ): ArtifactRecord | undefined {
+    validateWorkspaceId(workspaceId);
+    const path = normalizeRelativePath(relativePath);
+    return [...this.readLedger(workspaceId).artifacts]
+      .reverse()
+      .find(
+        (artifact) =>
+          artifact.relativePath === path &&
+          (sha256 === undefined || artifact.sha256 === sha256),
+      );
+  }
+
+  removeArtifact(workspaceId: string, artifactId: string): void {
+    validateWorkspaceId(workspaceId);
+    const ledger = this.readLedger(workspaceId);
+    const artifacts = ledger.artifacts.filter(
+      (artifact) => artifact.artifactId !== artifactId,
+    );
+    if (artifacts.length === ledger.artifacts.length) return;
+    this.writeLedger({ ...ledger, artifacts });
+  }
+
   async resolveArtifact(input: {
     workspaceId: string;
     workspaceRoot: string;
@@ -468,16 +504,12 @@ export class ArtifactLedger {
     validateWorkspaceId(workspaceId);
     const ledger = this.readLedger(workspaceId);
     const existing = new Set(
-      ledger.artifacts.map(
-        (artifact) =>
-          `${artifact.jobId}\0${artifact.relativePath}\0${artifact.sha256}`,
-      ),
+      ledger.artifacts.map((artifact) => artifact.artifactId),
     );
     for (const artifact of artifacts) {
-      const key = `${artifact.jobId}\0${artifact.relativePath}\0${artifact.sha256}`;
-      if (!existing.has(key)) {
+      if (!existing.has(artifact.artifactId)) {
         ledger.artifacts.push(artifact);
-        existing.add(key);
+        existing.add(artifact.artifactId);
       }
     }
     this.writeLedger(ledger);
@@ -487,22 +519,24 @@ export class ArtifactLedger {
     validateWorkspaceId(workspaceId);
     const path = this.ledgerPath(workspaceId);
     if (!existsSync(path)) {
-      return { schemaVersion: 2, workspaceId, artifacts: [] };
+      return { schemaVersion: 3, workspaceId, artifacts: [] };
     }
     const parsed = JSON.parse(readFileSync(path, "utf8")) as {
-      schemaVersion: 1 | 2;
+      schemaVersion: 1 | 2 | 3;
       workspaceId: string;
       artifacts: Array<ArtifactRecord & { origin?: ArtifactRecord["origin"] }>;
     };
     if (
-      (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) ||
+      (parsed.schemaVersion !== 1 &&
+        parsed.schemaVersion !== 2 &&
+        parsed.schemaVersion !== 3) ||
       parsed.workspaceId !== workspaceId ||
       !Array.isArray(parsed.artifacts)
     ) {
       throw new Error("Artifact ledger is malformed.");
     }
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       workspaceId,
       artifacts: parsed.artifacts.map((artifact) => {
         if (artifact.origin) return artifact;

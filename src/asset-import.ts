@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { createReadStream } from "node:fs";
 import {
   link,
   lstat,
@@ -16,6 +17,7 @@ import {
   workspaceRelativeFromAbsolute,
 } from "./workspace-paths.js";
 import { isPathInsideRoot } from "./roots.js";
+import { validatePng, type PngDimensions } from "./png-validator.js";
 
 export type ImportAssetFormat = "PNG" | "JPEG" | "WEBP" | "GLB" | "WAV" | "OGG";
 
@@ -34,12 +36,26 @@ const MAX_BASE64_CHARACTERS = Math.ceil((MAX_IMPORT_BYTES.GLB * 4) / 3) + 4;
 export interface ImportAssetInput {
   destination: string;
   workspaceRoot: string;
+  file?: OpenAiFileSource;
   sourceUrl?: string;
   base64Data?: string;
   expectedSha256?: string;
   overwrite?: boolean;
   beforeCommit?: () => Promise<void>;
+  httpsDownloader?: HttpsDownloader;
 }
+
+export interface OpenAiFileSource {
+  download_url: string;
+  file_id: string;
+  mime_type?: string;
+  file_name?: string;
+}
+
+export type HttpsDownloader = (
+  sourceUrl: string,
+  maxBytes: number,
+) => Promise<{ data: Buffer; sourceHost: string }>;
 
 export interface ImportAssetResult {
   path: string;
@@ -47,27 +63,49 @@ export interface ImportAssetResult {
   sha256: string;
   format: ImportAssetFormat;
   mimeType: string;
-  source: "https" | "base64";
+  source: "openai_file" | "https" | "base64";
   sourceHost?: string;
+  sourceFileId?: string;
+  sourceFileName?: string;
+  dimensions?: PngDimensions;
+  outcome: ImportAssetOutcome;
+  previousSha256?: string;
 }
+
+export type ImportAssetOutcome = "created" | "unchanged" | "replaced";
 
 export async function importAsset(
   input: ImportAssetInput,
 ): Promise<ImportAssetResult> {
-  if ((input.sourceUrl === undefined) === (input.base64Data === undefined)) {
+  const sourceCount = [input.file, input.sourceUrl, input.base64Data].filter(
+    (value) => value !== undefined,
+  ).length;
+  if (sourceCount !== 1) {
     throw new Error(
-      "ASSET_SOURCE_INVALID: Provide exactly one of sourceUrl or base64Data.",
+      "ASSET_SOURCE_INVALID: Provide exactly one of file, sourceUrl, or base64Data.",
     );
   }
   const expectedFormat = formatForExtension(input.destination);
   const source =
-    input.sourceUrl !== undefined
-      ? await downloadAsset(input.sourceUrl, MAX_IMPORT_BYTES[expectedFormat])
-      : {
-          data: decodeBase64(input.base64Data ?? ""),
-          source: "base64" as const,
-          sourceHost: undefined,
-        };
+    input.file !== undefined
+      ? await downloadOpenAiFile(
+          input.file,
+          MAX_IMPORT_BYTES[expectedFormat],
+          input.httpsDownloader ?? downloadHttpsBytes,
+        )
+      : input.sourceUrl !== undefined
+        ? await downloadAsset(
+            input.sourceUrl,
+            MAX_IMPORT_BYTES[expectedFormat],
+            input.httpsDownloader ?? downloadHttpsBytes,
+          )
+        : {
+            data: decodeBase64(input.base64Data ?? ""),
+            source: "base64" as const,
+            sourceHost: undefined,
+            sourceFileId: undefined,
+            sourceFileName: undefined,
+          };
   if (source.data.length > MAX_IMPORT_BYTES[expectedFormat]) {
     throw new Error(
       `ASSET_TOO_LARGE: ${expectedFormat} exceeds ${MAX_IMPORT_BYTES[expectedFormat]} bytes.`,
@@ -79,7 +117,7 @@ export async function importAsset(
       `ASSET_FORMAT_REJECTED: Extension requires ${expectedFormat}, detected ${detectedFormat ?? "unknown"}.`,
     );
   }
-  validateContainer(source.data, detectedFormat);
+  const dimensions = await validateContainer(source.data, detectedFormat);
   const sha256 = createHash("sha256").update(source.data).digest("hex");
   if (
     input.expectedSha256 !== undefined &&
@@ -89,10 +127,11 @@ export async function importAsset(
       `ASSET_HASH_MISMATCH: Expected ${input.expectedSha256.toLowerCase()}, received ${sha256}.`,
     );
   }
-  await writeAtomicAsset({
+  const writeResult = await writeAtomicAsset({
     destination: input.destination,
     workspaceRoot: input.workspaceRoot,
     data: source.data,
+    sha256,
     overwrite: input.overwrite ?? false,
     beforeCommit: input.beforeCommit,
   });
@@ -104,6 +143,10 @@ export async function importAsset(
     mimeType: assetMimeType(detectedFormat),
     source: source.source,
     sourceHost: source.sourceHost,
+    sourceFileId: source.sourceFileId,
+    sourceFileName: source.sourceFileName,
+    dimensions,
+    ...writeResult,
   };
 }
 
@@ -124,7 +167,62 @@ function decodeBase64(value: string): Buffer {
 async function downloadAsset(
   sourceUrl: string,
   maxBytes: number,
-): Promise<{ data: Buffer; source: "https"; sourceHost: string }> {
+  downloader: HttpsDownloader,
+): Promise<{
+  data: Buffer;
+  source: "https";
+  sourceHost: string;
+  sourceFileId?: undefined;
+  sourceFileName?: undefined;
+}> {
+  const downloaded = await downloader(sourceUrl, maxBytes);
+  return {
+    ...downloaded,
+    source: "https",
+    sourceFileId: undefined,
+    sourceFileName: undefined,
+  };
+}
+
+async function downloadOpenAiFile(
+  file: OpenAiFileSource,
+  maxBytes: number,
+  downloader: HttpsDownloader,
+): Promise<{
+  data: Buffer;
+  source: "openai_file";
+  sourceHost?: undefined;
+  sourceFileId: string;
+  sourceFileName?: string;
+}> {
+  if (file.mime_type !== undefined && file.mime_type !== "image/png") {
+    throw new Error(
+      "ASSET_FORMAT_REJECTED: OpenAI file mime_type must be image/png.",
+    );
+  }
+  if (
+    file.file_name !== undefined &&
+    extname(file.file_name) !== "" &&
+    extname(file.file_name).toLowerCase() !== ".png"
+  ) {
+    throw new Error(
+      "ASSET_FORMAT_REJECTED: OpenAI file_name extension must be .png.",
+    );
+  }
+  const downloaded = await downloader(file.download_url, maxBytes);
+  return {
+    data: downloaded.data,
+    source: "openai_file",
+    sourceHost: undefined,
+    sourceFileId: file.file_id,
+    sourceFileName: file.file_name,
+  };
+}
+
+async function downloadHttpsBytes(
+  sourceUrl: string,
+  maxBytes: number,
+): Promise<{ data: Buffer; sourceHost: string }> {
   let current = parsePublicHttpsUrl(sourceUrl);
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     await assertPublicHostname(current.hostname);
@@ -167,7 +265,6 @@ async function downloadAsset(
     }
     return {
       data: Buffer.concat(chunks, bytes),
-      source: "https",
       sourceHost: current.hostname,
     };
   }
@@ -247,9 +344,13 @@ async function writeAtomicAsset(input: {
   destination: string;
   workspaceRoot: string;
   data: Buffer;
+  sha256: string;
   overwrite: boolean;
   beforeCommit?: () => Promise<void>;
-}): Promise<void> {
+}): Promise<{
+  outcome: ImportAssetOutcome;
+  previousSha256?: string;
+}> {
   const relativeDestination = isAbsolute(input.destination)
     ? workspaceRelativeFromAbsolute(input.workspaceRoot, input.destination)
     : input.destination;
@@ -258,6 +359,7 @@ async function writeAtomicAsset(input: {
     relativeDestination,
   );
   await mkdir(dirname(resolved.absolutePath), { recursive: true });
+  let previousSha256: string | undefined;
   try {
     const target = await lstat(resolved.absolutePath);
     if (target.isSymbolicLink()) {
@@ -266,8 +368,14 @@ async function writeAtomicAsset(input: {
     if (!target.isFile()) {
       throw new Error("PATH_TYPE_REJECTED: Destination is not a regular file.");
     }
+    previousSha256 = await sha256File(resolved.absolutePath);
+    if (previousSha256 === input.sha256) {
+      return { outcome: "unchanged", previousSha256 };
+    }
     if (!input.overwrite) {
-      throw new Error("PATH_EXISTS: Destination already exists.");
+      throw new Error(
+        `ASSET_DESTINATION_CONFLICT: Destination exists with sha256 ${previousSha256}; incoming sha256 is ${input.sha256}.`,
+      );
     }
   } catch (error) {
     if (!isMissingPathError(error)) throw error;
@@ -286,12 +394,22 @@ async function writeAtomicAsset(input: {
   }
   try {
     await input.beforeCommit?.();
-    if (input.overwrite) {
+    if (input.overwrite && previousSha256 !== undefined) {
+      const currentSha256 = await sha256File(resolved.absolutePath);
+      if (currentSha256 !== previousSha256) {
+        throw new Error(
+          "ASSET_DESTINATION_CHANGED: Destination changed during import.",
+        );
+      }
       await rename(temporary, resolved.absolutePath);
     } else {
       await link(temporary, resolved.absolutePath);
       await unlink(temporary);
     }
+    return {
+      outcome: previousSha256 === undefined ? "created" : "replaced",
+      previousSha256,
+    };
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     if (
@@ -299,10 +417,29 @@ async function writeAtomicAsset(input: {
       "code" in error &&
       (error as NodeJS.ErrnoException).code === "EEXIST"
     ) {
-      throw new Error("PATH_EXISTS: Destination already exists.");
+      const concurrentSha256 = await sha256File(resolved.absolutePath).catch(
+        () => undefined,
+      );
+      if (concurrentSha256 === input.sha256) {
+        return {
+          outcome: "unchanged",
+          previousSha256: concurrentSha256,
+        };
+      }
+      throw new Error(
+        `ASSET_DESTINATION_CONFLICT: Destination was created concurrently${concurrentSha256 ? ` with sha256 ${concurrentSha256}` : ""}; incoming sha256 is ${input.sha256}.`,
+      );
     }
     throw error;
   }
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
 }
 
 export function detectAssetFormat(data: Buffer): ImportAssetFormat | undefined {
@@ -339,7 +476,10 @@ export function detectAssetFormat(data: Buffer): ImportAssetFormat | undefined {
   return undefined;
 }
 
-function validateContainer(data: Buffer, format: ImportAssetFormat): void {
+async function validateContainer(
+  data: Buffer,
+  format: ImportAssetFormat,
+): Promise<PngDimensions | undefined> {
   if (format === "GLB") {
     const version = data.readUInt32LE(4);
     const declaredLength = data.readUInt32LE(8);
@@ -347,12 +487,13 @@ function validateContainer(data: Buffer, format: ImportAssetFormat): void {
       throw new Error("ASSET_FORMAT_REJECTED: GLB header is malformed.");
     }
   }
-  if (format === "PNG" && data.length < 24) {
-    throw new Error("ASSET_FORMAT_REJECTED: PNG is truncated.");
+  if (format === "PNG") {
+    return validatePng(data);
   }
   if (format === "JPEG" && data.length < 4) {
     throw new Error("ASSET_FORMAT_REJECTED: JPEG is truncated.");
   }
+  return undefined;
 }
 
 function formatForExtension(path: string): ImportAssetFormat {

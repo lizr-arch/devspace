@@ -81,6 +81,19 @@ import {
   setMonitorSecurityHeaders,
 } from "./live-monitor.js";
 import { importPng, MAX_PNG_IMPORT_BYTES } from "./png-import.js";
+import { validatePng } from "./png-validator.js";
+import { AssetReceiptStore } from "./asset-receipts.js";
+import {
+  readApprovedReceiptFile,
+  reindexApprovedAssetReceipts,
+  removeApprovedReceiptFile,
+  writeImmutableApprovedReceipt,
+} from "./approved-assets.js";
+import { validateApprovedAssetReceipt } from "./asset-receipts.js";
+import {
+  IMPORT_PNG_FILE_PARAMS_META,
+  openAiFileInputSchema,
+} from "./openai-file.js";
 import { importAsset, MAX_IMPORT_BYTES } from "./asset-import.js";
 import { inspectArtifact } from "./artifact-inspector.js";
 import {
@@ -142,7 +155,8 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-export const TOOL_SCHEMA_REVISION = "devspacemac-houdini-runner-v1.2026-07-27";
+export const TOOL_SCHEMA_REVISION =
+  "devspacemac-approved-asset-intake-p1.5-houdini-v1.2026-07-28";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -307,6 +321,12 @@ export const REVIEW_ONLY_WIDGET_TOOLS = [
   "list_artifacts",
   "inspect_artifact",
   "publish_artifact",
+  "import_png",
+  "archive_approved_image",
+  "find_approved_assets",
+  "verify_approved_asset",
+  "recover_approved_asset",
+  "reindex_approved_assets",
   "preview_artifact",
   "inspect_glb",
   "inspect_blend",
@@ -452,6 +472,11 @@ function exposedToolNames(
       toolNames.write,
       "import_asset",
       "import_png",
+      "archive_approved_image",
+      "find_approved_assets",
+      "verify_approved_asset",
+      "recover_approved_asset",
+      "reindex_approved_assets",
       toolNames.edit,
       "preview_artifact",
       "mkdir",
@@ -567,6 +592,9 @@ function requiredCapabilityForTool(tool: string): ToolCapability {
       "edit_file",
       "import_asset",
       "import_png",
+      "archive_approved_image",
+      "recover_approved_asset",
+      "reindex_approved_assets",
       "mkdir",
       "copy",
       "move",
@@ -1456,6 +1484,7 @@ function createMcpServer(
   inspectors: ExternalInspectorManager,
   runners: RunnerRegistry,
   artifacts: ArtifactLedger,
+  assetReceipts: AssetReceiptStore,
   publisher: ArtifactPublisher,
   runtime: ServiceRuntime,
   workspaceApp: WorkspaceAppBuild | undefined,
@@ -1467,6 +1496,29 @@ function createMcpServer(
     kind: ToolWidgetKind,
   ): ToolWidgetDescriptorMeta =>
     toolWidgetDescriptorMeta(config, toolName, kind, workspaceApp);
+  const interactiveWidgetMeta = (
+    toolName: string,
+    kind: ToolWidgetKind,
+    extraMeta: Record<string, unknown> = {},
+  ): ToolWidgetDescriptorMeta => {
+    const base = widgetMeta(toolName, kind)._meta as Record<string, unknown>;
+    const ui = base.ui as
+      { resourceUri: string; visibility: string[] } | undefined;
+    return {
+      _meta: {
+        ...extraMeta,
+        ...base,
+        ...(ui
+          ? {
+              ui: {
+                ...ui,
+                visibility: ["model", "app"],
+              },
+            }
+          : {}),
+      },
+    };
+  };
   const server = new McpServer(
     {
       name: "devspace",
@@ -2205,7 +2257,7 @@ function createMcpServer(
           sha256: z.string(),
           previewType: z.enum(["image", "audio", "text", "json", "download"]),
         }),
-        ...widgetMeta("publish_artifact", "review"),
+        ...interactiveWidgetMeta("publish_artifact", "review"),
         annotations: {
           readOnlyHint: false,
           destructiveHint: false,
@@ -2269,6 +2321,876 @@ function createMcpServer(
           },
           structuredContent: { result, ...publication },
         };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "archive_approved_image",
+      {
+        title: "Archive approved image",
+        description:
+          "Freeze a human-approved PNG into the workspace and create an immutable project receipt plus rebuildable SQLite index. Provide exactly one of file or existingImportReceiptId. This records approval but never runs Blender, Godot, Atlas, color matching, or another production pipeline.",
+        inputSchema: {
+          workspaceId: z.string(),
+          path: z.string().max(512),
+          receiptDirectory: z.string().max(512),
+          file: openAiFileInputSchema.optional(),
+          existingImportReceiptId: z
+            .string()
+            .regex(/^import_receipt_[0-9a-f]{64}$/)
+            .optional(),
+          projectId: z.string().min(1).max(512),
+          taskId: z.string().min(1).max(512),
+          assetRole: z.string().min(1).max(512),
+          sourceKind: z.enum([
+            "user_upload",
+            "image_gen",
+            "file_library",
+            "historical_conversation",
+          ]),
+          generationId: z.string().min(1).max(512).optional(),
+          model: z.string().min(1).max(512).optional(),
+          prompt: z.string().min(1).max(100_000).optional(),
+          approvedPurpose: z.string().min(1).max(4096),
+          decisionText: z.string().min(1).max(16_384),
+          evidenceRef: z.string().min(1).max(4096).optional(),
+          supersedesAssetReceiptId: z
+            .string()
+            .regex(/^asset_receipt_[0-9a-f]{64}$/)
+            .optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          workspaceId: z.string(),
+          path: z.string(),
+          outcome: z.enum(["created", "unchanged", "replaced"]),
+          bytes: z.number().int().nonnegative(),
+          sha256: z.string(),
+          width: z.number().int().positive(),
+          height: z.number().int().positive(),
+          mimeType: z.literal("image/png"),
+          artifactId: z.string(),
+          importReceiptId: z.string(),
+          assetReceiptId: z.string(),
+          assetReceiptPath: z.string(),
+          humanApproval: z.object({
+            status: z.literal("passed"),
+            actor: z.literal("human_user"),
+          }),
+          supersedesAssetReceiptId: z.string().optional(),
+          readyForPipeline: z.literal(true),
+        }),
+        ...interactiveWidgetMeta(
+          "archive_approved_image",
+          "review",
+          IMPORT_PNG_FILE_PARAMS_META,
+        ),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async ({
+        workspaceId,
+        path,
+        receiptDirectory,
+        file,
+        existingImportReceiptId,
+        projectId,
+        taskId,
+        assetRole,
+        sourceKind,
+        generationId,
+        model,
+        prompt,
+        approvedPurpose,
+        decisionText,
+        evidenceRef,
+        supersedesAssetReceiptId,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "archive_approved_image",
+          projectMemoryReceiptId,
+        );
+        const destination = workspaces.resolvePath(workspace, path);
+        let displacedTrashId: string | undefined;
+        let registeredArtifact:
+          Awaited<ReturnType<ArtifactLedger["registerImport"]>> | undefined;
+        let createdImportReceiptId: string | undefined;
+        let importedOutcome: "created" | "unchanged" | "replaced" = "unchanged";
+        try {
+          if (
+            (file === undefined) ===
+            (existingImportReceiptId === undefined)
+          ) {
+            throw new Error(
+              "APPROVED_ASSET_SOURCE_INVALID: Provide exactly one of file or existingImportReceiptId.",
+            );
+          }
+          if (
+            sourceKind === "image_gen" &&
+            (!generationId || !model || !prompt)
+          ) {
+            throw new Error(
+              "APPROVED_ASSET_SOURCE_INVALID: image_gen requires generationId, model, and the complete prompt.",
+            );
+          }
+          const currentApproved = assetReceipts.getCurrentApprovedForPath(
+            projectId,
+            path,
+          );
+          if (supersedesAssetReceiptId) {
+            if (
+              !currentApproved ||
+              currentApproved.assetReceiptId !== supersedesAssetReceiptId
+            ) {
+              throw new Error(
+                "APPROVED_ASSET_SUPERSESSION_INVALID: supersedesAssetReceiptId must identify the current approved version for this project path.",
+              );
+            }
+          }
+
+          let importReceipt;
+          if (existingImportReceiptId) {
+            importReceipt = assetReceipts.getImport(
+              workspaceId,
+              existingImportReceiptId,
+            );
+            if (!importReceipt) {
+              throw new Error(
+                "ASSET_IMPORT_RECEIPT_NOT_FOUND: The import receipt is not registered for this workspace.",
+              );
+            }
+            if (importReceipt.destinationPath !== path) {
+              throw new Error(
+                "ASSET_IMPORT_RECEIPT_MISMATCH: Receipt destination does not match path.",
+              );
+            }
+            const currentSha256 = createHash("sha256")
+              .update(readFileSync(destination))
+              .digest("hex");
+            if (currentSha256 !== importReceipt.sha256) {
+              throw new Error(
+                "ASSET_IMPORT_RECEIPT_MISMATCH: Current file SHA-256 differs from the import receipt.",
+              );
+            }
+            importedOutcome = importReceipt.outcome;
+          } else {
+            const imported = await importPng({
+              destination,
+              workspaceRoot: workspace.root,
+              file,
+              overwrite: Boolean(supersedesAssetReceiptId),
+              beforeCommit:
+                supersedesAssetReceiptId && existsSync(destination)
+                  ? async () => {
+                      const snapshot = await snapshotWorkspaceFileToTrash({
+                        workspaceRoot: workspace.root,
+                        stateDir: config.stateDir,
+                        workspaceId,
+                        path,
+                      });
+                      displacedTrashId = snapshot.trashId;
+                    }
+                  : undefined,
+            });
+            importedOutcome = imported.outcome;
+            const previousArtifact =
+              imported.outcome === "replaced" && imported.previousSha256
+                ? artifacts.getLatestArtifactForPath(
+                    workspaceId,
+                    path,
+                    imported.previousSha256,
+                  )
+                : undefined;
+            let artifact = artifacts.getLatestArtifactForPath(
+              workspaceId,
+              path,
+              imported.sha256,
+            );
+            if (!artifact || imported.outcome !== "unchanged") {
+              artifact = await artifacts.registerImport({
+                workspaceId,
+                workspaceRoot: workspace.root,
+                relativePath: path,
+                importId: `import_${randomUUID()}`,
+                source: imported.source,
+                sourceFileId: imported.sourceFileId,
+                sourceFileName: imported.sourceFileName,
+                overwritten: imported.outcome === "replaced",
+                previousArtifactId: previousArtifact?.artifactId,
+              });
+              registeredArtifact = artifact;
+            }
+            importReceipt = assetReceipts.registerImport({
+              workspaceId,
+              destinationPath: path,
+              outcome: imported.outcome,
+              bytes: imported.bytes,
+              sha256: imported.sha256,
+              width: imported.width,
+              height: imported.height,
+              mimeType: imported.mimeType,
+              sourceKind: imported.source,
+              sourceFileId: imported.sourceFileId,
+              sourceFileName: imported.sourceFileName,
+              artifactId: artifact.artifactId,
+              previousSha256: imported.previousSha256,
+              previousArtifactId: previousArtifact?.artifactId,
+              displacedTrashId,
+            });
+            createdImportReceiptId = importReceipt.importReceiptId;
+          }
+
+          if (
+            currentApproved &&
+            currentApproved.asset.sha256 !== importReceipt.sha256 &&
+            !supersedesAssetReceiptId
+          ) {
+            throw new Error(
+              `APPROVED_ASSET_REPLACEMENT_REQUIRES_SUPERSESSION: Current approved receipt is ${currentApproved.assetReceiptId}.`,
+            );
+          }
+          const candidate = assetReceipts.buildApproved({
+            projectId,
+            taskId,
+            assetRole,
+            importReceipt,
+            sourceKind,
+            generationId,
+            model,
+            prompt,
+            approvedPurpose,
+            decisionText,
+            evidenceRef,
+            supersedesAssetReceiptId,
+            receiptDirectory,
+          });
+          const approved =
+            assetReceipts.getApproved(candidate.assetReceiptId) ?? candidate;
+          const receiptWrite = await writeImmutableApprovedReceipt(
+            workspace.root,
+            approved,
+          );
+          try {
+            assetReceipts.registerApproved(approved);
+          } catch (error) {
+            if (receiptWrite.created) {
+              await removeApprovedReceiptFile(
+                workspace.root,
+                approved.projectReceiptPath,
+              );
+            }
+            throw error;
+          }
+          const result = `Archived human-approved PNG ${path} as ${approved.assetReceiptId}; project receipt ${approved.projectReceiptPath}. Pipeline execution remains separate.`;
+          logToolCall(config, {
+            tool: "archive_approved_image",
+            workspaceId,
+            path,
+            success: true,
+            durationMs: Math.round(performance.now() - startedAt),
+          });
+          return {
+            content: [textBlock(result)],
+            _meta: {
+              tool: "archive_approved_image",
+              projectMemory,
+              card: {
+                workspaceId,
+                path,
+                summary: {
+                  ...approved.asset,
+                  outcome: importedOutcome,
+                  artifactId: importReceipt.artifactId,
+                  importReceiptId: importReceipt.importReceiptId,
+                  assetReceiptId: approved.assetReceiptId,
+                  assetReceiptPath: approved.projectReceiptPath,
+                  humanApproval: approved.humanApproval,
+                  supersedesAssetReceiptId,
+                  readyForPipeline: true,
+                },
+              },
+            },
+            structuredContent: {
+              result,
+              workspaceId,
+              path,
+              outcome: importedOutcome,
+              ...approved.asset,
+              artifactId: importReceipt.artifactId,
+              importReceiptId: importReceipt.importReceiptId,
+              assetReceiptId: approved.assetReceiptId,
+              assetReceiptPath: approved.projectReceiptPath,
+              humanApproval: {
+                status: approved.humanApproval.status,
+                actor: approved.humanApproval.actor,
+              },
+              supersedesAssetReceiptId,
+              readyForPipeline: true,
+            },
+          };
+        } catch (error) {
+          if (createdImportReceiptId) {
+            try {
+              assetReceipts.removeImport(createdImportReceiptId);
+              if (registeredArtifact) {
+                artifacts.removeArtifact(
+                  workspaceId,
+                  registeredArtifact.artifactId,
+                );
+              }
+              if (importedOutcome !== "unchanged") {
+                await rollbackImportedAsset({
+                  workspaceRoot: workspace.root,
+                  stateDir: config.stateDir,
+                  workspaceId,
+                  path,
+                  displacedTrashId,
+                });
+              }
+            } catch (rollbackError) {
+              throw new Error(
+                `APPROVED_ASSET_ROLLBACK_FAILED: ${
+                  rollbackError instanceof Error
+                    ? rollbackError.message
+                    : String(rollbackError)
+                }`,
+              );
+            }
+          }
+          const message =
+            error instanceof Error ? error.message : String(error);
+          logToolCall(config, {
+            tool: "archive_approved_image",
+            workspaceId,
+            path,
+            success: false,
+            durationMs: Math.round(performance.now() - startedAt),
+            error: message,
+          });
+          return { content: [textBlock(message)], isError: true };
+        }
+      },
+    );
+
+    registerAppTool(
+      server,
+      "find_approved_assets",
+      {
+        title: "Find approved assets",
+        description:
+          "Query the rebuildable approved-asset registry by project, task, role, source file ID, destination path, or receipt ID. Returns summaries by default and never grants access to historical file bytes.",
+        inputSchema: {
+          workspaceId: z.string(),
+          projectId: z.string().min(1).max(512).optional(),
+          taskId: z.string().min(1).max(512).optional(),
+          assetRole: z.string().min(1).max(512).optional(),
+          sourceFileId: z.string().min(1).max(512).optional(),
+          path: z.string().min(1).max(512).optional(),
+          assetReceiptId: z
+            .string()
+            .regex(/^asset_receipt_[0-9a-f]{64}$/)
+            .optional(),
+          limit: z.number().int().min(1).max(200).optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          assets: z.array(z.unknown()),
+          count: z.number().int().nonnegative(),
+        }),
+        ...interactiveWidgetMeta("find_approved_assets", "review"),
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        projectId,
+        taskId,
+        assetRole,
+        sourceFileId,
+        path,
+        assetReceiptId,
+        limit,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "find_approved_assets",
+          projectMemoryReceiptId,
+        );
+        const assets = assetReceipts.findApproved({
+          projectId,
+          taskId,
+          assetRole,
+          sourceFileId,
+          destinationPath: path,
+          assetReceiptId,
+          limit,
+        });
+        const result =
+          assets.length === 0
+            ? "No approved assets matched the query."
+            : assets
+                .map(
+                  (asset) =>
+                    `${asset.assetReceiptId} ${asset.projectId}/${asset.taskId}/${asset.assetRole} ${asset.destinationPath} sha256=${asset.sha256} ${asset.current ? "current" : `superseded-by=${asset.supersededByAssetReceiptId}`}`,
+                )
+                .join("\n");
+        logToolCall(config, {
+          tool: "find_approved_assets",
+          workspaceId,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "find_approved_assets", projectMemory },
+          structuredContent: { result, assets, count: assets.length },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "verify_approved_asset",
+      {
+        title: "Verify approved asset",
+        description:
+          "Verify that the SQLite index, immutable project receipt, current PNG bytes, exact SHA-256 and supersession state agree. Only a current, exact human-approved asset returns readyForPipeline=true.",
+        inputSchema: {
+          workspaceId: z.string(),
+          assetReceiptId: z.string().regex(/^asset_receipt_[0-9a-f]{64}$/),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          assetReceiptId: z.string(),
+          path: z.string(),
+          indexed: z.boolean(),
+          projectReceiptValid: z.boolean(),
+          filePresent: z.boolean(),
+          sha256Matches: z.boolean(),
+          dimensionsMatch: z.boolean(),
+          superseded: z.boolean(),
+          supersededByAssetReceiptId: z.string().optional(),
+          readyForPipeline: z.boolean(),
+        }),
+        ...interactiveWidgetMeta("verify_approved_asset", "review"),
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({ workspaceId, assetReceiptId, projectMemoryReceiptId }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "verify_approved_asset",
+          projectMemoryReceiptId,
+        );
+        const receipt = assetReceipts.getApproved(assetReceiptId);
+        if (!receipt) {
+          const result = `Approved asset receipt not found: ${assetReceiptId}.`;
+          return {
+            content: [textBlock(result)],
+            isError: true,
+            structuredContent: {
+              result,
+              assetReceiptId,
+              path: "",
+              indexed: false,
+              projectReceiptValid: false,
+              filePresent: false,
+              sha256Matches: false,
+              dimensionsMatch: false,
+              superseded: false,
+              readyForPipeline: false,
+            },
+          };
+        }
+        let projectReceiptValid = false;
+        try {
+          const projectReceipt = await readApprovedReceiptFile(
+            workspace.root,
+            receipt.projectReceiptPath,
+          );
+          validateApprovedAssetReceipt(projectReceipt);
+          projectReceiptValid =
+            JSON.stringify(projectReceipt) === JSON.stringify(receipt);
+        } catch {
+          projectReceiptValid = false;
+        }
+        let filePresent = false;
+        let sha256Matches = false;
+        let dimensionsMatch = false;
+        try {
+          const destination = resolveExistingWorkspacePath(
+            workspace.root,
+            receipt.asset.destinationPath,
+            "file",
+          );
+          const bytes = readFileSync(destination.absolutePath);
+          filePresent = true;
+          sha256Matches =
+            createHash("sha256").update(bytes).digest("hex") ===
+            receipt.asset.sha256;
+          const dimensions = await validatePng(bytes);
+          dimensionsMatch =
+            dimensions.width === receipt.asset.width &&
+            dimensions.height === receipt.asset.height;
+        } catch {
+          filePresent = false;
+        }
+        const supersededByAssetReceiptId =
+          assetReceipts.getSupersedingAssetReceiptId(assetReceiptId);
+        const superseded = supersededByAssetReceiptId !== undefined;
+        const readyForPipeline =
+          projectReceiptValid &&
+          filePresent &&
+          sha256Matches &&
+          dimensionsMatch &&
+          !superseded;
+        const result = readyForPipeline
+          ? `Verified current approved asset ${assetReceiptId} at ${receipt.asset.destinationPath}.`
+          : `Approved asset ${assetReceiptId} is not ready for pipeline; receipt=${projectReceiptValid}, file=${filePresent}, sha256=${sha256Matches}, dimensions=${dimensionsMatch}, superseded=${superseded}.`;
+        logToolCall(config, {
+          tool: "verify_approved_asset",
+          workspaceId,
+          path: receipt.asset.destinationPath,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "verify_approved_asset",
+            projectMemory,
+            card: {
+              workspaceId,
+              path: receipt.asset.destinationPath,
+              summary: {
+                ...receipt.asset,
+                assetReceiptId,
+                projectReceiptPath: receipt.projectReceiptPath,
+                humanApproval: receipt.humanApproval,
+                superseded,
+                supersededByAssetReceiptId,
+                readyForPipeline,
+              },
+            },
+          },
+          structuredContent: {
+            result,
+            assetReceiptId,
+            path: receipt.asset.destinationPath,
+            indexed: true,
+            projectReceiptValid,
+            filePresent,
+            sha256Matches,
+            dimensionsMatch,
+            superseded,
+            supersededByAssetReceiptId,
+            readyForPipeline,
+          },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "recover_approved_asset",
+      {
+        title: "Recover approved asset",
+        description:
+          "Restore a missing approved PNG from a ChatGPT/File Library file after exact registered file ID, SHA-256, dimensions, target path and immutable project receipt verification. Existing different bytes are always rejected; this tool cannot replace an authoritative version.",
+        inputSchema: {
+          workspaceId: z.string(),
+          assetReceiptId: z.string().regex(/^asset_receipt_[0-9a-f]{64}$/),
+          file: openAiFileInputSchema,
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          workspaceId: z.string(),
+          assetReceiptId: z.string(),
+          path: z.string(),
+          outcome: z.enum(["created", "unchanged"]),
+          bytes: z.number().int().nonnegative(),
+          sha256: z.string(),
+          width: z.number().int().positive(),
+          height: z.number().int().positive(),
+          artifactId: z.string(),
+          importReceiptId: z.string(),
+          readyForPipeline: z.literal(true),
+        }),
+        ...interactiveWidgetMeta(
+          "recover_approved_asset",
+          "review",
+          IMPORT_PNG_FILE_PARAMS_META,
+        ),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async ({ workspaceId, assetReceiptId, file, projectMemoryReceiptId }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "recover_approved_asset",
+          projectMemoryReceiptId,
+        );
+        const receipt = assetReceipts.getApproved(assetReceiptId);
+        if (!receipt) {
+          return {
+            content: [
+              textBlock(`APPROVED_ASSET_RECEIPT_NOT_FOUND: ${assetReceiptId}.`),
+            ],
+            isError: true,
+          };
+        }
+        if (!receipt.source.fileId || file.file_id !== receipt.source.fileId) {
+          return {
+            content: [
+              textBlock(
+                "APPROVED_ASSET_RECOVERY_MISMATCH: File ID does not match the approved receipt.",
+              ),
+            ],
+            isError: true,
+          };
+        }
+        try {
+          const projectReceipt = await readApprovedReceiptFile(
+            workspace.root,
+            receipt.projectReceiptPath,
+          );
+          validateApprovedAssetReceipt(projectReceipt);
+          if (JSON.stringify(projectReceipt) !== JSON.stringify(receipt)) {
+            throw new Error(
+              "APPROVED_ASSET_RECOVERY_MISMATCH: Project receipt differs from the registry.",
+            );
+          }
+          const destination = workspaces.resolvePath(
+            workspace,
+            receipt.asset.destinationPath,
+          );
+          const imported = await importPng({
+            destination,
+            workspaceRoot: workspace.root,
+            file,
+            expectedSha256: receipt.asset.sha256,
+            overwrite: false,
+          });
+          if (
+            imported.outcome === "replaced" ||
+            imported.width !== receipt.asset.width ||
+            imported.height !== receipt.asset.height ||
+            imported.bytes !== receipt.asset.bytes
+          ) {
+            if (imported.outcome === "created") {
+              await rollbackImportedAsset({
+                workspaceRoot: workspace.root,
+                stateDir: config.stateDir,
+                workspaceId,
+                path: receipt.asset.destinationPath,
+              });
+            }
+            throw new Error(
+              "APPROVED_ASSET_RECOVERY_MISMATCH: Dimensions or byte count differ from the approved receipt.",
+            );
+          }
+          let artifact = artifacts.getLatestArtifactForPath(
+            workspaceId,
+            receipt.asset.destinationPath,
+            imported.sha256,
+          );
+          let registeredArtifact = false;
+          try {
+            if (!artifact) {
+              artifact = await artifacts.registerImport({
+                workspaceId,
+                workspaceRoot: workspace.root,
+                relativePath: receipt.asset.destinationPath,
+                importId: `import_${randomUUID()}`,
+                source: "openai_file",
+                sourceFileId: file.file_id,
+                sourceFileName: file.file_name,
+              });
+              registeredArtifact = true;
+            }
+            const importReceipt = assetReceipts.registerImport({
+              workspaceId,
+              destinationPath: receipt.asset.destinationPath,
+              outcome: imported.outcome,
+              bytes: imported.bytes,
+              sha256: imported.sha256,
+              width: imported.width,
+              height: imported.height,
+              mimeType: "image/png",
+              sourceKind: "openai_file",
+              sourceFileId: file.file_id,
+              sourceFileName: file.file_name,
+              artifactId: artifact.artifactId,
+            });
+            const result = `${imported.outcome === "created" ? "Recovered" : "Verified unchanged"} approved asset ${assetReceiptId} at ${receipt.asset.destinationPath}.`;
+            logToolCall(config, {
+              tool: "recover_approved_asset",
+              workspaceId,
+              path: receipt.asset.destinationPath,
+              success: true,
+              durationMs: Math.round(performance.now() - startedAt),
+            });
+            return {
+              content: [textBlock(result)],
+              _meta: {
+                tool: "recover_approved_asset",
+                projectMemory,
+                card: {
+                  workspaceId,
+                  path: receipt.asset.destinationPath,
+                  summary: {
+                    ...receipt.asset,
+                    outcome: imported.outcome,
+                    artifactId: artifact.artifactId,
+                    importReceiptId: importReceipt.importReceiptId,
+                    assetReceiptId,
+                    projectReceiptPath: receipt.projectReceiptPath,
+                    humanApproval: receipt.humanApproval,
+                    readyForPipeline: true,
+                  },
+                },
+              },
+              structuredContent: {
+                result,
+                workspaceId,
+                assetReceiptId,
+                path: receipt.asset.destinationPath,
+                outcome: imported.outcome,
+                bytes: imported.bytes,
+                sha256: imported.sha256,
+                width: imported.width,
+                height: imported.height,
+                artifactId: artifact.artifactId,
+                importReceiptId: importReceipt.importReceiptId,
+                readyForPipeline: true,
+              },
+            };
+          } catch (error) {
+            if (registeredArtifact && artifact) {
+              artifacts.removeArtifact(workspaceId, artifact.artifactId);
+            }
+            if (imported.outcome === "created") {
+              await rollbackImportedAsset({
+                workspaceRoot: workspace.root,
+                stateDir: config.stateDir,
+                workspaceId,
+                path: receipt.asset.destinationPath,
+              });
+            }
+            throw error;
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          logToolCall(config, {
+            tool: "recover_approved_asset",
+            workspaceId,
+            path: receipt.asset.destinationPath,
+            success: false,
+            durationMs: Math.round(performance.now() - startedAt),
+            error: message,
+          });
+          return { content: [textBlock(message)], isError: true };
+        }
+      },
+    );
+
+    registerAppTool(
+      server,
+      "reindex_approved_assets",
+      {
+        title: "Reindex approved assets",
+        description:
+          "Rebuild the local SQLite approved-asset index by scanning a bounded workspace-relative directory for immutable *.approved-asset-receipt.json files. Project receipts remain authoritative.",
+        inputSchema: {
+          workspaceId: z.string(),
+          receiptRoot: z.string().min(1).max(512),
+          maxReceipts: z.number().int().min(1).max(5_000).optional(),
+          maxDepth: z.number().int().min(0).max(16).optional(),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          scanned: z.number().int().nonnegative(),
+          indexed: z.number().int().nonnegative(),
+          existing: z.number().int().nonnegative(),
+          errors: z.array(z.string()),
+        }),
+        ...interactiveWidgetMeta("reindex_approved_assets", "review"),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        receiptRoot,
+        maxReceipts,
+        maxDepth,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "reindex_approved_assets",
+          projectMemoryReceiptId,
+        );
+        try {
+          const indexed = await reindexApprovedAssetReceipts({
+            workspaceRoot: workspace.root,
+            receiptRoot,
+            store: assetReceipts,
+            maxReceipts,
+            maxDepth,
+          });
+          const result = `Scanned ${indexed.scanned} approved asset receipts; indexed ${indexed.indexed}, already present ${indexed.existing}, errors ${indexed.errors.length}.`;
+          logToolCall(config, {
+            tool: "reindex_approved_assets",
+            workspaceId,
+            path: receiptRoot,
+            success: indexed.errors.length === 0,
+            durationMs: Math.round(performance.now() - startedAt),
+          });
+          return {
+            content: [textBlock(result)],
+            _meta: { tool: "reindex_approved_assets", projectMemory },
+            structuredContent: { result, ...indexed },
+          };
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          return { content: [textBlock(message)], isError: true };
+        }
       },
     );
 
@@ -3463,7 +4385,7 @@ function createMcpServer(
       "import_png",
       {
         title: "Import PNG",
-        description: `Import original PNG bytes into an open workspace from exactly one source: a public HTTPS result URL or standard Base64 data. Use this for generated-image or attachment intake instead of ${toolNames.shell} or the text-only ${toolNames.write} tool. The destination must end in .png, stay inside the workspace, and is not overwritten unless overwrite=true. Imports are limited to ${MAX_PNG_IMPORT_BYTES} bytes and return a SHA-256 digest for provenance registration.`,
+        description: `Import original PNG bytes into an open workspace from exactly one source: a ChatGPT file attachment, a public HTTPS result URL, or standard Base64 data. Prefer file for images attached in the conversation. Use this instead of ${toolNames.shell} or the text-only ${toolNames.write} tool. The destination must end in .png, stay inside the workspace, and is not overwritten unless overwrite=true. Imports are limited to ${MAX_PNG_IMPORT_BYTES} bytes and validate PNG structure, dimensions, CRCs, and decoded scanlines before atomic write and provenance registration.`,
         inputSchema: {
           workspaceId: z
             .string()
@@ -3473,18 +4395,23 @@ function createMcpServer(
             .describe(
               "Destination .png path relative to the workspace root, for example managed_worktree/raw/candidate.png.",
             ),
+          file: openAiFileInputSchema
+            .optional()
+            .describe(
+              "ChatGPT conversation or library file supplied by the host. Provide exactly one of file, sourceUrl, or base64Data.",
+            ),
           sourceUrl: z
             .string()
             .url()
             .optional()
             .describe(
-              "Public HTTPS URL containing the PNG bytes. Provide exactly one of sourceUrl or base64Data.",
+              "Public HTTPS URL containing the PNG bytes. Provide exactly one of file, sourceUrl, or base64Data.",
             ),
           base64Data: z
             .string()
             .optional()
             .describe(
-              "Standard Base64-encoded PNG bytes. Provide exactly one of base64Data or sourceUrl.",
+              "Standard Base64-encoded PNG bytes. Provide exactly one of file, base64Data, or sourceUrl.",
             ),
           expectedSha256: z
             .string()
@@ -3502,18 +4429,38 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({
+          workspaceId: z.string(),
           path: z.string(),
           bytes: z.number().int().nonnegative(),
           sha256: z.string(),
-          source: z.enum(["https", "base64"]),
+          width: z.number().int().positive(),
+          height: z.number().int().positive(),
+          mimeType: z.literal("image/png"),
+          source: z.enum(["openai_file", "https", "base64"]),
+          sourceKind: z.enum(["openai_file", "https", "base64"]),
           sourceHost: z.string().optional(),
+          sourceFileId: z.string().optional(),
+          sourceFileName: z.string().optional(),
+          outcome: z.enum(["created", "unchanged", "replaced"]),
+          overwritten: z.boolean(),
+          artifactId: z.string(),
+          importReceiptId: z.string(),
+          previousSha256: z.string().optional(),
+          previousArtifactId: z.string().optional(),
+          projectMemoryReceiptId: z.string().optional(),
+          displacedTrashId: z.string().optional(),
         }),
-        _meta: {},
+        ...interactiveWidgetMeta(
+          "import_png",
+          "review",
+          IMPORT_PNG_FILE_PARAMS_META,
+        ),
         annotations: IMPORT_PNG_TOOL_ANNOTATIONS,
       },
       async ({
         workspaceId,
         path,
+        file,
         sourceUrl,
         base64Data,
         expectedSha256,
@@ -3533,6 +4480,7 @@ function createMcpServer(
           const imported = await importPng({
             destination,
             workspaceRoot: workspace.root,
+            file,
             sourceUrl,
             base64Data,
             expectedSha256,
@@ -3550,51 +4498,117 @@ function createMcpServer(
                   }
                 : undefined,
           });
-          try {
-            await artifacts.registerImport({
-              workspaceId,
-              workspaceRoot: workspace.root,
-              relativePath: path,
-              importId: `import_${randomUUID()}`,
-              source: imported.source,
-              sourceHost: imported.sourceHost,
-            });
-          } catch (error) {
-            await rollbackImportedAsset({
-              workspaceRoot: workspace.root,
-              stateDir: config.stateDir,
-              workspaceId,
-              path,
-              displacedTrashId,
-            });
-            throw error;
-          }
-          const result = `Imported ${path} (${imported.bytes} bytes, sha256 ${imported.sha256}).`;
-          logToolCall(config, {
-            tool: "import_png",
+          const previousArtifact =
+            imported.outcome === "replaced" && imported.previousSha256
+              ? artifacts.getLatestArtifactForPath(
+                  workspaceId,
+                  path,
+                  imported.previousSha256,
+                )
+              : undefined;
+          let artifact = artifacts.getLatestArtifactForPath(
             workspaceId,
             path,
-            success: true,
-            durationMs: Math.round(performance.now() - startedAt),
-          });
-          return {
-            content: [textBlock(result)],
-            _meta: {
+            imported.sha256,
+          );
+          let registeredArtifact = false;
+          try {
+            if (!artifact || imported.outcome !== "unchanged") {
+              artifact = await artifacts.registerImport({
+                workspaceId,
+                workspaceRoot: workspace.root,
+                relativePath: path,
+                importId: `import_${randomUUID()}`,
+                source: imported.source,
+                sourceHost: imported.sourceHost,
+                sourceFileId: imported.sourceFileId,
+                sourceFileName: imported.sourceFileName,
+                overwritten: imported.outcome === "replaced",
+                previousArtifactId: previousArtifact?.artifactId,
+              });
+              registeredArtifact = true;
+            }
+            const importReceipt = assetReceipts.registerImport({
+              workspaceId,
+              destinationPath: path,
+              outcome: imported.outcome,
+              bytes: imported.bytes,
+              sha256: imported.sha256,
+              width: imported.width,
+              height: imported.height,
+              mimeType: imported.mimeType,
+              sourceKind: imported.source,
+              sourceHost: imported.sourceHost,
+              sourceFileId: imported.sourceFileId,
+              sourceFileName: imported.sourceFileName,
+              artifactId: artifact.artifactId,
+              previousSha256:
+                imported.outcome === "replaced"
+                  ? imported.previousSha256
+                  : undefined,
+              previousArtifactId:
+                imported.outcome === "replaced"
+                  ? previousArtifact?.artifactId
+                  : undefined,
+              displacedTrashId,
+            });
+            const overwritten = imported.outcome === "replaced";
+            const result = `${imported.outcome === "unchanged" ? "Verified unchanged" : imported.outcome === "replaced" ? "Replaced" : "Imported"} ${path} (${imported.bytes} bytes, ${imported.width}x${imported.height}, sha256 ${imported.sha256}) as ${artifact.artifactId}; receipt ${importReceipt.importReceiptId}.`;
+            logToolCall(config, {
               tool: "import_png",
-              projectMemory,
-              card: {
+              workspaceId,
+              path,
+              success: true,
+              durationMs: Math.round(performance.now() - startedAt),
+            });
+            return {
+              content: [textBlock(result)],
+              _meta: {
+                tool: "import_png",
+                projectMemory,
+                card: {
+                  workspaceId,
+                  path,
+                  summary: {
+                    ...imported,
+                    artifactId: artifact.artifactId,
+                    importReceiptId: importReceipt.importReceiptId,
+                    overwritten,
+                  },
+                },
+              },
+              structuredContent: {
+                result,
                 workspaceId,
                 path,
-                summary: imported,
+                ...imported,
+                sourceKind: imported.source,
+                overwritten,
+                artifactId: artifact.artifactId,
+                importReceiptId: importReceipt.importReceiptId,
+                previousArtifactId:
+                  imported.outcome === "replaced"
+                    ? previousArtifact?.artifactId
+                    : undefined,
+                projectMemoryReceiptId: projectMemory.receiptId,
+                displacedTrashId,
               },
-            },
-            structuredContent: {
-              result,
-              path,
-              ...imported,
-              displacedTrashId,
-            },
-          };
+            };
+          } catch (error) {
+            if (registeredArtifact && artifact) {
+              artifacts.removeArtifact(workspaceId, artifact.artifactId);
+            }
+            if (imported.outcome !== "unchanged") {
+              await rollbackImportedAsset({
+                workspaceRoot: workspace.root,
+                stateDir: config.stateDir,
+                workspaceId,
+                path,
+                displacedTrashId,
+              });
+            }
+            throw error;
+          }
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
@@ -5169,6 +6183,7 @@ export function createServer(
   );
   const reviewCheckpoints = createReviewCheckpointManager();
   const artifacts = new ArtifactLedger(config.stateDir);
+  const assetReceipts = new AssetReceiptStore(config.stateDir);
   const publisher = new ArtifactPublisher(config.publicBaseUrl, artifacts, {
     audit: (event) =>
       logEvent(config.logging, "info", event.event, {
@@ -5417,6 +6432,7 @@ export function createServer(
         inspectors,
         runners,
         artifacts,
+        assetReceipts,
         publisher,
         runtime,
         workspaceApp,
@@ -5525,6 +6541,7 @@ export function createServer(
           inspectors,
           runners,
           artifacts,
+          assetReceipts,
           publisher,
           runtime,
           workspaceApp,

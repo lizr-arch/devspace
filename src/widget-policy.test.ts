@@ -47,8 +47,11 @@ for (const [tool, kind] of ordinaryTools) {
 }
 
 assert.deepEqual([...richTools].sort(), [
+  "archive_approved_image",
   "capture_game_frame",
+  "find_approved_assets",
   "git_diff",
+  "import_png",
   "inspect_artifact",
   "inspect_audio",
   "inspect_blend",
@@ -56,7 +59,10 @@ assert.deepEqual([...richTools].sort(), [
   "list_artifacts",
   "preview_artifact",
   "publish_artifact",
+  "recover_approved_asset",
+  "reindex_approved_assets",
   "render_model_preview",
+  "verify_approved_asset",
 ]);
 
 for (const path of [

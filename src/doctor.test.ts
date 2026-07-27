@@ -23,7 +23,10 @@ import {
 
 const tempRoot = mkdtempSync(join(tmpdir(), "devspace-doctor-test-"));
 const testWorkspaceAppBuild = createWorkspaceAppFixture("shared");
-assert.equal(TOOL_SCHEMA_REVISION, "devspacemac-houdini-runner-v1.2026-07-27");
+assert.equal(
+  TOOL_SCHEMA_REVISION,
+  "devspacemac-approved-asset-intake-p1.5-houdini-v1.2026-07-28",
+);
 
 try {
   await testWorkspaceAppBuildResolution();
@@ -403,12 +406,17 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionConcurrentCalls, 20);
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
-    assert.equal(probe.toolNames?.length, 49);
+    assert.equal(probe.toolNames?.length, 54);
     assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
     assert.equal(probe.workspaceAppTelemetryTool.ok, true);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
     assert.equal(probe.toolNames?.includes("git_merge"), true);
     assert.equal(probe.toolNames?.includes("git_push"), true);
+    assert.equal(probe.toolNames?.includes("archive_approved_image"), true);
+    assert.equal(probe.toolNames?.includes("find_approved_assets"), true);
+    assert.equal(probe.toolNames?.includes("verify_approved_asset"), true);
+    assert.equal(probe.toolNames?.includes("recover_approved_asset"), true);
+    assert.equal(probe.toolNames?.includes("reindex_approved_assets"), true);
     assert.equal(probe.safeGitStructuredErrorCode, "GIT_REMOTE_URL_MISMATCH");
     assert.equal(
       probe.safeGitMergeCheckoutErrorCode,

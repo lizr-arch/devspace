@@ -25,9 +25,14 @@ body {
 .empty,
 .tool-card {
   width: 100%;
-  border: 1px solid color-mix(in srgb, var(--color-border-primary, #3a3a40) 86%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 86%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-background-secondary, #28282d) 92%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-secondary, #28282d) 92%,
+    transparent
+  );
   box-shadow: none;
   color: var(--color-text-primary, #f5f5f6);
 }
@@ -55,7 +60,11 @@ body {
 }
 
 .tool-header:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-background-tertiary, #333338) 72%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-tertiary, #333338) 72%,
+    transparent
+  );
 }
 
 .tool-header:disabled {
@@ -67,14 +76,22 @@ body {
   width: 38px;
   height: 38px;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--color-border-primary, #3a3a40) 55%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 55%, transparent);
   border-radius: 8px;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--color-background-tertiary, #3a3a42) 72%, transparent),
-      color-mix(in srgb, var(--color-background-primary, #17181c) 90%, transparent)
-    );
+  background: linear-gradient(
+    180deg,
+    color-mix(
+      in srgb,
+      var(--color-background-tertiary, #3a3a42) 72%,
+      transparent
+    ),
+    color-mix(
+      in srgb,
+      var(--color-background-primary, #17181c) 90%,
+      transparent
+    )
+  );
   color: var(--color-text-primary, #f5f5f6);
 }
 
@@ -127,9 +144,14 @@ body {
   gap: 5px;
   min-height: 24px;
   padding: 0 9px;
-  border: 1px solid color-mix(in srgb, var(--color-border-primary, #3a3a40) 80%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 80%, transparent);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--color-background-primary, #17181c) 42%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-primary, #17181c) 42%,
+    transparent
+  );
   color: var(--color-text-secondary, #d6d6dc);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--font-text-sm-size, 12px);
@@ -137,7 +159,11 @@ body {
 }
 
 .badge.success {
-  border-color: color-mix(in srgb, var(--color-success-text, #6fda83) 44%, var(--color-border-primary, #3a3a40));
+  border-color: color-mix(
+    in srgb,
+    var(--color-success-text, #6fda83) 44%,
+    var(--color-border-primary, #3a3a40)
+  );
   color: var(--color-success-text, #6fda83);
 }
 
@@ -174,7 +200,11 @@ body {
 }
 
 .tool-header:hover:not(:disabled) .chevron {
-  background: color-mix(in srgb, var(--color-background-primary, #17181c) 58%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-primary, #17181c) 58%,
+    transparent
+  );
   color: var(--color-text-primary, #f5f5f6);
 }
 
@@ -224,6 +254,166 @@ body {
   padding: 10px 12px 8px 14px;
 }
 
+.asset-header {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 10px 12px 10px 14px;
+}
+
+.asset-intake.approved {
+  border-color: color-mix(
+    in srgb,
+    var(--color-success-text, #6fda83) 42%,
+    var(--color-border-primary, #3a3a40)
+  );
+}
+
+.asset-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+  border-top: 1px solid var(--color-border-primary, #3a3a40);
+  background: var(--color-background-primary, #18191d);
+}
+
+.asset-preview {
+  display: grid;
+  min-height: 112px;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 80%, transparent);
+  border-radius: 8px;
+  background:
+    linear-gradient(45deg, rgb(255 255 255 / 4%) 25%, transparent 25%) 0 0 /
+      16px 16px,
+    linear-gradient(-45deg, rgb(255 255 255 / 4%) 25%, transparent 25%) 0 8px /
+      16px 16px,
+    var(--color-background-secondary, #28282d);
+}
+
+.asset-preview-image {
+  display: block;
+  width: 100%;
+  max-height: 260px;
+  object-fit: contain;
+}
+
+.asset-preview-placeholder {
+  color: var(--color-text-tertiary, #a3a3aa);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--font-text-sm-size, 12px);
+}
+
+.asset-facts {
+  display: grid;
+  grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 0;
+}
+
+.asset-fact-label {
+  color: var(--color-text-tertiary, #a3a3aa);
+  font-size: var(--font-text-sm-size, 12px);
+}
+
+.asset-fact-value {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary, #d6d6dc);
+  font-size: var(--font-text-sm-size, 12px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-fact-value.mono,
+.asset-match-path,
+.asset-match-sha {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+}
+
+.asset-next-stage {
+  display: grid;
+  grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 72%, transparent);
+  border-radius: 8px;
+  color: var(--color-text-secondary, #d6d6dc);
+  font-size: var(--font-text-sm-size, 12px);
+}
+
+.asset-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 72%, transparent);
+}
+
+.asset-action-status {
+  color: var(--color-success-text, #6fda83);
+  font-size: var(--font-text-sm-size, 12px);
+}
+
+.asset-action-status.error {
+  color: var(--color-danger-text, #ee7676);
+}
+
+.asset-matches {
+  display: grid;
+  gap: 7px;
+}
+
+.asset-section-title {
+  color: var(--color-text-secondary, #d6d6dc);
+  font-size: var(--font-text-sm-size, 12px);
+  font-weight: 600;
+}
+
+.asset-match {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 72%, transparent);
+  border-radius: 8px;
+}
+
+.asset-match.superseded {
+  opacity: 0.68;
+}
+
+.asset-match-details {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.asset-match-role {
+  color: var(--color-text-primary, #f5f5f6);
+  font-size: var(--font-text-sm-size, 12px);
+  font-weight: 600;
+}
+
+.asset-match-path,
+.asset-match-sha {
+  overflow: hidden;
+  color: var(--color-text-tertiary, #a3a3aa);
+  font-size: var(--font-text-sm-size, 11px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .review-title-group {
   display: grid;
   min-width: 0;
@@ -251,15 +441,21 @@ body {
 .review-actions {
   justify-content: flex-end;
   padding: 10px 14px;
-  border-top: 1px solid color-mix(in srgb, var(--color-border-primary, #3a3a40) 72%, transparent);
+  border-top: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 72%, transparent);
 }
 
 .review-action {
   min-height: 26px;
   padding: 0 9px;
-  border: 1px solid color-mix(in srgb, var(--color-border-primary, #3a3a40) 80%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 80%, transparent);
   border-radius: 7px;
-  background: color-mix(in srgb, var(--color-background-primary, #17181c) 36%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-primary, #17181c) 36%,
+    transparent
+  );
   color: var(--color-text-secondary, #d6d6dc);
   cursor: pointer;
   font: inherit;
@@ -267,7 +463,11 @@ body {
 }
 
 .review-action:hover {
-  background: color-mix(in srgb, var(--color-background-tertiary, #333338) 80%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-tertiary, #333338) 80%,
+    transparent
+  );
   color: var(--color-text-primary, #f5f5f6);
 }
 
@@ -287,7 +487,8 @@ body {
 
 .review-diff-file {
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--color-border-primary, #3a3a40) 80%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--color-border-primary, #3a3a40) 80%, transparent);
   border-radius: 8px;
 }
 
@@ -299,7 +500,11 @@ body {
   min-height: 34px;
   padding: 7px 10px;
   border: 0;
-  background: color-mix(in srgb, var(--color-background-secondary, #28282d) 88%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-secondary, #28282d) 88%,
+    transparent
+  );
   color: var(--color-text-primary, #f5f5f6);
   cursor: pointer;
   font: inherit;
@@ -307,7 +512,11 @@ body {
 }
 
 .review-diff-file-header:hover {
-  background: color-mix(in srgb, var(--color-background-tertiary, #333338) 84%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-background-tertiary, #333338) 84%,
+    transparent
+  );
 }
 
 .review-diff-file-name,
@@ -341,9 +550,22 @@ body {
 .pierre-file {
   --diffs-bg: var(--tool-payload-bg, var(--color-background-primary, #101114));
   --diffs-light-bg: var(--color-background-primary, #ffffff);
-  --diffs-dark-bg: var(--tool-payload-bg, var(--color-background-primary, #101114));
-  --diffs-font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
-  --diffs-header-font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+  --diffs-dark-bg: var(
+    --tool-payload-bg,
+    var(--color-background-primary, #101114)
+  );
+  --diffs-font-family: var(
+    --font-mono,
+    ui-monospace,
+    SFMono-Regular,
+    monospace
+  );
+  --diffs-header-font-family: var(
+    --font-sans,
+    ui-sans-serif,
+    system-ui,
+    sans-serif
+  );
   --diffs-font-size: var(--font-text-sm-size, 12px);
   --diffs-line-height: 20px;
   display: block;
@@ -382,5 +604,17 @@ body {
   .tool-icon {
     width: 32px;
     height: 32px;
+  }
+
+  .asset-header {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .asset-facts,
+  .asset-next-stage {
+    grid-template-columns: 1fr;
+    gap: 3px;
   }
 }

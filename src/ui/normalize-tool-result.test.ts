@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  assetCardValue,
   genericPayloadText,
+  isAssetIntakeTool,
   isJobTool,
   isProjectMemoryTool,
   isToolName,
@@ -199,6 +201,99 @@ const payloadLineFallback = normalizeToolResult(
   }),
 );
 assert.equal(summaryBadgeText(payloadLineFallback), "2 lines");
+
+const importPngCard = normalizeToolResult(
+  toolResult({
+    content: [
+      {
+        type: "text",
+        text: "Imported reference.png (68 bytes, 1x1, sha256 abc) as artifact_test.",
+      },
+    ],
+    _meta: {
+      tool: "import_png",
+      card: {
+        workspaceId: "ws_test",
+        path: "reference.png",
+        summary: {
+          width: 1,
+          height: 1,
+          artifactId: "artifact_test",
+          overwritten: false,
+        },
+      },
+    },
+    structuredContent: {
+      result: "Imported reference.png.",
+      path: "reference.png",
+      artifactId: "artifact_test",
+    },
+  }),
+);
+assert.equal(importPngCard.tool, "import_png");
+assert.equal(importPngCard.path, "reference.png");
+assert.equal(importPngCard.summary?.artifactId, "artifact_test");
+assert.match(payloadText(importPngCard.payload), /artifact_test/);
+assert.equal(isAssetIntakeTool(importPngCard.tool), true);
+assert.equal(summaryBadgeText(importPngCard), "verified");
+
+const approvedAssetCard = normalizeToolResult(
+  toolResult({
+    content: [
+      {
+        type: "text",
+        text: "Archived human-approved PNG reference.png.",
+      },
+    ],
+    _meta: {
+      tool: "archive_approved_image",
+      card: {
+        workspaceId: "ws_test",
+        path: "reference.png",
+        summary: {
+          sha256: "a".repeat(64),
+          width: 1672,
+          height: 941,
+          artifactId: "artifact_test",
+          assetReceiptId: `asset_receipt_${"b".repeat(64)}`,
+          humanApproval: { status: "passed", actor: "human_user" },
+          readyForPipeline: true,
+        },
+      },
+    },
+    structuredContent: {
+      result: "Archived human-approved PNG reference.png.",
+      path: "reference.png",
+      outcome: "created",
+      readyForPipeline: true,
+    },
+  }),
+);
+assert.equal(isAssetIntakeTool(approvedAssetCard.tool), true);
+assert.equal(assetCardValue(approvedAssetCard, "outcome"), "created");
+assert.equal(assetCardValue(approvedAssetCard, "sha256"), "a".repeat(64));
+assert.equal(summaryBadgeText(approvedAssetCard), "created");
+
+const approvedAssetSearch = normalizeToolResult(
+  toolResult({
+    content: [{ type: "text", text: "Found one approved asset." }],
+    _meta: { tool: "find_approved_assets" },
+    structuredContent: {
+      result: "Found one approved asset.",
+      count: 1,
+      assets: [
+        {
+          assetReceiptId: `asset_receipt_${"c".repeat(64)}`,
+          destinationPath: "source_assets/reference.png",
+          sha256: "d".repeat(64),
+          sourceFileId: "file_reference",
+          current: true,
+        },
+      ],
+    },
+  }),
+);
+assert.equal(summaryBadgeText(approvedAssetSearch), "1 asset");
 
 const gitDiff = normalizeToolResult(
   toolResult({

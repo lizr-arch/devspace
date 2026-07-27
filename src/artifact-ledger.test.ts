@@ -300,6 +300,38 @@ try {
   });
   assert.equal(migrated[0]?.origin.kind, "job");
 
+  const importWorkspaceId = "ws_openai_import";
+  const importedPath = join(workspaceRoot, "openai-reference.png");
+  writeFileSync(importedPath, png);
+  const importedArtifact = await restored.registerImport({
+    workspaceId: importWorkspaceId,
+    workspaceRoot,
+    relativePath: "openai-reference.png",
+    importId: "import_openai_reference",
+    source: "openai_file",
+    sourceFileId: "file_reference",
+    sourceFileName: "reference.png",
+    overwritten: true,
+  });
+  assert.equal(importedArtifact.change, "modified");
+  assert.deepEqual(importedArtifact.origin, {
+    kind: "import",
+    importId: "import_openai_reference",
+    source: "openai_file",
+    sourceHost: undefined,
+    sourceFileId: "file_reference",
+    sourceFileName: "reference.png",
+  });
+  assert.equal(
+    JSON.stringify(
+      await restored.listArtifacts({
+        workspaceId: importWorkspaceId,
+        workspaceRoot,
+      }),
+    ).includes("temporary-signature"),
+    false,
+  );
+
   console.log("artifact ledger tests passed");
 } finally {
   rmSync(root, { recursive: true, force: true });

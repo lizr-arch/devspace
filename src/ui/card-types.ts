@@ -18,6 +18,11 @@ export const TOOL_NAMES = [
   "write_file",
   "import_asset",
   "import_png",
+  "archive_approved_image",
+  "find_approved_assets",
+  "verify_approved_asset",
+  "recover_approved_asset",
+  "reindex_approved_assets",
   "edit",
   "edit_file",
   "preview_artifact",
@@ -158,6 +163,17 @@ export function isReviewTool(tool: string): boolean {
   return tool === "show_changes" || tool === "git_diff";
 }
 
+export function isAssetIntakeTool(tool: string): boolean {
+  return (
+    tool === "import_png" ||
+    tool === "archive_approved_image" ||
+    tool === "find_approved_assets" ||
+    tool === "verify_approved_asset" ||
+    tool === "recover_approved_asset" ||
+    tool === "reindex_approved_assets"
+  );
+}
+
 export function payloadText(payload: ToolPayload | undefined): string {
   return (
     payload?.content
@@ -202,6 +218,29 @@ export function summaryNumber(
 }
 
 export function summaryBadgeText(card: ToolResultCard): string {
+  if (isAssetIntakeTool(card.tool)) {
+    if (card.tool === "find_approved_assets") {
+      const count =
+        summaryNumber(card.summary, "count") ??
+        numberValue(assetCardValue(card, "count")) ??
+        0;
+      return `${count} ${count === 1 ? "asset" : "assets"}`;
+    }
+    if (card.tool === "reindex_approved_assets") {
+      const indexed =
+        summaryNumber(card.summary, "indexed") ??
+        numberValue(assetCardValue(card, "indexed")) ??
+        0;
+      return `${indexed} indexed`;
+    }
+    const outcome = assetCardValue(card, "outcome");
+    const ready = assetCardValue(card, "readyForPipeline");
+    if (typeof outcome === "string") return outcome;
+    if (ready === true) return "pipeline ready";
+    if (ready === false) return "blocked";
+    return card.success === false ? "failed" : "verified";
+  }
+
   if (card.tool === "list_artifacts") {
     const count = summaryNumber(card.summary, "count") ?? 0;
     return `${count} ${count === 1 ? "artifact" : "artifacts"}`;
@@ -212,6 +251,17 @@ export function summaryBadgeText(card: ToolResultCard): string {
   const lines =
     explicitLines ?? (text.length === 0 ? 0 : text.split(/\r?\n/u).length);
   return `${lines} ${lines === 1 ? "line" : "lines"}`;
+}
+
+export function assetCardValue(card: ToolResultCard, key: string): unknown {
+  const direct = (card as unknown as Record<string, unknown>)[key];
+  return direct ?? card.summary?.[key];
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 export function isExpandableCard(card: ToolResultCard): boolean {

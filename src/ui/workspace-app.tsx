@@ -5,7 +5,9 @@ import {
   applyHostStyleVariables,
 } from "@modelcontextprotocol/ext-apps";
 import {
+  assetCardValue,
   genericPayloadText,
+  isAssetIntakeTool,
   isEditTool,
   isExpandableCard,
   isJobTool,
@@ -59,6 +61,10 @@ let card: ToolResultCard | null = null;
 let expanded = false;
 let reviewFilesExpanded = false;
 let errorMessage: string | null = null;
+let assetPreviewUrl: string | null = null;
+let assetActionStatus: string | null = null;
+let assetActionError: string | null = null;
+let assetActionBusy = false;
 let currentPayload: MountedPayload | null = null;
 let currentPayloadContainer: HTMLElement | null = null;
 const renderGate = new RenderGenerationGate();
@@ -98,6 +104,10 @@ async function boot(): Promise<void> {
       expanded = false;
       reviewFilesExpanded = false;
       errorMessage = null;
+      assetPreviewUrl = null;
+      assetActionStatus = null;
+      assetActionError = null;
+      assetActionBusy = false;
       render();
     } catch (resultError) {
       telemetry.capture("render_error", "tool_result", {
@@ -205,6 +215,10 @@ function render(): void {
   }
 
   const display = getToolDisplay(card);
+  if (isAssetIntakeTool(card.tool)) {
+    renderAssetIntakeCard(card, display);
+    return;
+  }
   if (isReviewTool(card.tool)) {
     renderReviewCard(card, display);
     return;
@@ -261,6 +275,489 @@ function render(): void {
   main.append(section);
   appRoot.replaceChildren(main);
   renderPayloadIfNeeded();
+}
+
+interface ApprovedAssetListItem {
+  assetReceiptId: string;
+  projectId?: string;
+  taskId?: string;
+  assetRole?: string;
+  destinationPath: string;
+  sha256: string;
+  width?: number;
+  height?: number;
+  sourceKind?: string;
+  sourceFileId?: string;
+  projectReceiptPath?: string;
+  supersededByAssetReceiptId?: string;
+  current?: boolean;
+}
+
+function renderAssetIntakeCard(
+  activeCard: ToolResultCard,
+  display: ToolDisplay,
+): void {
+  unmountPayload();
+
+  const main = element("main", { className: "shell" });
+  const section = element("section", {
+    className: `tool-card asset-intake ${display.tone}`,
+  });
+  const header = element("div", { className: "asset-header" });
+  const icon = element("span", { className: "tool-icon", ariaHidden: "true" });
+  icon.innerHTML = display.icon;
+  const titleGroup = element("div", { className: "review-title-group" });
+  titleGroup.append(
+    element("span", { className: "tool-title", text: display.title }),
+    element("span", {
+      className: "tool-label",
+      text: display.label,
+      title: display.label,
+    }),
+  );
+  header.append(icon, titleGroup, renderSummaryBadge(activeCard));
+
+  const body = element("div", { className: "asset-body" });
+  const preview = renderAssetPreview(activeCard);
+  if (preview) body.append(preview);
+
+  const facts = renderAssetFacts(activeCard);
+  if (facts.childElementCount > 0) body.append(facts);
+
+  const assets = approvedAssetItems(activeCard);
+  if (assets.length > 0) {
+    body.append(renderApprovedAssetMatches(activeCard, assets));
+  }
+
+  const nextStage = element("div", { className: "asset-next-stage" });
+  nextStage.append(
+    element("span", { className: "asset-fact-label", text: "Next stage" }),
+    element("span", { text: assetNextStage(activeCard) }),
+  );
+  body.append(nextStage);
+
+  if (assetActionError) {
+    body.append(
+      element("div", {
+        className: "asset-action-status error",
+        text: assetActionError,
+      }),
+    );
+  } else if (assetActionStatus) {
+    body.append(
+      element("div", {
+        className: "asset-action-status",
+        text: assetActionStatus,
+      }),
+    );
+  }
+
+  const actions = renderAssetActions(activeCard);
+  section.append(header, body);
+  if (actions.childElementCount > 0) section.append(actions);
+
+  if (expanded) {
+    const details = element("div", { className: "tool-body" });
+    currentPayloadContainer = details;
+    section.append(details);
+  }
+
+  main.append(section);
+  appRoot.replaceChildren(main);
+  renderPayloadIfNeeded();
+}
+
+function renderAssetPreview(activeCard: ToolResultCard): HTMLElement | null {
+  const artifactId = assetString(activeCard, "artifactId");
+  if (!artifactId) return null;
+
+  const preview = element("div", { className: "asset-preview" });
+  if (assetPreviewUrl) {
+    const image = element("img", {
+      className: "asset-preview-image",
+      title: "Preview generated from the saved artifact",
+    });
+    image.src = assetPreviewUrl;
+    image.alt = `Saved PNG preview for ${activeCard.path ?? artifactId}`;
+    preview.append(image);
+  } else {
+    preview.append(
+      element("div", {
+        className: "asset-preview-placeholder",
+        text: "Saved PNG",
+      }),
+    );
+  }
+  return preview;
+}
+
+function renderAssetFacts(activeCard: ToolResultCard): HTMLElement {
+  const facts = element("dl", { className: "asset-facts" });
+  const width = assetNumber(activeCard, "width");
+  const height = assetNumber(activeCard, "height");
+  const bytes = assetNumber(activeCard, "bytes");
+  const humanApproval = assetObject(activeCard, "humanApproval");
+  const approval =
+    humanApproval?.status === "passed" && humanApproval.actor === "human_user"
+      ? "human passed"
+      : undefined;
+  const entries: Array<[string, string | undefined]> = [
+    ["Outcome", assetString(activeCard, "outcome")],
+    [
+      "Dimensions",
+      width !== undefined && height !== undefined
+        ? `${width} × ${height}`
+        : undefined,
+    ],
+    ["Bytes", bytes === undefined ? undefined : formatBytes(bytes)],
+    [
+      "Source",
+      assetString(activeCard, "sourceKind") ??
+        assetString(activeCard, "source"),
+    ],
+    ["File", assetString(activeCard, "sourceFileName")],
+    ["SHA-256", assetString(activeCard, "sha256")],
+    ["Artifact", assetString(activeCard, "artifactId")],
+    ["Import receipt", assetString(activeCard, "importReceiptId")],
+    ["Asset receipt", assetString(activeCard, "assetReceiptId")],
+    [
+      "Receipt file",
+      assetString(activeCard, "assetReceiptPath") ??
+        assetString(activeCard, "projectReceiptPath"),
+    ],
+    ["Approval", approval],
+    ["Supersedes", assetString(activeCard, "supersedesAssetReceiptId")],
+    ["Superseded by", assetString(activeCard, "supersededByAssetReceiptId")],
+    ["Previous SHA", assetString(activeCard, "previousSha256")],
+    ["Previous artifact", assetString(activeCard, "previousArtifactId")],
+    ["Rollback snapshot", assetString(activeCard, "displacedTrashId")],
+  ];
+  for (const [label, value] of entries) {
+    if (!value) continue;
+    facts.append(
+      element("dt", { className: "asset-fact-label", text: label }),
+      element("dd", {
+        className:
+          label.includes("SHA") || label.includes("receipt")
+            ? "asset-fact-value mono"
+            : "asset-fact-value",
+        text: value,
+        title: value,
+      }),
+    );
+  }
+  return facts;
+}
+
+function renderApprovedAssetMatches(
+  activeCard: ToolResultCard,
+  assets: ApprovedAssetListItem[],
+): HTMLElement {
+  const container = element("div", { className: "asset-matches" });
+  const visibleAssets = assets.slice(0, 8);
+  container.append(
+    element("div", {
+      className: "asset-section-title",
+      text: `${assets.length} approved ${assets.length === 1 ? "asset" : "assets"}`,
+    }),
+  );
+  for (const asset of visibleAssets) {
+    const row = element("div", {
+      className: `asset-match ${asset.current === false ? "superseded" : ""}`,
+    });
+    const details = element("div", { className: "asset-match-details" });
+    details.append(
+      element("span", {
+        className: "asset-match-role",
+        text: asset.assetRole ?? asset.destinationPath,
+      }),
+      element("span", {
+        className: "asset-match-path",
+        text: asset.destinationPath,
+        title: asset.destinationPath,
+      }),
+      element("span", {
+        className: "asset-match-sha",
+        text: `${asset.sha256.slice(0, 12)}… · ${asset.current === false ? "superseded" : "current"}`,
+        title: asset.sha256,
+      }),
+    );
+    row.append(details);
+    if (asset.current !== false && asset.sourceFileId) {
+      const recover = element("button", {
+        className: "review-action",
+        type: "button",
+        text: "Choose file",
+        disabled:
+          assetActionBusy ||
+          !window.openai?.selectFiles ||
+          !window.openai.getFileDownloadUrl,
+        title:
+          window.openai?.selectFiles && window.openai.getFileDownloadUrl
+            ? "Select this exact approved file from ChatGPT File Library"
+            : "ChatGPT File Library is unavailable in this host",
+      });
+      recover.addEventListener("click", () => {
+        void recoverFromFileLibrary(activeCard, asset);
+      });
+      row.append(recover);
+    }
+    container.append(row);
+  }
+  if (visibleAssets.length < assets.length) {
+    container.append(
+      element("div", {
+        className: "asset-fact-label",
+        text: `${assets.length - visibleAssets.length} more matches are available in the structured result. Narrow the query to recover one exact asset.`,
+      }),
+    );
+  }
+  return container;
+}
+
+function renderAssetActions(activeCard: ToolResultCard): HTMLElement {
+  const actions = element("div", { className: "asset-actions" });
+  const artifactId = assetString(activeCard, "artifactId");
+  const workspaceId =
+    activeCard.workspaceId ?? assetString(activeCard, "workspaceId");
+  if (artifactId && workspaceId) {
+    const preview = element("button", {
+      className: "review-action",
+      type: "button",
+      text: assetPreviewUrl ? "Refresh preview" : "Preview saved PNG",
+      disabled: assetActionBusy,
+    });
+    preview.addEventListener("click", () => {
+      void loadSavedArtifactPreview(activeCard, workspaceId, artifactId);
+    });
+    actions.append(preview);
+  }
+
+  if (activeCard.payload || activeCard.structuredContent !== undefined) {
+    const details = element("button", {
+      className: "review-action",
+      type: "button",
+      text: expanded ? "Hide details" : "Show details",
+    });
+    details.addEventListener("click", () => {
+      expanded = !expanded;
+      render();
+    });
+    actions.append(details);
+  }
+  return actions;
+}
+
+async function loadSavedArtifactPreview(
+  activeCard: ToolResultCard,
+  workspaceId: string,
+  artifactId: string,
+): Promise<void> {
+  if (!app) return;
+  assetActionBusy = true;
+  assetActionError = null;
+  assetActionStatus = "Creating a short-lived preview from the saved artifact…";
+  render();
+  try {
+    const response = await app.callServerTool({
+      name: "publish_artifact",
+      arguments: {
+        workspaceId,
+        artifactId,
+        purpose: "review",
+      },
+    });
+    if (response.isError)
+      throw new Error(payloadText(contentFromResult(response)));
+    const structured = objectValue(response.structuredContent);
+    const url = structured?.url;
+    if (typeof url !== "string" || !url.startsWith("http")) {
+      throw new Error("Preview URL was not returned.");
+    }
+    if (card === activeCard && assetString(card, "artifactId") === artifactId) {
+      assetPreviewUrl = url;
+      assetActionStatus =
+        "Preview loaded from the saved artifact. It is not provenance.";
+    }
+  } catch (previewError) {
+    assetActionError =
+      previewError instanceof Error
+        ? previewError.message
+        : "Unable to load the saved artifact preview.";
+  } finally {
+    assetActionBusy = false;
+    render();
+  }
+}
+
+async function recoverFromFileLibrary(
+  activeCard: ToolResultCard,
+  asset: ApprovedAssetListItem,
+): Promise<void> {
+  const openai = window.openai;
+  const workspaceId =
+    activeCard.workspaceId ?? assetString(activeCard, "workspaceId");
+  if (
+    !app ||
+    !workspaceId ||
+    !asset.sourceFileId ||
+    !openai?.selectFiles ||
+    !openai.getFileDownloadUrl
+  ) {
+    assetActionError =
+      "ChatGPT File Library is unavailable; use the model-facing recovery tool with the exact registered file.";
+    render();
+    return;
+  }
+
+  assetActionBusy = true;
+  assetActionError = null;
+  assetActionStatus = "Waiting for an exact File Library selection…";
+  render();
+  try {
+    const selected = await openai.selectFiles();
+    if (selected.length !== 1) {
+      throw new Error("Select exactly one approved PNG.");
+    }
+    const file = selected[0];
+    if (file.fileId !== asset.sourceFileId) {
+      throw new Error(
+        "Selected file ID does not match the approved receipt. Recovery stopped.",
+      );
+    }
+    if (file.mimeType && file.mimeType !== "image/png") {
+      throw new Error("Selected file is not a PNG. Recovery stopped.");
+    }
+    const { downloadUrl } = await openai.getFileDownloadUrl({
+      fileId: file.fileId,
+    });
+    if (!downloadUrl?.startsWith("https://")) {
+      throw new Error("ChatGPT did not return a secure temporary file URL.");
+    }
+    const response = await app.callServerTool({
+      name: "recover_approved_asset",
+      arguments: {
+        workspaceId,
+        assetReceiptId: asset.assetReceiptId,
+        file: {
+          download_url: downloadUrl,
+          file_id: file.fileId,
+          mime_type: file.mimeType,
+          file_name: file.fileName,
+        },
+      },
+    });
+    if (response.isError) {
+      throw new Error(
+        payloadText(contentFromResult(response)) || "Recovery was rejected.",
+      );
+    }
+    card = normalizeToolResult(response);
+    expanded = false;
+    assetPreviewUrl = null;
+    assetActionStatus = "Approved asset recovered and verified exactly.";
+  } catch (recoveryError) {
+    assetActionError =
+      recoveryError instanceof Error
+        ? recoveryError.message
+        : "Unable to recover the approved asset.";
+  } finally {
+    assetActionBusy = false;
+    render();
+  }
+}
+
+function approvedAssetItems(
+  activeCard: ToolResultCard,
+): ApprovedAssetListItem[] {
+  const assets =
+    (activeCard as unknown as Record<string, unknown>).assets ??
+    objectValue(activeCard.structuredContent)?.assets;
+  if (!Array.isArray(assets)) return [];
+  return assets.filter(isApprovedAssetListItem);
+}
+
+function isApprovedAssetListItem(
+  value: unknown,
+): value is ApprovedAssetListItem {
+  const item = objectValue(value);
+  return (
+    typeof item?.assetReceiptId === "string" &&
+    typeof item.destinationPath === "string" &&
+    typeof item.sha256 === "string"
+  );
+}
+
+function assetNextStage(activeCard: ToolResultCard): string {
+  if (activeCard.tool === "import_png") {
+    return "Technical import only; archive explicit human approval before production.";
+  }
+  if (activeCard.tool === "find_approved_assets") {
+    return approvedAssetItems(activeCard).length > 0
+      ? "Verify the authoritative receipt, or choose the exact registered File Library item to recover."
+      : "No authoritative asset matched; do not substitute a visually similar file.";
+  }
+  if (activeCard.tool === "reindex_approved_assets") {
+    return "Query and verify rebuilt receipts before resuming production.";
+  }
+  return assetCardValue(activeCard, "readyForPipeline") === true
+    ? "Ready for the project’s declared pipeline; no production step was started automatically."
+    : "Pipeline blocked until receipt, current file, SHA, dimensions, and supersession state all verify.";
+}
+
+function assetString(
+  activeCard: ToolResultCard,
+  key: string,
+): string | undefined {
+  const value = assetCardValue(activeCard, key);
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function assetNumber(
+  activeCard: ToolResultCard,
+  key: string,
+): number | undefined {
+  const value = assetCardValue(activeCard, key);
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function assetObject(
+  activeCard: ToolResultCard,
+  key: string,
+): Record<string, unknown> | undefined {
+  return objectValue(assetCardValue(activeCard, key));
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function contentFromResult(result: {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+  }>;
+}): { content?: Array<{ type: "text" | "image"; text?: string }> } {
+  return {
+    content: result.content
+      ?.filter((item) => item.type === "text" || item.type === "image")
+      .map((item) => ({
+        type: item.type as "text" | "image",
+        text: item.text,
+      })),
+  };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function renderEmpty(message: string, tone: "muted" | "error" = "muted"): void {
@@ -670,6 +1167,48 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
         label,
         tone: "project-memory",
       };
+    case "import_png":
+      return {
+        icon: assetIcon(),
+        title: "PNG Intake",
+        label,
+        tone: "asset",
+      };
+    case "archive_approved_image":
+      return {
+        icon: approvedAssetIcon(),
+        title: "Approved Asset",
+        label,
+        tone: "asset approved",
+      };
+    case "find_approved_assets":
+      return {
+        icon: searchIcon(),
+        title: "Approved Assets",
+        label,
+        tone: "asset",
+      };
+    case "verify_approved_asset":
+      return {
+        icon: approvedAssetIcon(),
+        title: "Verify Approved Asset",
+        label,
+        tone: "asset",
+      };
+    case "recover_approved_asset":
+      return {
+        icon: assetIcon(),
+        title: "Recovered Asset",
+        label,
+        tone: "asset approved",
+      };
+    case "reindex_approved_assets":
+      return {
+        icon: filesIcon(),
+        title: "Asset Registry",
+        label,
+        tone: "asset",
+      };
     case "read_file":
     case "read":
       return { icon: fileIcon(), title: "Read File", label, tone: "read" };
@@ -847,6 +1386,16 @@ function jobIcon(): string {
   return iconSvg(
     '<path d="M5 7h14v12H5z" /><path d="M9 7V4h6v3" /><path d="M9 12h6" /><path d="M9 16h4" />',
   );
+}
+
+function assetIcon(): string {
+  return iconSvg(
+    '<path d="M5 4h14v16H5z" /><circle cx="9" cy="9" r="1.5" /><path d="m7 17 4-4 2.5 2.5L16 13l2 2" />',
+  );
+}
+
+function approvedAssetIcon(): string {
+  return iconSvg('<path d="M5 4h14v16H5z" /><path d="m8 12 2.5 2.5L16 9" />');
 }
 
 function genericResultIcon(): string {
