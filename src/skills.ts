@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, sep } from "node:path";
 import {
@@ -38,21 +39,39 @@ export function resolveSkillReadPath(
   activatedSkillDirs: Set<string>,
   inputPath: string,
 ): SkillReadResolution | undefined {
-  const absolutePath = resolve(expandHomePath(inputPath));
+  const requestedPath = resolve(expandHomePath(inputPath));
 
   for (const skill of skills) {
     const skillFilePath = resolve(skill.filePath);
-    if (absolutePath === skillFilePath) {
-      return { absolutePath, skill, isSkillFile: true };
-    }
+    if (requestedPath !== skillFilePath) continue;
+
+    const canonicalBaseDir = canonicalPath(skill.baseDir);
+    const canonicalSkillFile = canonicalPath(skill.filePath);
+    if (!canonicalBaseDir || !canonicalSkillFile) return undefined;
+    if (!isPathInsideRoot(canonicalSkillFile, canonicalBaseDir))
+      return undefined;
+
+    return {
+      absolutePath: canonicalSkillFile,
+      skill,
+      isSkillFile: true,
+    };
   }
 
-  for (const skill of skills) {
-    const baseDir = resolve(skill.baseDir);
-    if (!activatedSkillDirs.has(baseDir)) continue;
-    if (!isPathInsideRoot(absolutePath, baseDir)) continue;
+  const canonicalRequestedPath = canonicalPath(requestedPath);
+  if (!canonicalRequestedPath) return undefined;
 
-    return { absolutePath, skill, isSkillFile: false };
+  for (const skill of skills) {
+    const canonicalBaseDir = canonicalPath(skill.baseDir);
+    if (!canonicalBaseDir) continue;
+    if (!activatedSkillDirs.has(canonicalBaseDir)) continue;
+    if (!isPathInsideRoot(canonicalRequestedPath, canonicalBaseDir)) continue;
+
+    return {
+      absolutePath: canonicalRequestedPath,
+      skill,
+      isSkillFile: false,
+    };
   }
 
   return undefined;
@@ -62,7 +81,8 @@ export function markSkillActivated(
   activatedSkillDirs: Set<string>,
   skill: Skill,
 ): void {
-  activatedSkillDirs.add(resolve(skill.baseDir));
+  const canonicalBaseDir = canonicalPath(skill.baseDir);
+  if (canonicalBaseDir) activatedSkillDirs.add(canonicalBaseDir);
 }
 
 export function formatPathForPrompt(path: string): string {
@@ -78,4 +98,12 @@ export function formatPathForPrompt(path: string): string {
   }
 
   return resolvedPath.split(sep).join("/");
+}
+
+function canonicalPath(path: string): string | undefined {
+  try {
+    return realpathSync(resolve(expandHomePath(path)));
+  } catch {
+    return undefined;
+  }
 }

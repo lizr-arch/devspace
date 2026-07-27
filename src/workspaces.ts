@@ -13,6 +13,7 @@ import type {
 import { ProjectMemoryController } from "./project-memory.js";
 import {
   assertAllowedPath,
+  expandHomePath,
   isPathInsideRoot,
   resolveAllowedPath,
 } from "./roots.js";
@@ -238,9 +239,11 @@ export class WorkspaceRegistry {
   }
 
   resolvePath(workspace: Workspace, inputPath: string): string {
-    const absolutePath = resolveAllowedPath(inputPath, workspace.root, [
+    const absolutePath = resolveAllowedPath(
+      expandHomePath(inputPath),
       workspace.root,
-    ]);
+      [workspace.root],
+    );
     if (!isPathInsideRoot(absolutePath, workspace.root)) {
       throw new Error(`Path is outside workspace root: ${inputPath}`);
     }
@@ -249,24 +252,26 @@ export class WorkspaceRegistry {
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
+    const skillRead = resolveSkillReadPath(
+      workspace.skills,
+      workspace.activatedSkillDirs,
+      inputPath,
+    );
+    if (skillRead) {
+      return {
+        absolutePath: skillRead.absolutePath,
+        readRoots: [workspace.root, skillRead.skill.baseDir],
+        skillRead,
+      };
+    }
+
     try {
       return {
         absolutePath: this.resolvePath(workspace, inputPath),
         readRoots: [workspace.root],
       };
     } catch (workspaceError) {
-      const skillRead = resolveSkillReadPath(
-        workspace.skills,
-        workspace.activatedSkillDirs,
-        inputPath,
-      );
-      if (!skillRead) throw workspaceError;
-
-      return {
-        absolutePath: skillRead.absolutePath,
-        readRoots: [workspace.root, skillRead.skill.baseDir],
-        skillRead,
-      };
+      throw workspaceError;
     }
   }
 
