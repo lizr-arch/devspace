@@ -69,6 +69,7 @@ import {
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import { MonitorEventStore, safeMonitorPath } from "./monitor-events.js";
 import {
   LiveRequestMonitor,
   ProcessResourceMonitor,
@@ -178,6 +179,7 @@ interface ServiceRuntime {
   schemaFingerprint: string;
   requiredCapabilities: Record<string, ToolCapability>;
   mcpSessionStats: () => McpSessionSnapshot;
+  monitorEvents: MonitorEventStore;
   workspaceApp?: {
     resourceUri: string;
     buildFingerprint: string;
@@ -485,6 +487,7 @@ function createServiceRuntime(
   config: ServerConfig,
   workspaceApp: WorkspaceAppBuild | undefined,
   mcpSessionStats: () => McpSessionSnapshot,
+  monitorEvents: MonitorEventStore,
 ): ServiceRuntime {
   const tools = exposedToolNames(config, toolNamesFor(config));
   const requiredCapabilities = Object.fromEntries(
@@ -519,6 +522,7 @@ function createServiceRuntime(
     schemaFingerprint,
     requiredCapabilities,
     mcpSessionStats,
+    monitorEvents,
     workspaceApp: workspaceApp
       ? {
           resourceUri: workspaceApp.resourceUri,
@@ -991,12 +995,22 @@ function logFailedToolResponse(
   fields: Omit<ToolLogFields, "success" | "durationMs" | "error">,
   content: ToolContent[],
   startedAt: number,
+  monitorEvents: MonitorEventStore,
 ): void {
+  const errorPreview = toolErrorPreview(content);
   logToolCall(config, {
     ...fields,
     success: false,
     durationMs: Math.round(performance.now() - startedAt),
-    error: toolErrorPreview(content),
+    error: errorPreview,
+  });
+  monitorEvents.record({
+    source: "tool",
+    severity: "error",
+    code:
+      /^([A-Z][A-Z0-9_]{2,63})(?::|\b)/.exec(errorPreview ?? "")?.[1] ??
+      "TOOL_CALL_FAILED",
+    message: `${fields.tool} tool failed`,
   });
 }
 
@@ -3083,6 +3097,7 @@ function createMcpServer(
           },
           response.content,
           startedAt,
+          runtime.monitorEvents,
         );
         return response;
       }
@@ -3190,6 +3205,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3444,6 +3460,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3614,6 +3631,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3696,6 +3714,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3778,6 +3797,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3882,6 +3902,7 @@ function createMcpServer(
               },
               response.content,
               startedAt,
+              runtime.monitorEvents,
             );
             return response;
           }
@@ -4714,6 +4735,7 @@ export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
 ): RunningServer {
+  const monitorEvents = new MonitorEventStore(config.stateDir);
   const workspaceApp =
     config.widgets === "off"
       ? undefined
@@ -4737,11 +4759,20 @@ export function createServer(
         source,
         error: error instanceof Error ? error.message : String(error),
       });
+      monitorEvents.record({
+        source: "mcp",
+        severity: "warning",
+        code: "MCP_SESSION_CLOSE_ERROR",
+        message: `MCP session close failed (${reason}, ${source})`,
+      });
     },
   });
   const runners = new RunnerRegistry(config.runners);
-  const runtime = createServiceRuntime(config, workspaceApp, () =>
-    mcpSessions.snapshot(),
+  const runtime = createServiceRuntime(
+    config,
+    workspaceApp,
+    () => mcpSessions.snapshot(),
+    monitorEvents,
   );
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
@@ -4810,6 +4841,19 @@ export function createServer(
       completed = true;
       finishMonitoring(res.statusCode, performance.now() - startedAt);
       const path = requestPath(req);
+      if (
+        res.statusCode >= 400 &&
+        path !== "/monitor" &&
+        !path.startsWith("/monitor/")
+      ) {
+        monitorEvents.record({
+          source: "http",
+          severity: res.statusCode >= 500 ? "error" : "warning",
+          code: `HTTP_${res.statusCode}`,
+          message: `${req.method} ${safeMonitorPath(path)} returned ${res.statusCode}`,
+          statusCode: res.statusCode,
+        });
+      }
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
 
@@ -4880,6 +4924,11 @@ export function createServer(
       requests,
       sessions: mcpSessions.snapshot(),
       jobs: jobSnapshot,
+      errors: {
+        recent: monitorEvents.snapshot(50),
+        persisted: monitorEvents.isPersistent(),
+        retention: 200,
+      },
       load: calculateLoadAssessment({
         requests,
         resources,
@@ -5019,6 +5068,12 @@ export function createServer(
             requestId,
             error: error instanceof Error ? error.message : String(error),
           });
+          monitorEvents.record({
+            source: "mcp",
+            severity: "warning",
+            code: "MCP_STATELESS_CLOSE_ERROR",
+            message: "Stateless MCP server close failed",
+          });
         });
       };
       res.once("finish", closeStatelessServer);
@@ -5032,6 +5087,12 @@ export function createServer(
           requestId,
           transportMode: "stateless",
           error: error instanceof Error ? error.message : String(error),
+        });
+        monitorEvents.record({
+          source: "mcp",
+          severity: "error",
+          code: "MCP_REQUEST_ERROR",
+          message: "Stateless MCP request failed",
         });
         if (!res.headersSent) {
           sendJsonRpcError(res, 500, -32603, "Internal server error");
@@ -5117,6 +5178,12 @@ export function createServer(
         requestId,
         error: error instanceof Error ? error.message : String(error),
       });
+      monitorEvents.record({
+        source: "mcp",
+        severity: "error",
+        code: "MCP_REQUEST_ERROR",
+        message: "Stateful MCP request failed",
+      });
       if (!res.headersSent) {
         sendJsonRpcError(res, 500, -32603, "Internal server error");
       }
@@ -5130,6 +5197,12 @@ export function createServer(
           logEvent(config.logging, "warn", "mcp_transport_close_error", {
             requestId,
             error: error instanceof Error ? error.message : String(error),
+          });
+          monitorEvents.record({
+            source: "mcp",
+            severity: "warning",
+            code: "MCP_TRANSPORT_CLOSE_ERROR",
+            message: "MCP transport close failed",
           });
         }
       }

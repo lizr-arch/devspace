@@ -184,6 +184,15 @@ export interface BackgroundJobMonitorSnapshot {
   maxConcurrent: number;
   byStatus: Record<JobStatus, number>;
   activeByRunner: Record<JobRunner, number>;
+  recentFailures: Array<{
+    endedAt: string;
+    runner: JobRunner;
+    status: Extract<
+      JobStatus,
+      "failed" | "cancelled" | "timed_out" | "interrupted"
+    >;
+    errorCode?: JobErrorCode;
+  }>;
 }
 
 export class BackgroundJobManager {
@@ -428,6 +437,30 @@ export class BackgroundJobManager {
       maxConcurrent: MAX_CONCURRENT_JOBS,
       byStatus,
       activeByRunner,
+      recentFailures: Array.from(this.jobs.values())
+        .filter(
+          (
+            job,
+          ): job is LiveJob & {
+            endedAt: string;
+            status: Extract<
+              JobStatus,
+              "failed" | "cancelled" | "timed_out" | "interrupted"
+            >;
+          } =>
+            Boolean(job.endedAt) &&
+            ["failed", "cancelled", "timed_out", "interrupted"].includes(
+              job.status,
+            ),
+        )
+        .sort((left, right) => right.endedAt.localeCompare(left.endedAt))
+        .slice(0, 10)
+        .map((job) => ({
+          endedAt: job.endedAt,
+          runner: job.runner,
+          status: job.status,
+          errorCode: job.errorCode,
+        })),
     };
   }
 

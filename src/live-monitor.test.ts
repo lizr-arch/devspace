@@ -134,6 +134,8 @@ try {
     eventLoop: { p95Ms: number };
     system: { disk: { availableGiB: number } };
     resourceHistory: unknown[];
+    errors: { recent: Array<{ code: string }>; persisted: boolean };
+    jobs: { recentFailures: unknown[] };
   };
   assert.equal(payload.service.name, "devspace");
   assert.equal(payload.requests.mcp.total, 0);
@@ -142,6 +144,21 @@ try {
   assert.equal(typeof payload.eventLoop.p95Ms, "number");
   assert.equal(typeof payload.system.disk.availableGiB, "number");
   assert.ok(payload.resourceHistory.length >= 1);
+  assert.equal(payload.errors.persisted, true);
+  assert.ok(Array.isArray(payload.jobs.recentFailures));
+
+  const missing = await fetch(`${baseUrl}/definitely-missing`);
+  assert.equal(missing.status, 404);
+  const afterMissing = (await (
+    await fetch(`${baseUrl}/monitor/api`)
+  ).json()) as {
+    errors: { recent: Array<{ code: string; message: string }> };
+  };
+  assert.equal(afterMissing.errors.recent[0]?.code, "HTTP_404");
+  assert.equal(
+    afterMissing.errors.recent[0]?.message,
+    "GET /other returned 404",
+  );
 
   assert.equal(
     await requestStatusWithHost(
