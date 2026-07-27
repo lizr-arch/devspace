@@ -49,10 +49,7 @@ export function resolveRealPath(path: string): string {
   }
 }
 
-export function isPathInsideAnyRoot(
-  path: string,
-  roots: string[],
-): boolean {
+export function isPathInsideAnyRoot(path: string, roots: string[]): boolean {
   const resolvedPath = resolve(expandHomePath(path));
   if (roots.some((root) => isPathInsideRoot(resolvedPath, root))) {
     return true;
@@ -102,10 +99,7 @@ export function assertWriteAllowed(
   }
 
   // Check if path is in a read_only additional root.
-  const allReadRoots = [
-    ...allowedRoots,
-    ...additionalRoots.map((r) => r.path),
-  ];
+  const allReadRoots = [...allowedRoots, ...additionalRoots.map((r) => r.path)];
 
   if (isPathInsideAnyRoot(resolvedPath, allReadRoots)) {
     throw new AccessDeniedError(

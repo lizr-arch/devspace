@@ -273,12 +273,7 @@ export async function manageGitBranch(input: {
       if (shouldCheckout) {
         if (!branchExists) {
           // Atomic: create + checkout — only creates ref if checkout succeeds.
-          await runGit(root, [
-            "switch",
-            "-c",
-            input.name,
-            startPoint,
-          ]);
+          await runGit(root, ["switch", "-c", input.name, startPoint]);
           branchCreated = true;
         } else {
           // Branch already exists — switch to it.

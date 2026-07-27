@@ -18,12 +18,7 @@ import { type AdditionalRoot } from "./roots.js";
 // ---------------------------------------------------------------------------
 
 export type TaskSessionStatus =
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "timed_out"
-  | "stopped"
-  | "interrupted";
+  "running" | "succeeded" | "failed" | "timed_out" | "stopped" | "interrupted";
 
 export interface TaskSession {
   sessionId: string;
@@ -90,9 +85,7 @@ export class TaskRunner {
 
     const task = manifest.tasks[input.taskId];
     if (!task) {
-      throw new Error(
-        `TASK_NOT_FOUND: Task ${input.taskId} not in manifest.`,
-      );
+      throw new Error(`TASK_NOT_FOUND: Task ${input.taskId} not in manifest.`);
     }
 
     // Validate params
@@ -113,10 +106,7 @@ export class TaskRunner {
     }
 
     // Resolve runtime
-    const runtime = this.resolveRuntime(
-      task,
-      input.workspaceRoot,
-    );
+    const runtime = this.resolveRuntime(task, input.workspaceRoot);
 
     const fullCommand = [...runtime.prefix, ...command];
     const sessionId = `task_${randomUUID()}`;
@@ -241,7 +231,11 @@ export class TaskRunner {
     try {
       proc.kill("SIGTERM");
       setTimeout(() => {
-        try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* already dead */
+        }
       }, 5000);
     } catch {
       return false;
@@ -256,7 +250,12 @@ export class TaskRunner {
   private resolveRuntime(
     task: TaskDefinition,
     workspaceRoot: string,
-  ): { interpreter: string; prefix: string[]; env: Record<string, string>; source: string } {
+  ): {
+    interpreter: string;
+    prefix: string[];
+    env: Record<string, string>;
+    source: string;
+  } {
     const rt = task.runtime ?? "workspace-python";
 
     if (rt === "workspace-python") {

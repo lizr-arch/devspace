@@ -69,6 +69,16 @@ import {
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import { MonitorEventStore, safeMonitorPath } from "./monitor-events.js";
+import {
+  LiveRequestMonitor,
+  ProcessResourceMonitor,
+  calculateLoadAssessment,
+  diskSpaceSnapshot,
+  liveMonitorHtml,
+  requireLocalMonitor,
+  setMonitorSecurityHeaders,
+} from "./live-monitor.js";
 import { importPng, MAX_PNG_IMPORT_BYTES } from "./png-import.js";
 import { importAsset, MAX_IMPORT_BYTES } from "./asset-import.js";
 import { inspectArtifact } from "./artifact-inspector.js";
@@ -117,15 +127,9 @@ import {
   type Workspace,
   type WorkspaceContext,
 } from "./workspaces.js";
-import {
-  type AdditionalRoot,
-  normalizeAdditionalRoots,
-} from "./roots.js";
+import { type AdditionalRoot, normalizeAdditionalRoots } from "./roots.js";
 import { TaskRunner } from "./task-runner.js";
-import {
-  checkManifestIntegrity,
-  isTaskApproved,
-} from "./task-manifest.js";
+import { checkManifestIntegrity, isTaskApproved } from "./task-manifest.js";
 import {
   McpSessionRegistry,
   type McpSessionSnapshot,
@@ -138,7 +142,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 const TOOL_SCHEMA_REVISION =
-  "devspacemac-mcp-app-session-stability-v1.2026-07-27";
+  "devspacemac-workspace-app-telemetry-v1.2026-07-27";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -178,6 +182,7 @@ interface ServiceRuntime {
   schemaFingerprint: string;
   requiredCapabilities: Record<string, ToolCapability>;
   mcpSessionStats: () => McpSessionSnapshot;
+  monitorEvents: MonitorEventStore;
   workspaceApp?: {
     resourceUri: string;
     buildFingerprint: string;
@@ -489,6 +494,7 @@ function createServiceRuntime(
   config: ServerConfig,
   workspaceApp: WorkspaceAppBuild | undefined,
   mcpSessionStats: () => McpSessionSnapshot,
+  monitorEvents: MonitorEventStore,
 ): ServiceRuntime {
   const tools = exposedToolNames(config, toolNamesFor(config));
   const requiredCapabilities = Object.fromEntries(
@@ -523,6 +529,7 @@ function createServiceRuntime(
     schemaFingerprint,
     requiredCapabilities,
     mcpSessionStats,
+    monitorEvents,
     workspaceApp: workspaceApp
       ? {
           resourceUri: workspaceApp.resourceUri,
@@ -999,12 +1006,22 @@ function logFailedToolResponse(
   fields: Omit<ToolLogFields, "success" | "durationMs" | "error">,
   content: ToolContent[],
   startedAt: number,
+  monitorEvents: MonitorEventStore,
 ): void {
+  const errorPreview = toolErrorPreview(content);
   logToolCall(config, {
     ...fields,
     success: false,
     durationMs: Math.round(performance.now() - startedAt),
-    error: toolErrorPreview(content),
+    error: errorPreview,
+  });
+  monitorEvents.record({
+    source: "tool",
+    severity: "error",
+    code:
+      /^([A-Z][A-Z0-9_]{2,63})(?::|\b)/.exec(errorPreview ?? "")?.[1] ??
+      "TOOL_CALL_FAILED",
+    message: `${fields.tool} tool failed`,
   });
 }
 
@@ -1481,6 +1498,71 @@ function createMcpServer(
           },
         ],
       }),
+    );
+
+    registerAppTool(
+      server,
+      "report_workspace_app_error",
+      {
+        title: "Report Workspace App diagnostic",
+        description:
+          "Records a bounded, sanitized Workspace App runtime diagnostic. This tool is available only to the embedded App and does not accept messages, URLs, stack traces, chat content, or tool arguments.",
+        inputSchema: {
+          kind: z.enum([
+            "script_error",
+            "unhandled_rejection",
+            "resource_error",
+            "connect_error",
+            "render_error",
+          ]),
+          phase: z.enum([
+            "bootstrap",
+            "connect",
+            "tool_result",
+            "render",
+            "payload_load",
+            "teardown",
+          ]),
+          errorName: z
+            .string()
+            .max(48)
+            .regex(/^[A-Za-z0-9_.-]+$/)
+            .optional(),
+          resourceType: z
+            .enum(["script", "style", "image", "font", "other"])
+            .optional(),
+          appVersion: z
+            .string()
+            .max(16)
+            .regex(/^\d{1,3}\.\d{1,3}\.\d{1,3}$/),
+          instanceId: z.uuid().optional(),
+        },
+        _meta: {
+          ui: {
+            visibility: ["app"],
+          },
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async (diagnostic) => {
+        const result =
+          runtime.monitorEvents.recordWorkspaceAppError(diagnostic);
+        return {
+          content: [
+            textBlock(
+              result.accepted
+                ? "Workspace App diagnostic recorded."
+                : `Workspace App diagnostic skipped (${result.reason}).`,
+            ),
+          ],
+          structuredContent: result,
+        };
+      },
     );
   }
 
@@ -2904,10 +2986,12 @@ function createMcpServer(
         additionalRoots: z
           .array(
             z.object({
-              path: z.string().describe("Absolute path to an additional root directory."),
-              access: z.enum(["read_only", "read_write"]).describe(
-                "Access mode for this root.",
-              ),
+              path: z
+                .string()
+                .describe("Absolute path to an additional root directory."),
+              access: z
+                .enum(["read_only", "read_write"])
+                .describe("Access mode for this root."),
             }),
           )
           .optional()
@@ -2979,10 +3063,12 @@ function createMcpServer(
         additionalRoots: z
           .array(
             z.object({
-              path: z.string().describe("Absolute path to an additional root directory."),
-              access: z.enum(["read_only", "read_write"]).describe(
-                "Access mode for this root.",
-              ),
+              path: z
+                .string()
+                .describe("Absolute path to an additional root directory."),
+              access: z
+                .enum(["read_only", "read_write"])
+                .describe("Access mode for this root."),
             }),
           )
           .optional()
@@ -3150,6 +3236,7 @@ function createMcpServer(
           },
           response.content,
           startedAt,
+          runtime.monitorEvents,
         );
         return response;
       }
@@ -3257,6 +3344,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3511,6 +3599,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3681,6 +3770,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3763,6 +3853,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3845,6 +3936,7 @@ function createMcpServer(
             },
             response.content,
             startedAt,
+            runtime.monitorEvents,
           );
           return response;
         }
@@ -3949,6 +4041,7 @@ function createMcpServer(
               },
               response.content,
               startedAt,
+              runtime.monitorEvents,
             );
             return response;
           }
@@ -4778,46 +4871,72 @@ function createMcpServer(
   // project_task / poll_task / stop_task / approve_task_manifest
   // -----------------------------------------------------------------------
 
-  registerAppTool(
-    server,
-    "project_task",
-    {
-      title: "Run a declared project task",
-      description:
-        "Execute a task declared in the workspace's .devspace/tasks.yaml. Tasks are named, pre-approved commands with fixed arguments and optional declared parameters.",
-      inputSchema: {
-        workspaceId: z.string(),
-        task: z.string().describe("Task ID from .devspace/tasks.yaml."),
-        params: z.record(z.string(), z.string()).optional().describe("Parameter values."),
-        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+  if (!config.readOnly) {
+    registerAppTool(
+      server,
+      "project_task",
+      {
+        title: "Run a declared project task",
+        description:
+          "Execute a task declared in the workspace's .devspace/tasks.yaml. Tasks are named, pre-approved commands with fixed arguments and optional declared parameters.",
+        inputSchema: {
+          workspaceId: z.string(),
+          task: z.string().describe("Task ID from .devspace/tasks.yaml."),
+          params: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe("Parameter values."),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ task: z.unknown() }),
+        _meta: {},
+        annotations: { readOnlyHint: false, destructiveHint: true },
       },
-      outputSchema: resultOutputSchema({ task: z.unknown() }),
-      _meta: {},
-      annotations: { readOnlyHint: false, destructiveHint: true },
-    },
-    async ({ workspaceId, task: taskId, params, projectMemoryReceiptId }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const projectMemory = workspaces.observeProjectMemoryAccess(workspaceId, "project_task", projectMemoryReceiptId);
-      const approved = workspace.approvedTasks;
-      if (!approved) throw new Error("TASK_NOT_APPROVED: No manifest approved.");
-      if (!checkManifestIntegrity(workspace.root, approved)) throw new Error("TASK_MANIFEST_CHANGED: Re-approve required.");
-      if (!isTaskApproved(taskId, approved)) throw new Error(`TASK_NOT_APPROVED: ${taskId}.`);
+      async ({ workspaceId, task: taskId, params, projectMemoryReceiptId }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "project_task",
+          projectMemoryReceiptId,
+        );
+        const approved = workspace.approvedTasks;
+        if (!approved)
+          throw new Error("TASK_NOT_APPROVED: No manifest approved.");
+        if (!checkManifestIntegrity(workspace.root, approved))
+          throw new Error("TASK_MANIFEST_CHANGED: Re-approve required.");
+        if (!isTaskApproved(taskId, approved))
+          throw new Error(`TASK_NOT_APPROVED: ${taskId}.`);
 
-      const result = await tasks.runTask({ workspaceId, workspaceRoot: workspace.root, taskId, params: params ?? {}, additionalRoots: workspace.additionalRoots });
-      const text = result.mode === "run"
-        ? `Task ${result.taskId}: ${result.status} (exit ${result.exitCode}) in ${result.durationMs}ms.`
-        : `Task ${result.taskId}: session ${result.sessionId} started (pid ${result.pid}).`;
-      return { content: [textBlock(text)], _meta: { tool: "project_task", projectMemory }, structuredContent: { result: text, task: result } };
-    },
-  );
+        const result = await tasks.runTask({
+          workspaceId,
+          workspaceRoot: workspace.root,
+          taskId,
+          params: params ?? {},
+          additionalRoots: workspace.additionalRoots,
+        });
+        const text =
+          result.mode === "run"
+            ? `Task ${result.taskId}: ${result.status} (exit ${result.exitCode}) in ${result.durationMs}ms.`
+            : `Task ${result.taskId}: session ${result.sessionId} started (pid ${result.pid}).`;
+        return {
+          content: [textBlock(text)],
+          _meta: { tool: "project_task", projectMemory },
+          structuredContent: { result: text, task: result },
+        };
+      },
+    );
+  }
 
   registerAppTool(
     server,
     "poll_task",
     {
       title: "Poll a running task session",
-      description: "Check the status and recent output of a running task session.",
-      inputSchema: { sessionId: z.string().describe("Task session ID from project_task.") },
+      description:
+        "Check the status and recent output of a running task session.",
+      inputSchema: {
+        sessionId: z.string().describe("Task session ID from project_task."),
+      },
       outputSchema: resultOutputSchema({ session: z.unknown() }),
       _meta: {},
       annotations: { readOnlyHint: true },
@@ -4826,47 +4945,77 @@ function createMcpServer(
       const session = tasks.getSession(sessionId);
       if (!session) throw new Error(`TASK_SESSION_NOT_FOUND: ${sessionId}`);
       const output = session.stdout.slice(-8000) + session.stderr.slice(-2000);
-      return { content: [textBlock(`Task ${session.taskId}: ${session.status}
-${output}`)], _meta: {}, structuredContent: { result: output, session } };
+      return {
+        content: [
+          textBlock(`Task ${session.taskId}: ${session.status}
+${output}`),
+        ],
+        _meta: {},
+        structuredContent: { result: output, session },
+      };
     },
   );
 
-  registerAppTool(
-    server,
-    "stop_task",
-    {
-      title: "Stop a running task session",
-      description: "Terminate a running task session.",
-      inputSchema: { sessionId: z.string().describe("Task session ID from project_task.") },
-      outputSchema: resultOutputSchema({ stopped: z.boolean() }),
-      _meta: {},
-      annotations: { readOnlyHint: false, destructiveHint: true },
-    },
-    async ({ sessionId }) => {
-      const stopped = tasks.stopSession(sessionId);
-      return { content: [textBlock(stopped ? "Stopped." : "Not found.")], _meta: {}, structuredContent: { result: stopped ? "stopped" : "not_found", stopped } };
-    },
-  );
+  if (!config.readOnly) {
+    registerAppTool(
+      server,
+      "stop_task",
+      {
+        title: "Stop a running task session",
+        description: "Terminate a running task session.",
+        inputSchema: {
+          sessionId: z.string().describe("Task session ID from project_task."),
+        },
+        outputSchema: resultOutputSchema({ stopped: z.boolean() }),
+        _meta: {},
+        annotations: { readOnlyHint: false, destructiveHint: true },
+      },
+      async ({ sessionId }) => {
+        const stopped = tasks.stopSession(sessionId);
+        return {
+          content: [textBlock(stopped ? "Stopped." : "Not found.")],
+          _meta: {},
+          structuredContent: {
+            result: stopped ? "stopped" : "not_found",
+            stopped,
+          },
+        };
+      },
+    );
 
-  registerAppTool(
-    server,
-    "approve_task_manifest",
-    {
-      title: "Approve task manifest",
-      description: "Approve tasks from .devspace/tasks.yaml. Records manifest SHA; changes invalidate approval.",
-      inputSchema: { workspaceId: z.string(), taskIds: z.array(z.string()), projectMemoryReceiptId: projectMemoryReceiptInputSchema() },
-      outputSchema: resultOutputSchema({ approved: z.unknown() }),
-      _meta: {},
-      annotations: { readOnlyHint: false, destructiveHint: true },
-    },
-    async ({ workspaceId, taskIds, projectMemoryReceiptId }) => {
-      const projectMemory = workspaces.observeProjectMemoryAccess(workspaceId, "approve_task_manifest", projectMemoryReceiptId);
-      const approved = workspaces.approveTaskManifest(workspaceId, taskIds);
-      if (!approved) throw new Error("TASK_APPROVAL_FAILED.");
-      const result = `Approved ${taskIds.length} task(s). SHA: ${approved.manifestSha256}.`;
-      return { content: [textBlock(result)], _meta: { tool: "approve_task_manifest", projectMemory }, structuredContent: { result, approved } };
-    },
-  );
+    registerAppTool(
+      server,
+      "approve_task_manifest",
+      {
+        title: "Approve task manifest",
+        description:
+          "Approve tasks from .devspace/tasks.yaml. Records manifest SHA; changes invalidate approval.",
+        inputSchema: {
+          workspaceId: z.string(),
+          taskIds: z.array(z.string()),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ approved: z.unknown() }),
+        _meta: {},
+        annotations: { readOnlyHint: false, destructiveHint: true },
+      },
+      async ({ workspaceId, taskIds, projectMemoryReceiptId }) => {
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "approve_task_manifest",
+          projectMemoryReceiptId,
+        );
+        const approved = workspaces.approveTaskManifest(workspaceId, taskIds);
+        if (!approved) throw new Error("TASK_APPROVAL_FAILED.");
+        const result = `Approved ${taskIds.length} task(s). SHA: ${approved.manifestSha256}.`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "approve_task_manifest", projectMemory },
+          structuredContent: { result, approved },
+        };
+      },
+    );
+  }
 
   return server;
 }
@@ -4875,6 +5024,7 @@ export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
 ): RunningServer {
+  const monitorEvents = new MonitorEventStore(config.stateDir);
   const workspaceApp =
     config.widgets === "off"
       ? undefined
@@ -4898,12 +5048,21 @@ export function createServer(
         source,
         error: error instanceof Error ? error.message : String(error),
       });
+      monitorEvents.record({
+        source: "mcp",
+        severity: "warning",
+        code: "MCP_SESSION_CLOSE_ERROR",
+        message: `MCP session close failed (${reason}, ${source})`,
+      });
     },
   });
   const runners = new RunnerRegistry(config.runners);
   const tasks = new TaskRunner();
-  const runtime = createServiceRuntime(config, workspaceApp, () =>
-    mcpSessions.snapshot(),
+  const runtime = createServiceRuntime(
+    config,
+    workspaceApp,
+    () => mcpSessions.snapshot(),
+    monitorEvents,
   );
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
@@ -4953,6 +5112,8 @@ export function createServer(
   const jobs = new BackgroundJobManager(config.stateDir, runners, artifacts);
   const games = new GameSessionManager(config.stateDir, runners);
   const inspectors = new ExternalInspectorManager(config.stateDir, runners);
+  const requestMonitor = new LiveRequestMonitor();
+  const resourceMonitor = new ProcessResourceMonitor();
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", 1);
@@ -4961,10 +5122,28 @@ export function createServer(
   app.use((req, res, next) => {
     const requestId = randomUUID();
     const startedAt = performance.now();
+    const finishMonitoring = requestMonitor.begin(requestPath(req));
     res.locals.requestId = requestId;
 
-    res.on("finish", () => {
+    let completed = false;
+    const completeRequest = () => {
+      if (completed) return;
+      completed = true;
+      finishMonitoring(res.statusCode, performance.now() - startedAt);
       const path = requestPath(req);
+      if (
+        res.statusCode >= 400 &&
+        path !== "/monitor" &&
+        !path.startsWith("/monitor/")
+      ) {
+        monitorEvents.record({
+          source: "http",
+          severity: res.statusCode >= 500 ? "error" : "warning",
+          code: `HTTP_${res.statusCode}`,
+          message: `${req.method} ${safeMonitorPath(path)} returned ${res.statusCode}`,
+          statusCode: res.statusCode,
+        });
+      }
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
 
@@ -4976,9 +5155,76 @@ export function createServer(
         durationMs: Math.round(performance.now() - startedAt),
         ...requestLogFields(req, config),
       });
-    });
+    };
+    res.once("finish", completeRequest);
+    res.once("close", completeRequest);
 
     next();
+  });
+
+  app.get("/monitor", (req, res) => {
+    if (!requireLocalMonitor(req, res)) return;
+    setMonitorSecurityHeaders(res);
+    res.type("html").send(liveMonitorHtml());
+  });
+
+  app.get("/monitor/api", (req, res) => {
+    if (!requireLocalMonitor(req, res)) return;
+    setMonitorSecurityHeaders(res);
+    const requests = requestMonitor.snapshot();
+    const resources = resourceMonitor.snapshot();
+    const jobSnapshot = jobs.monitorSnapshot();
+    res.json({
+      observedAt: new Date().toISOString(),
+      service: {
+        name: "devspace",
+        version: PACKAGE_VERSION,
+        bootId: runtime.bootId,
+        startedAt: runtime.startedAt,
+        uptimeSeconds: Math.max(
+          0,
+          Math.round((Date.now() - Date.parse(runtime.startedAt)) / 1_000),
+        ),
+      },
+      process: {
+        pid: process.pid,
+        cpuPercent: resources.processCpuPercent,
+        cpuAverage15s: resources.processCpuAverage15s,
+      },
+      memory: {
+        rssMiB: resources.rssMiB,
+        heapUsedMiB: resources.heapUsedMiB,
+        heapTotalMiB: resources.heapTotalMiB,
+        externalMiB: resources.externalMiB,
+        rssGrowthMiBPerMinute: resources.rssGrowthMiBPerMinute,
+      },
+      system: {
+        cpuPercent: resources.systemCpuPercent,
+        cpuAverage15s: resources.systemCpuAverage15s,
+        memoryUsedPercent: resources.systemMemoryUsedPercent,
+        memoryAvailableMiB: resources.systemMemoryAvailableMiB,
+        memoryTotalMiB: resources.systemMemoryTotalMiB,
+        disk: diskSpaceSnapshot(config.stateDir),
+      },
+      eventLoop: {
+        p95Ms: resources.eventLoopP95Ms,
+        maxMs: resources.eventLoopMaxMs,
+      },
+      resourceHistory: resources.history,
+      requests,
+      sessions: mcpSessions.snapshot(),
+      jobs: jobSnapshot,
+      errors: {
+        recent: monitorEvents.snapshot(50),
+        persisted: monitorEvents.isPersistent(),
+        retention: 200,
+      },
+      load: calculateLoadAssessment({
+        requests,
+        resources,
+        jobs: jobSnapshot,
+      }),
+    });
   });
 
   app.get("/artifacts/:token", async (req, res) => {
@@ -5113,6 +5359,12 @@ export function createServer(
             requestId,
             error: error instanceof Error ? error.message : String(error),
           });
+          monitorEvents.record({
+            source: "mcp",
+            severity: "warning",
+            code: "MCP_STATELESS_CLOSE_ERROR",
+            message: "Stateless MCP server close failed",
+          });
         });
       };
       res.once("finish", closeStatelessServer);
@@ -5126,6 +5378,12 @@ export function createServer(
           requestId,
           transportMode: "stateless",
           error: error instanceof Error ? error.message : String(error),
+        });
+        monitorEvents.record({
+          source: "mcp",
+          severity: "error",
+          code: "MCP_REQUEST_ERROR",
+          message: "Stateless MCP request failed",
         });
         if (!res.headersSent) {
           sendJsonRpcError(res, 500, -32603, "Internal server error");
@@ -5212,6 +5470,12 @@ export function createServer(
         requestId,
         error: error instanceof Error ? error.message : String(error),
       });
+      monitorEvents.record({
+        source: "mcp",
+        severity: "error",
+        code: "MCP_REQUEST_ERROR",
+        message: "Stateful MCP request failed",
+      });
       if (!res.headersSent) {
         sendJsonRpcError(res, 500, -32603, "Internal server error");
       }
@@ -5226,6 +5490,12 @@ export function createServer(
             requestId,
             error: error instanceof Error ? error.message : String(error),
           });
+          monitorEvents.record({
+            source: "mcp",
+            severity: "warning",
+            code: "MCP_TRANSPORT_CLOSE_ERROR",
+            message: "MCP transport close failed",
+          });
         }
       }
     }
@@ -5239,6 +5509,7 @@ export function createServer(
       if (closed) return;
       closed = true;
       mcpSessions.close();
+      resourceMonitor.close();
       jobs.close();
       games.close();
       publisher.close();

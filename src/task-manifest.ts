@@ -56,7 +56,9 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest | null {
   if (!obj.tasks || typeof obj.tasks !== "object") return null;
 
   const tasks: Record<string, TaskDefinition> = {};
-  for (const [id, def] of Object.entries(obj.tasks as Record<string, unknown>)) {
+  for (const [id, def] of Object.entries(
+    obj.tasks as Record<string, unknown>,
+  )) {
     if (typeof def !== "object" || def === null) return null;
     const d = def as Record<string, unknown>;
     const mode = d.mode;
@@ -65,14 +67,21 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest | null {
     if (!d.command.every((a: unknown) => typeof a === "string")) return null;
 
     const runtime = d.runtime;
-    if (runtime !== undefined && runtime !== "workspace-python" && runtime !== "system") return null;
+    if (
+      runtime !== undefined &&
+      runtime !== "workspace-python" &&
+      runtime !== "system"
+    )
+      return null;
 
     const timeout = d.timeout_seconds;
-    if (timeout !== undefined && (typeof timeout !== "number" || timeout <= 0)) return null;
+    if (timeout !== undefined && (typeof timeout !== "number" || timeout <= 0))
+      return null;
 
     let parameters: Record<string, TaskParameter> | undefined;
     if (d.parameters) {
-      if (typeof d.parameters !== "object" || d.parameters === null) return null;
+      if (typeof d.parameters !== "object" || d.parameters === null)
+        return null;
       parameters = {};
       for (const [pname, pdef] of Object.entries(
         d.parameters as Record<string, unknown>,
@@ -80,7 +89,13 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest | null {
         if (typeof pdef !== "object" || pdef === null) return null;
         const pd = pdef as Record<string, unknown>;
         const ptype = pd.type;
-        if (ptype !== "string" && ptype !== "path" && ptype !== "sha256" && ptype !== "int") return null;
+        if (
+          ptype !== "string" &&
+          ptype !== "path" &&
+          ptype !== "sha256" &&
+          ptype !== "int"
+        )
+          return null;
         const param: TaskParameter = { type: ptype };
         if (pd.required !== undefined) {
           if (typeof pd.required !== "boolean") return null;
@@ -174,8 +189,10 @@ export function validateAndSubstitute(
         subst.set(name, value);
         break;
       case "path":
-        if (!isPathInsideRoot(value, workspaceRoot) &&
-            !allowedRoots.some((r) => isPathInsideRoot(value, r))) {
+        if (
+          !isPathInsideRoot(value, workspaceRoot) &&
+          !allowedRoots.some((r) => isPathInsideRoot(value, r))
+        ) {
           errors.push({
             param: name,
             message: `Path parameter ${name} is outside allowed roots: ${value}`,
@@ -202,9 +219,15 @@ export function validateAndSubstitute(
             message: `Int parameter ${name} is not an integer: ${value}`,
           });
         } else if (def.min !== undefined && num < def.min) {
-          errors.push({ param: name, message: `${name} must be >= ${def.min}` });
+          errors.push({
+            param: name,
+            message: `${name} must be >= ${def.min}`,
+          });
         } else if (def.max !== undefined && num > def.max) {
-          errors.push({ param: name, message: `${name} must be <= ${def.max}` });
+          errors.push({
+            param: name,
+            message: `${name} must be <= ${def.max}`,
+          });
         } else {
           subst.set(name, value);
         }
@@ -216,7 +239,10 @@ export function validateAndSubstitute(
   if (task.parameters) {
     for (const [name, def] of Object.entries(task.parameters)) {
       if (def.required && !subst.has(name)) {
-        errors.push({ param: name, message: `Required parameter ${name} is missing` });
+        errors.push({
+          param: name,
+          message: `Required parameter ${name} is missing`,
+        });
       }
     }
   }

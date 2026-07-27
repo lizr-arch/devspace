@@ -401,7 +401,9 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionConcurrentCalls, 20);
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
-    assert.equal(probe.toolNames?.length, 44);
+    assert.equal(probe.toolNames?.length, 48);
+    assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
+    assert.equal(probe.workspaceAppTelemetryTool.ok, true);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
     assert.equal(probe.toolNames?.includes("git_merge"), true);
     assert.equal(probe.toolNames?.includes("git_push"), true);
@@ -612,6 +614,7 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "glob",
       "ls",
       "inspect_glb",
+      "poll_task",
     ]);
     assert.equal(probe.toolNames.includes("git_fetch"), false);
     assert.equal(probe.toolNames.includes("git_merge"), false);

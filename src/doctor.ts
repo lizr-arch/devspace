@@ -60,6 +60,7 @@ export interface PublicExternalClientProbe {
   mcpAppStylesheets: DoctorProbeCheck;
   mcpAppAssetCors: DoctorProbeCheck;
   mcpAppBuildFingerprint: DoctorProbeCheck;
+  workspaceAppTelemetryTool: DoctorProbeCheck;
   devspaceInfo: DoctorProbeCheck;
   openWorkspace: DoctorProbeCheck;
   listWorkspaces: DoctorProbeCheck;
@@ -69,6 +70,7 @@ export interface PublicExternalClientProbe {
   artifactList?: DoctorProbeCheck;
   artifactPublication?: DoctorProbeCheck;
   toolNames?: string[];
+  appOnlyToolNames?: string[];
   widgetToolNames?: string[];
   safeGitToolDefinitions?: Record<string, Record<string, unknown>>;
   safeGitStructuredErrorCode?: string;
@@ -269,6 +271,10 @@ export async function probePublicExternalClientFlow(
     ok: false,
     detail: "MCP App build fingerprint validation did not run.",
   };
+  let workspaceAppTelemetryToolCheck: DoctorProbeCheck = {
+    ok: false,
+    detail: "Workspace App telemetry tool validation did not run.",
+  };
   let openWorkspaceCheck: DoctorProbeCheck = {
     ok: false,
     detail: "MCP open_workspace did not run.",
@@ -292,6 +298,7 @@ export async function probePublicExternalClientFlow(
   let artifactListCheck: DoctorProbeCheck | undefined;
   let artifactPublicationCheck: DoctorProbeCheck | undefined;
   let toolNames: string[] | undefined;
+  let appOnlyToolNames: string[] | undefined;
   let widgetToolNames: string[] | undefined;
   let safeGitToolDefinitions:
     Record<string, Record<string, unknown>> | undefined;
@@ -481,10 +488,23 @@ export async function probePublicExternalClientFlow(
       const tools = Array.isArray(toolsListResult?.tools)
         ? toolsListResult.tools
         : [];
-      toolNames = tools
+      const modelTools = tools.filter((tool) => {
+        const visibility = toolVisibility(tool);
+        return visibility === undefined || visibility.includes("model");
+      });
+      const appOnlyTools = tools.filter((tool) => {
+        const visibility = toolVisibility(tool);
+        return (
+          visibility?.includes("app") === true && !visibility.includes("model")
+        );
+      });
+      toolNames = modelTools
         .map((tool) => stringField(asRecord(tool), "name"))
         .filter((name): name is string => Boolean(name));
-      widgetToolNames = tools
+      appOnlyToolNames = appOnlyTools
+        .map((tool) => stringField(asRecord(tool), "name"))
+        .filter((name): name is string => Boolean(name));
+      widgetToolNames = modelTools
         .filter((tool) =>
           Boolean(
             stringField(
@@ -496,7 +516,7 @@ export async function probePublicExternalClientFlow(
         .map((tool) => stringField(asRecord(tool), "name"))
         .filter((name): name is string => Boolean(name));
       safeGitToolDefinitions = Object.fromEntries(
-        tools
+        modelTools
           .map((tool) => asRecord(tool))
           .filter(
             (tool): tool is Record<string, unknown> =>
@@ -507,13 +527,13 @@ export async function probePublicExternalClientFlow(
           )
           .map((tool) => [String(tool.name), tool]),
       );
-      const hasOpenWorkspace = tools.some((tool) => {
+      const hasOpenWorkspace = modelTools.some((tool) => {
         const record = asRecord(tool);
         return record?.name === "open_workspace";
       });
       const advertisedAppResourceUris = Array.from(
         new Set(
-          tools
+          modelTools
             .map((tool) =>
               stringField(
                 asRecord(asRecord(asRecord(tool)?._meta)?.ui),
@@ -551,7 +571,33 @@ export async function probePublicExternalClientFlow(
         mcpAppStylesheetsCheck = disabled;
         mcpAppAssetCorsCheck = disabled;
         mcpAppBuildFingerprintCheck = disabled;
+        workspaceAppTelemetryToolCheck = disabled;
       } else if (advertisedAppResourceUris.length === 1) {
+        const telemetryTool = appOnlyTools.find(
+          (tool) =>
+            stringField(asRecord(tool), "name") ===
+            "report_workspace_app_error",
+        );
+        const telemetryInputProperties = asRecord(
+          asRecord(asRecord(telemetryTool)?.inputSchema)?.properties,
+        );
+        const forbiddenTelemetryFields = ["message", "stack", "url"].filter(
+          (field) => telemetryInputProperties?.[field] !== undefined,
+        );
+        workspaceAppTelemetryToolCheck =
+          telemetryTool &&
+          appOnlyTools.length === 1 &&
+          forbiddenTelemetryFields.length === 0
+            ? okCheck(
+                toolsList.status,
+                "Workspace App telemetry is app-only and excludes raw messages, stacks, and URLs.",
+              )
+            : {
+                ok: false,
+                status: toolsList.status,
+                detail:
+                  "Workspace App telemetry was missing, not app-only, or accepted unsafe diagnostic fields.",
+              };
         workspaceAppResourceUri = advertisedAppResourceUris[0];
         mcpAppResourceUriCheck = okCheck(
           toolsList.status,
@@ -1579,6 +1625,7 @@ export async function probePublicExternalClientFlow(
     mcpAppStylesheets: mcpAppStylesheetsCheck,
     mcpAppAssetCors: mcpAppAssetCorsCheck,
     mcpAppBuildFingerprint: mcpAppBuildFingerprintCheck,
+    workspaceAppTelemetryTool: workspaceAppTelemetryToolCheck,
     devspaceInfo: devspaceInfoCheck,
     openWorkspace: openWorkspaceCheck,
     listWorkspaces: listWorkspacesCheck,
@@ -1588,6 +1635,7 @@ export async function probePublicExternalClientFlow(
     artifactList: artifactListCheck,
     artifactPublication: artifactPublicationCheck,
     toolNames,
+    appOnlyToolNames,
     widgetToolNames,
     safeGitToolDefinitions,
     safeGitStructuredErrorCode,
@@ -1636,6 +1684,7 @@ export async function probePublicExternalClientFlow(
       mcpAppStylesheetsCheck.ok &&
       mcpAppAssetCorsCheck.ok &&
       mcpAppBuildFingerprintCheck.ok &&
+      workspaceAppTelemetryToolCheck.ok &&
       devspaceInfoCheck.ok &&
       openWorkspaceCheck.ok &&
       listWorkspacesCheck.ok &&
@@ -1815,6 +1864,14 @@ function numberField(
   return typeof candidate === "number" && Number.isFinite(candidate)
     ? candidate
     : undefined;
+}
+
+function toolVisibility(value: unknown): string[] | undefined {
+  const visibility = asRecord(asRecord(asRecord(value)?._meta)?.ui)?.visibility;
+  if (!Array.isArray(visibility)) return undefined;
+  return visibility.filter(
+    (entry): entry is string => typeof entry === "string",
+  );
 }
 
 function projectMemoryOutcome(text: string | undefined): string | undefined {
