@@ -63,15 +63,28 @@ Passed:
 
 - `npm run format:check`
 - `npm run typecheck`
-- focused config, client classification, session registry, and doctor tests
+- `npm run test:unit`
 - `npm run test:mcp`
 - `npm run build`
 - CLI persistence round trip for the transport mode and session settings
 
-The full `npm run test:unit` command twice hit the existing five-second
-`background-jobs.test.ts` lifecycle wait. The same focused test passed in the
-main worktree and passed on a later isolated-worktree rerun. No background-job
-production code changed in this branch.
+The latest `main` stability patches (`237893d`, `b6c2411`) were integrated by
+merge commit `7edc67f` and then hardened by `88e1d12`:
+
+- fatal JavaScript error shutdown is idempotent and has a five-second forced
+  exit boundary so a stuck HTTP connection cannot prevent launchd restart;
+- workspace pytest detection is limited to `.venv` or `venv` directly inside
+  the approved workspace, rejects redirected venv directories, and executes
+  `python -m pytest`;
+- a workspace venv can resolve and run pytest even when no global pytest
+  executable is installed;
+- attached background child processes use the live `ChildProcess` PID identity
+  when cancelling, while restored processes retain the persisted token check.
+
+The last item fixes the prior cancellation-test flake: a synchronous `ps`
+environment probe could occasionally fail and refuse to signal a child that
+the current manager had just spawned. The focused background-job suite passed
+five consecutive runs after the fix, and the full unit suite passed.
 
 ## Live validation
 
@@ -89,5 +102,33 @@ Passed on DevSpaceMac boot `d563fb75-2ce7-4278-b998-8a975fc2d267`:
   - unknown requests, expiry, capacity eviction, and close errors remained zero;
   - heap used was observed at 60 MiB, 73 MiB, then 61 MiB.
 
-The service is deliberately left on the isolated validation worktree for soak.
-The branch is not merged or pushed by this report.
+After integrating the latest `main`, boot
+`c63a169f-24a9-4fe7-a705-9be19e36f723` also passed local, public, full-loop, and
+real Connector probes. During a two-minute sample:
+
+- stateless requests increased from 26 to 32;
+- active, high-water, and created retained sessions remained zero;
+- unknown requests, capacity evictions, and close errors remained zero;
+- heap used sampled at 79, 79, 97, 60, and 60 MiB.
+
+The final hardened build is running as boot
+`32aac853-0fc5-47d1-ab5f-8ad7ee28cb9f`. It passed local live, public OAuth
+full-loop, and real DevSpaceMac Cloudflare `devspace_info` and
+`list_workspaces` calls. At the real Connector sample it had 16 stateless
+requests, zero retained sessions, zero unknown requests, and zero close errors.
+Across a following one-minute Connector-traffic sample, stateless requests rose
+from 16 to 48 while retained sessions, high-water mark, unknown requests, and
+close errors remained zero; heap used sampled at 60, 109, and 79 MiB.
+
+The service is deliberately left on the isolated validation worktree. The
+branch is not merged to `main` or pushed by this report.
+
+## Remaining limitations
+
+- V8 heap exhaustion is a fatal runtime condition and cannot be reliably
+  recovered by JavaScript `uncaughtException` handlers. The stateless transport
+  removes the observed retained-session pressure, and launchd restarts a fatal
+  process, but longer production soak remains the evidence gate for recurrence.
+- Automated public MCP and real Connector calls passed. A visible ChatGPT Web UI
+  prompt/card interaction was not completed in this run, so that presentation
+  check remains a separate human/Web UI gate.
