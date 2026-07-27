@@ -14,7 +14,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, delimiter } from "node:path";
 import type { Readable } from "node:stream";
 import {
   DEFAULT_JOB_TIMEOUT_SECONDS,
@@ -36,6 +36,35 @@ export {
   MAX_JOB_OUTPUT_BYTES,
   MAX_JOB_TIMEOUT_SECONDS,
 };
+
+// ---------------------------------------------------------------------------
+// Workspace .venv detection — P0 fix: pytest (and future python runners)
+// should use the workspace's virtualenv, not the DevSpace host's python.
+// Walks up from workspaceRoot (max 5 levels) looking for .venv or venv.
+// ---------------------------------------------------------------------------
+const VENV_CANDIDATES = [".venv", "venv"];
+const MAX_VENV_WALK_DEPTH = 5;
+
+function findWorkspaceVenvPython(
+  workspaceRoot: string,
+  platform: string,
+): string | undefined {
+  let dir = workspaceRoot;
+  for (let i = 0; i < MAX_VENV_WALK_DEPTH; i++) {
+    for (const name of VENV_CANDIDATES) {
+      const python = join(
+        dir,
+        name,
+        platform === "win32" ? join("Scripts", "python.exe") : join("bin", "python"),
+      );
+      if (existsSync(python)) return python;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
 
 export type JobStatus =
   | "running"
@@ -200,14 +229,40 @@ export class BackgroundJobManager {
 
     try {
       const processToken = randomUUID();
-      const child = spawn(resolvedRunner.executable, input.args, {
+
+      // P0: for python-based runners (pytest), prefer the workspace's
+      // .venv so project dependencies (tiktoken, etc.) are available.
+      let executable = resolvedRunner.executable;
+      const env: Record<string, string> = {
+        ...resolvedRunner.environment,
+        ...validatedJobEnvironment(input.environment),
+        DEVSPACE_JOB_ID: jobId,
+        DEVSPACE_PROCESS_TOKEN: processToken,
+      };
+
+      if (input.runner === "pytest") {
+        const venvPython = findWorkspaceVenvPython(
+          input.workspaceRoot,
+          process.platform,
+        );
+        if (venvPython) {
+          const isWin = process.platform === "win32";
+          const venvScripts = dirname(venvPython);
+          const venvRoot = dirname(venvScripts); // .venv/
+          executable = join(
+            venvScripts,
+            isWin ? "pytest.exe" : "pytest",
+          );
+          env.VIRTUAL_ENV = venvRoot;
+          const pathKey =
+            Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+          env[pathKey] = [venvScripts, env[pathKey] ?? ""].join(delimiter);
+        }
+      }
+
+      const child = spawn(executable, input.args, {
         cwd: input.workingDirectory,
-        env: {
-          ...resolvedRunner.environment,
-          ...validatedJobEnvironment(input.environment),
-          DEVSPACE_JOB_ID: jobId,
-          DEVSPACE_PROCESS_TOKEN: processToken,
-        },
+        env,
         detached: process.platform !== "win32",
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
