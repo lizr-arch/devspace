@@ -64,6 +64,7 @@ export interface PublicExternalClientProbe {
   openWorkspace: DoctorProbeCheck;
   listWorkspaces: DoctorProbeCheck;
   resumeWorkspace: DoctorProbeCheck;
+  sessionReuse?: DoctorProbeCheck;
   backgroundJob?: DoctorProbeCheck;
   artifactList?: DoctorProbeCheck;
   artifactPublication?: DoctorProbeCheck;
@@ -99,6 +100,10 @@ export interface PublicExternalClientProbe {
   publishedArtifactUrl?: string;
   publishedArtifactSha256?: string;
   publishedArtifactBytes?: number;
+  sessionReuseCalls?: number;
+  sessionReuseCreatedDelta?: number;
+  sessionReuseTotalCreatedDelta?: number;
+  sessionConcurrentCalls?: number;
   ready: boolean;
 }
 
@@ -208,6 +213,8 @@ export async function probePublicExternalClientFlow(
     captureProfile?: string;
     inspectArtifactJobId?: string;
     publishArtifactPath?: string;
+    sessionReuseCalls?: number;
+    sessionConcurrentCalls?: number;
   },
 ): Promise<PublicExternalClientProbe> {
   const info = deriveChatGptWebInfo(config);
@@ -278,6 +285,9 @@ export async function probePublicExternalClientFlow(
     ok: false,
     detail: "MCP resume_workspace did not run.",
   };
+  let sessionReuseCheck: DoctorProbeCheck | undefined;
+  let sessionReuseCreatedDelta: number | undefined;
+  let sessionReuseTotalCreatedDelta: number | undefined;
   let backgroundJobCheck: DoctorProbeCheck | undefined;
   let artifactListCheck: DoctorProbeCheck | undefined;
   let artifactPublicationCheck: DoctorProbeCheck | undefined;
@@ -777,6 +787,134 @@ export async function probePublicExternalClientFlow(
                     "MCP devspace_info responded, but its fingerprint, tool catalog, or runner registry was incomplete.",
                 }
               : failedCheck(devspaceInfo, "MCP devspace_info did not succeed.");
+
+        if (input.sessionReuseCalls || input.sessionConcurrentCalls) {
+          const requestedCalls = input.sessionReuseCalls ?? 0;
+          const concurrentCalls = input.sessionConcurrentCalls ?? 0;
+          if (
+            !Number.isInteger(requestedCalls) ||
+            requestedCalls < 0 ||
+            requestedCalls > 100
+          ) {
+            throw new Error("sessionReuseCalls must be between 0 and 100.");
+          }
+          if (
+            !Number.isInteger(concurrentCalls) ||
+            concurrentCalls < 0 ||
+            concurrentCalls > 20
+          ) {
+            throw new Error("sessionConcurrentCalls must be between 0 and 20.");
+          }
+          const initialSessionStats = asRecord(
+            devspaceInfoStructured?.mcpSessions,
+          );
+          const initialCreated = numberField(initialSessionStats, "created");
+          const initialCreatedBySource = asRecord(
+            initialSessionStats?.createdBySource,
+          );
+          const initialDoctorCreated = numberField(
+            initialCreatedBySource,
+            "doctor",
+          );
+          let successfulCalls = 0;
+          let sessionChanged = false;
+
+          for (let call = 0; call < requestedCalls; call += 1) {
+            const reused = await postMcpJsonRpc(
+              info.publicMcpUrl,
+              accessToken,
+              {
+                jsonrpc: "2.0",
+                id: 10_000 + call,
+                method: "tools/call",
+                params: { name: "list_workspaces", arguments: { limit: 1 } },
+              },
+              sessionId,
+            );
+            const responseSessionId = reused.headers?.get("mcp-session-id");
+            if (responseSessionId && responseSessionId !== sessionId) {
+              sessionChanged = true;
+            }
+            if (reused.ok && mcpToolCallSucceeded(reused)) {
+              successfulCalls += 1;
+            }
+          }
+
+          const concurrentResults = await Promise.all(
+            Array.from({ length: concurrentCalls }, (_, call) =>
+              postMcpJsonRpc(
+                info.publicMcpUrl,
+                accessToken,
+                {
+                  jsonrpc: "2.0",
+                  id: 20_000 + call,
+                  method: "tools/call",
+                  params: {
+                    name: "list_workspaces",
+                    arguments: { limit: 1 },
+                  },
+                },
+                sessionId,
+              ),
+            ),
+          );
+          for (const reused of concurrentResults) {
+            const responseSessionId = reused.headers?.get("mcp-session-id");
+            if (responseSessionId && responseSessionId !== sessionId) {
+              sessionChanged = true;
+            }
+            if (reused.ok && mcpToolCallSucceeded(reused)) {
+              successfulCalls += 1;
+            }
+          }
+
+          const finalInfo = await postMcpJsonRpc(
+            info.publicMcpUrl,
+            accessToken,
+            {
+              jsonrpc: "2.0",
+              id: 30_000,
+              method: "tools/call",
+              params: { name: "devspace_info", arguments: {} },
+            },
+            sessionId,
+          );
+          const finalInfoResult = asRecord(
+            asRecord(parseMcpResponseJson(finalInfo.text))?.result,
+          );
+          const finalInfoStructured = asRecord(
+            finalInfoResult?.structuredContent,
+          );
+          const finalStats = asRecord(finalInfoStructured?.mcpSessions);
+          const finalCreated = numberField(finalStats, "created");
+          const finalCreatedBySource = asRecord(finalStats?.createdBySource);
+          const finalDoctorCreated = numberField(
+            finalCreatedBySource,
+            "doctor",
+          );
+          sessionReuseCreatedDelta =
+            initialDoctorCreated === undefined ||
+            finalDoctorCreated === undefined
+              ? undefined
+              : finalDoctorCreated - initialDoctorCreated;
+          sessionReuseTotalCreatedDelta =
+            initialCreated === undefined || finalCreated === undefined
+              ? undefined
+              : finalCreated - initialCreated;
+          sessionReuseCheck =
+            successfulCalls === requestedCalls + concurrentCalls &&
+            sessionChanged === false &&
+            sessionReuseCreatedDelta === 0
+              ? okCheck(
+                  devspaceInfo.status,
+                  `One MCP session handled ${requestedCalls} sequential and ${concurrentCalls} concurrent tool calls without creating another session.`,
+                )
+              : {
+                  ok: false,
+                  status: devspaceInfo.status,
+                  detail: `Session reuse probe completed ${successfulCalls}/${requestedCalls + concurrentCalls} calls; sessionChanged=${String(sessionChanged)}; doctorCreatedDelta=${String(sessionReuseCreatedDelta)}; totalCreatedDelta=${String(sessionReuseTotalCreatedDelta)}.`,
+                };
+        }
 
         if (config.widgets !== "off") {
           const fingerprintPrefix = workspaceAppBuildFingerprint?.slice(0, 16);
@@ -1439,6 +1577,7 @@ export async function probePublicExternalClientFlow(
     openWorkspace: openWorkspaceCheck,
     listWorkspaces: listWorkspacesCheck,
     resumeWorkspace: resumeWorkspaceCheck,
+    sessionReuse: sessionReuseCheck,
     backgroundJob: backgroundJobCheck,
     artifactList: artifactListCheck,
     artifactPublication: artifactPublicationCheck,
@@ -1474,6 +1613,10 @@ export async function probePublicExternalClientFlow(
     publishedArtifactUrl,
     publishedArtifactSha256,
     publishedArtifactBytes,
+    sessionReuseCalls: input.sessionReuseCalls,
+    sessionReuseCreatedDelta,
+    sessionReuseTotalCreatedDelta,
+    sessionConcurrentCalls: input.sessionConcurrentCalls,
     ready:
       clientRegistrationCheck.ok &&
       authorizationCheck.ok &&
@@ -1491,6 +1634,8 @@ export async function probePublicExternalClientFlow(
       openWorkspaceCheck.ok &&
       listWorkspacesCheck.ok &&
       resumeWorkspaceCheck.ok &&
+      (!(input.sessionReuseCalls || input.sessionConcurrentCalls) ||
+        sessionReuseCheck?.ok === true) &&
       (!requestedExternalJob(input) || backgroundJobCheck?.ok === true) &&
       (!requestedExternalArtifacts(input) || artifactListCheck?.ok === true) &&
       (!input.publishArtifactPath || artifactPublicationCheck?.ok === true),
@@ -1654,6 +1799,16 @@ function stringField(
 ): string | undefined {
   const candidate = value?.[field];
   return typeof candidate === "string" ? candidate : undefined;
+}
+
+function numberField(
+  value: Record<string, unknown> | undefined,
+  field: string,
+): number | undefined {
+  const candidate = value?.[field];
+  return typeof candidate === "number" && Number.isFinite(candidate)
+    ? candidate
+    : undefined;
 }
 
 function projectMemoryOutcome(text: string | undefined): string | undefined {

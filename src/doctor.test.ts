@@ -361,6 +361,8 @@ async function testPublicExternalClientProbe(): Promise<void> {
     const probe = await probePublicExternalClientFlow(config, {
       workspacePath: process.cwd(),
       verifySafeGitTools: true,
+      sessionReuseCalls: 100,
+      sessionConcurrentCalls: 20,
       backgroundJob: {
         runner: "npm",
         args: ["run", "typecheck"],
@@ -372,6 +374,11 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.tokenExchange.ok, true);
     assert.equal(probe.initialize.ok, true);
     assert.equal(probe.toolsList.ok, true);
+    assert.equal(probe.sessionReuse?.ok, true);
+    assert.equal(probe.sessionReuseCalls, 100);
+    assert.equal(probe.sessionConcurrentCalls, 20);
+    assert.equal(probe.sessionReuseCreatedDelta, 0);
+    assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
     assert.equal(probe.toolNames?.length, 44);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
     assert.equal(probe.toolNames?.includes("git_merge"), true);

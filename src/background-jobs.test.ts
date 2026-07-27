@@ -123,6 +123,57 @@ if (process.argv.includes("--version")) {
   assert.match(cancelled.error ?? "", /^JOB_CANCELLED:/);
   assert.equal(manager.cancel(long.jobId).status, "cancelled");
 
+  const parallelA = await manager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "wait"],
+    timeoutSeconds: 30,
+  });
+  const parallelB = await manager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "wait"],
+    timeoutSeconds: 30,
+  });
+  await assert.rejects(
+    () =>
+      manager.start({
+        workspaceId: "ws_test",
+        workspaceRoot,
+        workingDirectory: workspaceRoot,
+        runner: "npm",
+        args: ["run", "verify"],
+        timeoutSeconds: 30,
+      }),
+    /At most 2 background jobs/,
+  );
+  manager.cancel(parallelA.jobId);
+  assert.equal(
+    (await waitForTerminal(manager, parallelA.jobId)).status,
+    "cancelled",
+  );
+  manager.cancel(parallelB.jobId);
+  assert.equal(
+    (await waitForTerminal(manager, parallelB.jobId)).status,
+    "cancelled",
+  );
+  const thirdLifecycle = await manager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "verify"],
+    timeoutSeconds: 30,
+  });
+  assert.equal(
+    (await waitForTerminal(manager, thirdLifecycle.jobId)).status,
+    "succeeded",
+  );
+
   const singleRunnerManager = new BackgroundJobManager(
     join(root, "single-runner-state"),
     new RunnerRegistry({ npm: { maxConcurrent: 1, maxTimeoutSeconds: 30 } }),
