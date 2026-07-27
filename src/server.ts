@@ -71,7 +71,9 @@ import {
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import {
   LiveRequestMonitor,
-  ProcessCpuSampler,
+  ProcessResourceMonitor,
+  calculateLoadAssessment,
+  diskSpaceSnapshot,
   liveMonitorHtml,
   requireLocalMonitor,
   setMonitorSecurityHeaders,
@@ -4790,7 +4792,7 @@ export function createServer(
   const games = new GameSessionManager(config.stateDir, runners);
   const inspectors = new ExternalInspectorManager(config.stateDir, runners);
   const requestMonitor = new LiveRequestMonitor();
-  const cpuSampler = new ProcessCpuSampler();
+  const resourceMonitor = new ProcessResourceMonitor();
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", 1);
@@ -4835,6 +4837,9 @@ export function createServer(
   app.get("/monitor/api", (req, res) => {
     if (!requireLocalMonitor(req, res)) return;
     setMonitorSecurityHeaders(res);
+    const requests = requestMonitor.snapshot();
+    const resources = resourceMonitor.snapshot();
+    const jobSnapshot = jobs.monitorSnapshot();
     res.json({
       observedAt: new Date().toISOString(),
       service: {
@@ -4849,12 +4854,37 @@ export function createServer(
       },
       process: {
         pid: process.pid,
-        cpuPercent: cpuSampler.snapshot(),
+        cpuPercent: resources.processCpuPercent,
+        cpuAverage15s: resources.processCpuAverage15s,
       },
-      memory: processMemorySnapshot(),
-      requests: requestMonitor.snapshot(),
+      memory: {
+        rssMiB: resources.rssMiB,
+        heapUsedMiB: resources.heapUsedMiB,
+        heapTotalMiB: resources.heapTotalMiB,
+        externalMiB: resources.externalMiB,
+        rssGrowthMiBPerMinute: resources.rssGrowthMiBPerMinute,
+      },
+      system: {
+        cpuPercent: resources.systemCpuPercent,
+        cpuAverage15s: resources.systemCpuAverage15s,
+        memoryUsedPercent: resources.systemMemoryUsedPercent,
+        memoryAvailableMiB: resources.systemMemoryAvailableMiB,
+        memoryTotalMiB: resources.systemMemoryTotalMiB,
+        disk: diskSpaceSnapshot(config.stateDir),
+      },
+      eventLoop: {
+        p95Ms: resources.eventLoopP95Ms,
+        maxMs: resources.eventLoopMaxMs,
+      },
+      resourceHistory: resources.history,
+      requests,
       sessions: mcpSessions.snapshot(),
-      jobs: jobs.monitorSnapshot(),
+      jobs: jobSnapshot,
+      load: calculateLoadAssessment({
+        requests,
+        resources,
+        jobs: jobSnapshot,
+      }),
     });
   });
 
@@ -5114,6 +5144,7 @@ export function createServer(
       if (closed) return;
       closed = true;
       mcpSessions.close();
+      resourceMonitor.close();
       jobs.close();
       games.close();
       publisher.close();

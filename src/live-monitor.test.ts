@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import {
   LiveRequestMonitor,
+  ProcessResourceMonitor,
+  calculateLoadAssessment,
   isLocalMonitorHost,
   liveMonitorHtml,
 } from "./live-monitor.js";
@@ -20,6 +22,11 @@ assert.equal(isLocalMonitorHost("[::1]:7676"), true);
 assert.equal(isLocalMonitorHost("mcp.workspaceport.com"), false);
 assert.equal(isLocalMonitorHost("127.0.0.1.evil.example"), false);
 assert.equal(isLocalMonitorHost(undefined), false);
+
+const resourceMonitor = new ProcessResourceMonitor();
+assert.equal(resourceMonitor.snapshot().processCpuPercent, 0);
+assert.equal(resourceMonitor.snapshot().systemCpuPercent, 0);
+resourceMonitor.close();
 
 const monitor = new LiveRequestMonitor();
 const finishFirst = monitor.begin("/mcp", 100_000);
@@ -45,6 +52,35 @@ assert.equal(snapshot.mcp.inFlight, 0);
 assert.equal(snapshot.mcp.completed, 2);
 assert.equal(snapshot.mcp.errors, 1);
 assert.equal(snapshot.mcp.averageLatencyMs, 100);
+assert.equal(snapshot.mcp.p50LatencyMs, 80);
+assert.equal(snapshot.mcp.p95LatencyMs, 120);
+assert.equal(snapshot.mcp.p99LatencyMs, 120);
+assert.equal(snapshot.mcp.errorRatePercent, 50);
+
+const assessment = calculateLoadAssessment({
+  requests: snapshot,
+  resources: {
+    processCpuPercent: 12,
+    processCpuAverage15s: 12,
+    systemCpuPercent: 18,
+    systemCpuAverage15s: 18,
+    eventLoopP95Ms: 4,
+    eventLoopMaxMs: 8,
+    rssMiB: 180,
+    heapUsedMiB: 70,
+    heapTotalMiB: 110,
+    externalMiB: 4,
+    systemMemoryUsedPercent: 60,
+    systemMemoryAvailableMiB: 6_000,
+    systemMemoryTotalMiB: 16_000,
+    rssGrowthMiBPerMinute: 0,
+    history: [],
+  },
+  jobs: { active: 1, maxConcurrent: 2 },
+});
+assert.equal(assessment.score, 100);
+assert.equal(assessment.level, "saturated");
+assert.match(assessment.reasons.join(" "), /错误与超时/);
 
 snapshot = monitor.snapshot(161_000);
 assert.equal(snapshot.mcp.perMinute, 0);
@@ -55,6 +91,8 @@ assert.equal(
 
 const html = liveMonitorHtml();
 assert.match(html, /DevSpace Live Monitor/);
+assert.match(html, /负载分数是保守的启发式信号/);
+assert.match(html, /resource-chart/);
 assert.match(html, /setInterval\(refresh,1000\)/);
 assert.doesNotMatch(html, /https?:\/\//);
 
@@ -92,9 +130,18 @@ try {
   const payload = (await api.json()) as {
     service: { name: string };
     requests: { mcp: { total: number } };
+    load: { score: number; level: string };
+    eventLoop: { p95Ms: number };
+    system: { disk: { availableGiB: number } };
+    resourceHistory: unknown[];
   };
   assert.equal(payload.service.name, "devspace");
   assert.equal(payload.requests.mcp.total, 0);
+  assert.equal(typeof payload.load.score, "number");
+  assert.match(payload.load.level, /^(idle|light|busy|saturated)$/);
+  assert.equal(typeof payload.eventLoop.p95Ms, "number");
+  assert.equal(typeof payload.system.disk.availableGiB, "number");
+  assert.ok(payload.resourceHistory.length >= 1);
 
   assert.equal(
     await requestStatusWithHost(
