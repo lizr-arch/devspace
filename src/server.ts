@@ -27,6 +27,10 @@ import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
 import { attachRegisteredToolName } from "./tool-result-metadata.js";
 import { classifyMcpClient } from "./mcp-client-classification.js";
 import {
+  createShutdownHandler,
+  type ShutdownReason,
+} from "./process-shutdown.js";
+import {
   logEvent,
   requestPath,
   commandPreview,
@@ -5089,18 +5093,20 @@ if (await isMainModule()) {
     );
   });
 
-  const shutdown = (reason: string, err?: Error) => {
-    if (err) {
+  const shutdown = createShutdownHandler({
+    httpServer,
+    closeResources: close,
+    exit: (code) => process.exit(code),
+    logCrash: (reason: ShutdownReason, error: Error) => {
       const ts = new Date().toISOString();
-      const label = reason === "uncaughtException" ? "UNCAUGHT EXCEPTION" : "UNHANDLED REJECTION";
+      const label =
+        reason === "uncaughtException"
+          ? "UNCAUGHT EXCEPTION"
+          : "UNHANDLED REJECTION";
       console.error(`[${ts}] ${label}`);
-      console.error(err.stack ?? err.message ?? String(err));
-    }
-    httpServer.close(() => {
-      close();
-      process.exit(reason === "SIGTERM" || reason === "SIGINT" ? 0 : 1);
-    });
-  };
+      console.error(error.stack ?? error.message ?? String(error));
+    },
+  });
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
   process.on("uncaughtException", (err) => shutdown("uncaughtException", err));
