@@ -26,6 +26,7 @@ try {
   await writeFile(join(root, "nested", "file.txt"), "hello\n");
 
   const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: join(root, ".devspace", "config"),
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_WORKTREE_ROOT: join(root, ".devspace", "worktrees"),
     DEVSPACE_AGENT_DIR: agentDir,
@@ -165,6 +166,7 @@ try {
     const aliasRoot = join(root, "alias-root");
     await symlink(root, aliasRoot, "dir");
     const aliasConfig = loadConfig({
+      DEVSPACE_CONFIG_DIR: join(root, ".devspace", "config"),
       DEVSPACE_ALLOWED_ROOTS: aliasRoot,
       DEVSPACE_WORKTREE_ROOT: join(aliasRoot, ".devspace", "alias-worktrees"),
       DEVSPACE_AGENT_DIR: agentDir,

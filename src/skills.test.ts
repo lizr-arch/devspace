@@ -69,6 +69,7 @@ try {
   );
 
   const disabledConfig = loadConfig({
+    DEVSPACE_CONFIG_DIR: join(root, "config"),
     DEVSPACE_ALLOWED_ROOTS: projectRoot,
     DEVSPACE_AGENT_DIR: agentDir,
     DEVSPACE_SKILL_PATHS: explicitSkills,
@@ -79,6 +80,7 @@ try {
   assert.deepEqual(loadWorkspaceSkills(disabledConfig, projectRoot).skills, []);
 
   const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: join(root, "config"),
     DEVSPACE_ALLOWED_ROOTS: projectRoot,
     DEVSPACE_AGENT_DIR: agentDir,
     DEVSPACE_SKILL_PATHS: explicitSkills,
