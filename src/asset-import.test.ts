@@ -2,12 +2,49 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { importAsset } from "./asset-import.js";
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+
+function crc32(data: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 1) !== 0 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(data.length + 12);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), data.length + 8);
+  return chunk;
+}
+
+function grayscalePng(value: number): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(Buffer.from([0, value]))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+const REPLACEMENT_PNG = grayscalePng(127);
 
 const root = await mkdtemp(join(tmpdir(), "devspace-asset-import-"));
 try {
@@ -18,15 +55,22 @@ try {
     base64Data: PNG.toString("base64"),
   });
   assert.equal(imported.format, "PNG");
+  assert.equal(imported.outcome, "created");
   assert.equal(imported.path, "assets/pixel.png");
   assert.deepEqual(await readFile(destination), PNG);
+  const unchanged = await importAsset({
+    workspaceRoot: root,
+    destination,
+    base64Data: PNG.toString("base64"),
+  });
+  assert.equal(unchanged.outcome, "unchanged");
   await assert.rejects(
     importAsset({
       workspaceRoot: root,
       destination,
-      base64Data: PNG.toString("base64"),
+      base64Data: REPLACEMENT_PNG.toString("base64"),
     }),
-    /PATH_EXISTS/,
+    /ASSET_DESTINATION_CONFLICT/,
   );
   await assert.rejects(
     importAsset({
@@ -105,7 +149,7 @@ try {
     importAsset({
       workspaceRoot: root,
       destination: preserved,
-      base64Data: PNG.toString("base64"),
+      base64Data: REPLACEMENT_PNG.toString("base64"),
       overwrite: true,
       beforeCommit: async () => {
         throw new Error("snapshot failed");
@@ -114,6 +158,15 @@ try {
     /snapshot failed/,
   );
   assert.deepEqual(await readFile(preserved), original);
+  const replaced = await importAsset({
+    workspaceRoot: root,
+    destination: preserved,
+    base64Data: REPLACEMENT_PNG.toString("base64"),
+    overwrite: true,
+  });
+  assert.equal(replaced.outcome, "replaced");
+  assert.match(replaced.previousSha256 ?? "", /^[0-9a-f]{64}$/);
+  assert.deepEqual(await readFile(preserved), REPLACEMENT_PNG);
   console.log("asset import tests passed");
 } finally {
   await rm(root, { recursive: true, force: true });

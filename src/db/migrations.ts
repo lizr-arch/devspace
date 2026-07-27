@@ -27,6 +27,11 @@ const migrations: Migration[] = [
     name: "workspace-attached-branch-state",
     up: migrateWorkspaceAttachedBranchState,
   },
+  {
+    version: 5,
+    name: "asset-import-receipts",
+    up: migrateAssetImportReceipts,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -255,6 +260,31 @@ function migrateProjectMemoryShadowState(sqlite: Database.Database): void {
 
     create index if not exists project_memory_privilege_workspace_idx
       on project_memory_privilege_authorizations(workspace_session_id, expires_at);
+  `);
+}
+
+function migrateAssetImportReceipts(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists asset_import_receipts (
+      import_receipt_id text primary key,
+      workspace_session_id text not null,
+      destination_path text not null,
+      outcome text not null,
+      sha256 text not null,
+      artifact_id text not null,
+      source_kind text not null,
+      source_file_id text,
+      receipt_json text not null,
+      created_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists asset_import_receipts_workspace_path_idx
+      on asset_import_receipts(workspace_session_id, destination_path, created_at desc);
+    create index if not exists asset_import_receipts_source_file_idx
+      on asset_import_receipts(source_file_id);
   `);
 }
 

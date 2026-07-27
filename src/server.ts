@@ -80,6 +80,11 @@ import {
   setMonitorSecurityHeaders,
 } from "./live-monitor.js";
 import { importPng, MAX_PNG_IMPORT_BYTES } from "./png-import.js";
+import { AssetReceiptStore } from "./asset-receipts.js";
+import {
+  IMPORT_PNG_FILE_PARAMS_META,
+  openAiFileInputSchema,
+} from "./openai-file.js";
 import { importAsset, MAX_IMPORT_BYTES } from "./asset-import.js";
 import { inspectArtifact } from "./artifact-inspector.js";
 import {
@@ -141,8 +146,7 @@ const PACKAGE_VERSION = (
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as { version: string }
 ).version;
-const TOOL_SCHEMA_REVISION =
-  "devspacemac-workspace-app-telemetry-v1.2026-07-27";
+const TOOL_SCHEMA_REVISION = "devspacemac-import-png-openai-file-p0.2026-07-27";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -1450,6 +1454,7 @@ function createMcpServer(
   inspectors: ExternalInspectorManager,
   runners: RunnerRegistry,
   artifacts: ArtifactLedger,
+  assetReceipts: AssetReceiptStore,
   publisher: ArtifactPublisher,
   runtime: ServiceRuntime,
   workspaceApp: WorkspaceAppBuild | undefined,
@@ -3391,7 +3396,7 @@ function createMcpServer(
       "import_png",
       {
         title: "Import PNG",
-        description: `Import original PNG bytes into an open workspace from exactly one source: a public HTTPS result URL or standard Base64 data. Use this for generated-image or attachment intake instead of ${toolNames.shell} or the text-only ${toolNames.write} tool. The destination must end in .png, stay inside the workspace, and is not overwritten unless overwrite=true. Imports are limited to ${MAX_PNG_IMPORT_BYTES} bytes and return a SHA-256 digest for provenance registration.`,
+        description: `Import original PNG bytes into an open workspace from exactly one source: a ChatGPT file attachment, a public HTTPS result URL, or standard Base64 data. Prefer file for images attached in the conversation. Use this instead of ${toolNames.shell} or the text-only ${toolNames.write} tool. The destination must end in .png, stay inside the workspace, and is not overwritten unless overwrite=true. Imports are limited to ${MAX_PNG_IMPORT_BYTES} bytes and validate PNG structure, dimensions, CRCs, and decoded scanlines before atomic write and provenance registration.`,
         inputSchema: {
           workspaceId: z
             .string()
@@ -3401,18 +3406,23 @@ function createMcpServer(
             .describe(
               "Destination .png path relative to the workspace root, for example managed_worktree/raw/candidate.png.",
             ),
+          file: openAiFileInputSchema
+            .optional()
+            .describe(
+              "ChatGPT conversation or library file supplied by the host. Provide exactly one of file, sourceUrl, or base64Data.",
+            ),
           sourceUrl: z
             .string()
             .url()
             .optional()
             .describe(
-              "Public HTTPS URL containing the PNG bytes. Provide exactly one of sourceUrl or base64Data.",
+              "Public HTTPS URL containing the PNG bytes. Provide exactly one of file, sourceUrl, or base64Data.",
             ),
           base64Data: z
             .string()
             .optional()
             .describe(
-              "Standard Base64-encoded PNG bytes. Provide exactly one of base64Data or sourceUrl.",
+              "Standard Base64-encoded PNG bytes. Provide exactly one of file, base64Data, or sourceUrl.",
             ),
           expectedSha256: z
             .string()
@@ -3430,18 +3440,34 @@ function createMcpServer(
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema({
+          workspaceId: z.string(),
           path: z.string(),
           bytes: z.number().int().nonnegative(),
           sha256: z.string(),
-          source: z.enum(["https", "base64"]),
+          width: z.number().int().positive(),
+          height: z.number().int().positive(),
+          mimeType: z.literal("image/png"),
+          source: z.enum(["openai_file", "https", "base64"]),
+          sourceKind: z.enum(["openai_file", "https", "base64"]),
           sourceHost: z.string().optional(),
+          sourceFileId: z.string().optional(),
+          sourceFileName: z.string().optional(),
+          outcome: z.enum(["created", "unchanged", "replaced"]),
+          overwritten: z.boolean(),
+          artifactId: z.string(),
+          importReceiptId: z.string(),
+          previousSha256: z.string().optional(),
+          previousArtifactId: z.string().optional(),
+          projectMemoryReceiptId: z.string().optional(),
+          displacedTrashId: z.string().optional(),
         }),
-        _meta: {},
+        _meta: IMPORT_PNG_FILE_PARAMS_META,
         annotations: IMPORT_PNG_TOOL_ANNOTATIONS,
       },
       async ({
         workspaceId,
         path,
+        file,
         sourceUrl,
         base64Data,
         expectedSha256,
@@ -3461,6 +3487,7 @@ function createMcpServer(
           const imported = await importPng({
             destination,
             workspaceRoot: workspace.root,
+            file,
             sourceUrl,
             base64Data,
             expectedSha256,
@@ -3478,51 +3505,117 @@ function createMcpServer(
                   }
                 : undefined,
           });
-          try {
-            await artifacts.registerImport({
-              workspaceId,
-              workspaceRoot: workspace.root,
-              relativePath: path,
-              importId: `import_${randomUUID()}`,
-              source: imported.source,
-              sourceHost: imported.sourceHost,
-            });
-          } catch (error) {
-            await rollbackImportedAsset({
-              workspaceRoot: workspace.root,
-              stateDir: config.stateDir,
-              workspaceId,
-              path,
-              displacedTrashId,
-            });
-            throw error;
-          }
-          const result = `Imported ${path} (${imported.bytes} bytes, sha256 ${imported.sha256}).`;
-          logToolCall(config, {
-            tool: "import_png",
+          const previousArtifact =
+            imported.outcome === "replaced" && imported.previousSha256
+              ? artifacts.getLatestArtifactForPath(
+                  workspaceId,
+                  path,
+                  imported.previousSha256,
+                )
+              : undefined;
+          let artifact = artifacts.getLatestArtifactForPath(
             workspaceId,
             path,
-            success: true,
-            durationMs: Math.round(performance.now() - startedAt),
-          });
-          return {
-            content: [textBlock(result)],
-            _meta: {
+            imported.sha256,
+          );
+          let registeredArtifact = false;
+          try {
+            if (!artifact || imported.outcome !== "unchanged") {
+              artifact = await artifacts.registerImport({
+                workspaceId,
+                workspaceRoot: workspace.root,
+                relativePath: path,
+                importId: `import_${randomUUID()}`,
+                source: imported.source,
+                sourceHost: imported.sourceHost,
+                sourceFileId: imported.sourceFileId,
+                sourceFileName: imported.sourceFileName,
+                overwritten: imported.outcome === "replaced",
+                previousArtifactId: previousArtifact?.artifactId,
+              });
+              registeredArtifact = true;
+            }
+            const importReceipt = assetReceipts.registerImport({
+              workspaceId,
+              destinationPath: path,
+              outcome: imported.outcome,
+              bytes: imported.bytes,
+              sha256: imported.sha256,
+              width: imported.width,
+              height: imported.height,
+              mimeType: imported.mimeType,
+              sourceKind: imported.source,
+              sourceHost: imported.sourceHost,
+              sourceFileId: imported.sourceFileId,
+              sourceFileName: imported.sourceFileName,
+              artifactId: artifact.artifactId,
+              previousSha256:
+                imported.outcome === "replaced"
+                  ? imported.previousSha256
+                  : undefined,
+              previousArtifactId:
+                imported.outcome === "replaced"
+                  ? previousArtifact?.artifactId
+                  : undefined,
+              displacedTrashId,
+            });
+            const overwritten = imported.outcome === "replaced";
+            const result = `${imported.outcome === "unchanged" ? "Verified unchanged" : imported.outcome === "replaced" ? "Replaced" : "Imported"} ${path} (${imported.bytes} bytes, ${imported.width}x${imported.height}, sha256 ${imported.sha256}) as ${artifact.artifactId}; receipt ${importReceipt.importReceiptId}.`;
+            logToolCall(config, {
               tool: "import_png",
-              projectMemory,
-              card: {
+              workspaceId,
+              path,
+              success: true,
+              durationMs: Math.round(performance.now() - startedAt),
+            });
+            return {
+              content: [textBlock(result)],
+              _meta: {
+                tool: "import_png",
+                projectMemory,
+                card: {
+                  workspaceId,
+                  path,
+                  summary: {
+                    ...imported,
+                    artifactId: artifact.artifactId,
+                    importReceiptId: importReceipt.importReceiptId,
+                    overwritten,
+                  },
+                },
+              },
+              structuredContent: {
+                result,
                 workspaceId,
                 path,
-                summary: imported,
+                ...imported,
+                sourceKind: imported.source,
+                overwritten,
+                artifactId: artifact.artifactId,
+                importReceiptId: importReceipt.importReceiptId,
+                previousArtifactId:
+                  imported.outcome === "replaced"
+                    ? previousArtifact?.artifactId
+                    : undefined,
+                projectMemoryReceiptId: projectMemory.receiptId,
+                displacedTrashId,
               },
-            },
-            structuredContent: {
-              result,
-              path,
-              ...imported,
-              displacedTrashId,
-            },
-          };
+            };
+          } catch (error) {
+            if (registeredArtifact && artifact) {
+              artifacts.removeArtifact(workspaceId, artifact.artifactId);
+            }
+            if (imported.outcome !== "unchanged") {
+              await rollbackImportedAsset({
+                workspaceRoot: workspace.root,
+                stateDir: config.stateDir,
+                workspaceId,
+                path,
+                displacedTrashId,
+              });
+            }
+            throw error;
+          }
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
@@ -5097,6 +5190,7 @@ export function createServer(
   );
   const reviewCheckpoints = createReviewCheckpointManager();
   const artifacts = new ArtifactLedger(config.stateDir);
+  const assetReceipts = new AssetReceiptStore(config.stateDir);
   const publisher = new ArtifactPublisher(config.publicBaseUrl, artifacts, {
     audit: (event) =>
       logEvent(config.logging, "info", event.event, {
@@ -5345,6 +5439,7 @@ export function createServer(
         inspectors,
         runners,
         artifacts,
+        assetReceipts,
         publisher,
         runtime,
         workspaceApp,
@@ -5453,6 +5548,7 @@ export function createServer(
           inspectors,
           runners,
           artifacts,
+          assetReceipts,
           publisher,
           runtime,
           workspaceApp,

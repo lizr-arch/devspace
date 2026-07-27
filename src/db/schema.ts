@@ -156,6 +156,32 @@ export const projectMemoryPrivilegeAuthorizations = sqliteTable(
   ],
 );
 
+export const assetImportReceipts = sqliteTable(
+  "asset_import_receipts",
+  {
+    importReceiptId: text("import_receipt_id").primaryKey(),
+    workspaceSessionId: text("workspace_session_id")
+      .notNull()
+      .references(() => workspaceSessions.id, { onDelete: "cascade" }),
+    destinationPath: text("destination_path").notNull(),
+    outcome: text("outcome").notNull(),
+    sha256: text("sha256").notNull(),
+    artifactId: text("artifact_id").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceFileId: text("source_file_id"),
+    receiptJson: text("receipt_json").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("asset_import_receipts_workspace_path_idx").on(
+      table.workspaceSessionId,
+      table.destinationPath,
+      table.createdAt,
+    ),
+    index("asset_import_receipts_source_file_idx").on(table.sourceFileId),
+  ],
+);
+
 export type WorkspaceSessionRow = typeof workspaceSessions.$inferSelect;
 export type NewWorkspaceSessionRow = typeof workspaceSessions.$inferInsert;
 export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;
