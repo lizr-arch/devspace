@@ -1249,6 +1249,8 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
       };
     case "start_job":
     case "start_capture":
+    case "wait_job":
+    case "list_jobs":
     case "poll_job":
     case "cancel_job":
       return { icon: jobIcon(), title: "Job", label, tone: "job" };

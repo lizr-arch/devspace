@@ -25,7 +25,7 @@ const tempRoot = mkdtempSync(join(tmpdir(), "devspace-doctor-test-"));
 const testWorkspaceAppBuild = createWorkspaceAppFixture("shared");
 assert.equal(
   TOOL_SCHEMA_REVISION,
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-v1.2026-07-28",
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-job-wait-resume-p0-v1.2026-07-29",
 );
 
 try {
@@ -406,7 +406,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionConcurrentCalls, 20);
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
-    assert.equal(probe.toolNames?.length, 54);
+    assert.equal(probe.toolNames?.length, 56);
     assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
     assert.equal(probe.workspaceAppTelemetryTool.ok, true);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
@@ -504,6 +504,8 @@ async function testPublicExternalClientProbe(): Promise<void> {
         "project_memory_preflight",
         "start_job",
         "start_capture",
+        "wait_job",
+        "list_jobs",
         "poll_job",
         "cancel_job",
       ].filter((tool) => !probe.widgetToolNames?.includes(tool)),

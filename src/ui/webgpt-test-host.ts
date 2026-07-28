@@ -325,7 +325,7 @@ async function runSuite(): Promise<void> {
     return "无效 URI 返回 HTTP 404，不会错误回落到当前模板";
   });
 
-  await run("58 工具逐项 Workspace App 卡片矩阵", async () => {
+  await run("60 工具逐项 Workspace App 卡片矩阵", async () => {
     toolMatrixResults = await runToolContractMatrix();
     const failedTools = toolMatrixResults.filter((result) => !result.passed);
     if (failedTools.length > 0) {

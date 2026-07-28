@@ -131,8 +131,8 @@ try {
   );
   assert.equal(report.passed, 11);
   assert.equal(report.activeFrames, 16);
-  assert.equal(report.toolMatrix.total, 58);
-  assert.equal(report.toolMatrix.passed, 58);
+  assert.equal(report.toolMatrix.total, 60);
+  assert.equal(report.toolMatrix.passed, 60);
   assert.equal(
     report.toolMatrix.failed,
     0,
@@ -141,7 +141,7 @@ try {
       .map((result) => `${result.tool}: ${result.detail}`)
       .join("\n"),
   );
-  assert.equal(report.toolMatrix.results.length, 58);
+  assert.equal(report.toolMatrix.results.length, 60);
   assert.ok(report.toolMatrix.results.every((result) => result.passed));
   assert.deepEqual(unexpectedConsoleErrors, []);
   assert.deepEqual(unexpectedRequestFailures, []);

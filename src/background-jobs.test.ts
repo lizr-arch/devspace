@@ -31,6 +31,8 @@ writeFileSync(
     private: true,
     scripts: {
       verify: "node -e \"console.log('job-ok')\"",
+      slow: "node -e \"setTimeout(() => console.log('slow-job-ok'), 150)\"",
+      burst: "node -e \"process.stdout.write('x'.repeat(12000))\"",
       wait: 'node -e "setTimeout(() => {}, 30000)"',
     },
   }),
@@ -62,6 +64,86 @@ try {
   assert.equal(completed.status, "succeeded");
   assert.match(completed.output ?? "", /job-ok/);
   assert.equal(completed.exitCode, 0);
+
+  const slowStarted = await manager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "slow"],
+    timeoutSeconds: 30,
+  });
+  assert.match(slowStarted.outputCursor ?? "", /^jobc_/);
+  const waitStartedAt = performance.now();
+  const slowCompleted = await manager.wait(
+    slowStarted.jobId,
+    slowStarted.outputCursor,
+    2,
+  );
+  assert.equal(slowCompleted.status, "succeeded");
+  assert.equal(slowCompleted.waitTimedOut, false);
+  assert.match(slowCompleted.output ?? "", /slow-job-ok/);
+  assert.ok(performance.now() - waitStartedAt >= 80);
+  assert.equal(slowCompleted.outputMode, "tail");
+  assert.match(slowCompleted.outputCursor ?? "", /^jobc_/);
+  const noRepeatedOutput = await manager.wait(
+    slowStarted.jobId,
+    slowCompleted.outputCursor,
+    1,
+  );
+  assert.equal(noRepeatedOutput.output, "");
+
+  const burstStarted = await manager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "burst"],
+    timeoutSeconds: 30,
+  });
+  const burstCompleted = await manager.wait(
+    burstStarted.jobId,
+    burstStarted.outputCursor,
+    2,
+  );
+  assert.equal(burstCompleted.status, "succeeded");
+  assert.ok(Buffer.byteLength(burstCompleted.output ?? "") <= 2 * 1024);
+  assert.ok((burstCompleted.outputDiscardedBeforeBytes ?? 0) > 0);
+  assert.equal(
+    manager.list("ws_test", { limit: 2 })[0]?.jobId,
+    burstStarted.jobId,
+  );
+  assert.throws(
+    () => manager.list("ws_test", { limit: 51 }),
+    /limit must be between/,
+  );
+  await assert.rejects(
+    () => manager.wait(completed.jobId, burstCompleted.outputCursor, 1),
+    /Invalid outputCursor/,
+  );
+
+  const waitTimeoutJob = await manager.start({
+    workspaceId: "ws_test",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "wait"],
+    timeoutSeconds: 30,
+  });
+  assert.equal(manager.list("ws_test", { activeOnly: true }).length, 1);
+  const waitingHeartbeat = await manager.wait(
+    waitTimeoutJob.jobId,
+    waitTimeoutJob.outputCursor,
+    1,
+  );
+  assert.equal(waitingHeartbeat.status, "running");
+  assert.equal(waitingHeartbeat.waitTimedOut, true);
+  manager.cancel(waitTimeoutJob.jobId);
+  assert.equal(
+    (await manager.wait(waitTimeoutJob.jobId, waitingHeartbeat.outputCursor, 5))
+      .status,
+    "cancelled",
+  );
 
   if (process.platform !== "win32") {
     const launchdBin = join(root, "launchd-bin");
