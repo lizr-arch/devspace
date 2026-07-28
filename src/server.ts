@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, existsSync, lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import {
@@ -161,6 +162,13 @@ import {
   McpSessionRegistry,
   type McpSessionSnapshot,
 } from "./mcp-session-registry.js";
+import {
+  WEBGPT_TEST_HOST_ENTRY,
+  WEBGPT_TEST_PROBE_JAVASCRIPT,
+  WEBGPT_TEST_SECURITY_HEADERS,
+  isWorkspaceAppTestResourceUri,
+  prepareWebGptTestHostHtml,
+} from "./webgpt-local-test.js";
 
 type Transport = StreamableHTTPServerTransport;
 const PACKAGE_VERSION = (
@@ -1248,6 +1256,10 @@ function uiBuildDirectoryUrl(): URL {
   return new URL("../dist/ui/", import.meta.url);
 }
 
+function webGptTestBuildDirectoryUrl(): URL {
+  return new URL("../dist/webgpt-test/", import.meta.url);
+}
+
 export function resolveWorkspaceAppBuild(
   input: {
     manifestUrl?: URL;
@@ -1339,8 +1351,8 @@ function assetUrl(baseUrl: string, assetPath: string): string {
 function workspaceAppHtml(
   config: ServerConfig,
   workspaceApp: WorkspaceAppBuild,
+  baseUrl = assetBaseUrl(config),
 ): string {
-  const baseUrl = assetBaseUrl(config);
   const entry = workspaceApp.entry;
   const stylesheets = (entry.css ?? [])
     .map(
@@ -6430,7 +6442,9 @@ export function createServer(
       if (
         res.statusCode >= 400 &&
         path !== "/monitor" &&
-        !path.startsWith("/monitor/")
+        !path.startsWith("/monitor/") &&
+        path !== "/app-test" &&
+        !path.startsWith("/app-test/")
       ) {
         monitorEvents.record({
           source: "http",
@@ -6522,6 +6536,98 @@ export function createServer(
       }),
     });
   });
+
+  if (workspaceApp) {
+    app.get("/app-test", (req, res) => {
+      if (!requireLocalMonitor(req, res)) return;
+      for (const [name, value] of Object.entries(
+        WEBGPT_TEST_SECURITY_HEADERS,
+      )) {
+        res.setHeader(name, value);
+      }
+      try {
+        const html = readFileSync(
+          join(
+            fileURLToPath(webGptTestBuildDirectoryUrl()),
+            WEBGPT_TEST_HOST_ENTRY,
+          ),
+          "utf8",
+        );
+        res.type("html").send(prepareWebGptTestHostHtml(html));
+      } catch {
+        res
+          .status(503)
+          .type("text")
+          .send("Local Web GPT test host is unavailable. Run npm run build.");
+      }
+    });
+
+    app.get("/app-test/api", (req, res) => {
+      if (!requireLocalMonitor(req, res)) return;
+      for (const [name, value] of Object.entries(
+        WEBGPT_TEST_SECURITY_HEADERS,
+      )) {
+        res.setHeader(name, value);
+      }
+
+      const requestedResourceUri =
+        typeof req.query.uri === "string" ? req.query.uri : undefined;
+      if (!requestedResourceUri) {
+        res.json({
+          currentResourceUri: workspaceApp.resourceUri,
+          legacyResourceUri: LEGACY_WORKSPACE_APP_RESOURCE_URI,
+          previousBuildResourceUri:
+            "ui://devspace/workspace-app-0000000000000000.html",
+          declaredUi: workspaceAppUiMetadata(config),
+        });
+        return;
+      }
+
+      if (
+        !isWorkspaceAppTestResourceUri(
+          requestedResourceUri,
+          workspaceApp.resourceUri,
+          LEGACY_WORKSPACE_APP_RESOURCE_URI,
+        )
+      ) {
+        res.status(404).json({ error: "Workspace App resource not found." });
+        return;
+      }
+
+      const localAssetBase = `${req.protocol}://${req.get("host")}/mcp-app-assets`;
+      res.json({
+        uri: requestedResourceUri,
+        mimeType: RESOURCE_MIME_TYPE,
+        html: workspaceAppHtml(config, workspaceApp, localAssetBase),
+        _meta: {
+          ui: workspaceAppUiMetadata(config),
+        },
+      });
+    });
+
+    app.get("/app-test/probe.js", (req, res) => {
+      if (!requireLocalMonitor(req, res)) return;
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.type("application/javascript").send(WEBGPT_TEST_PROBE_JAVASCRIPT);
+    });
+
+    app.use(
+      "/app-test/assets",
+      (req, res, next) => {
+        if (!requireLocalMonitor(req, res)) return;
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        next();
+      },
+      express.static(
+        join(fileURLToPath(webGptTestBuildDirectoryUrl()), "assets"),
+        {
+          fallthrough: false,
+        },
+      ),
+    );
+  }
 
   app.get("/artifacts/:token", async (req, res) => {
     const token = typeof req.params.token === "string" ? req.params.token : "";

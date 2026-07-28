@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>DevSpace Web GPT 本地兼容性实验室</title>
+  </head>
+  <body data-suite-status="idle">
+    <main class="lab">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">DEVSPACE / MCP APPS</p>
+          <h1>Web GPT 本地兼容性实验室</h1>
+          <p class="lede">
+            在真实 Web GPT 之前，验证模板 URI、沙箱握手、结果卡更新、CSP
+            诊断与多卡并发。
+          </p>
+        </div>
+        <div class="suite-state" aria-live="polite">
+          <span id="suite-dot" class="dot"></span>
+          <span id="suite-state">等待运行</span>
+        </div>
+      </header>
+
+      <section class="controls" aria-label="测试控制">
+        <label>
+          并发卡片
+          <select id="concurrency">
+            <option value="1">1</option>
+            <option value="4">4</option>
+            <option value="8" selected>8</option>
+            <option value="16">16</option>
+          </select>
+        </label>
+        <button id="run-suite" type="button">运行全套本地测试</button>
+        <button id="toggle-theme" class="secondary" type="button">
+          切换宿主主题
+        </button>
+        <span id="resource-uri" class="uri">正在读取当前模板…</span>
+      </section>
+
+      <section class="summary" aria-label="测试摘要">
+        <article>
+          <span>通过</span>
+          <strong id="passed">0</strong>
+        </article>
+        <article>
+          <span>失败</span>
+          <strong id="failed">0</strong>
+        </article>
+        <article>
+          <span>耗时</span>
+          <strong id="duration">—</strong>
+        </article>
+        <article>
+          <span>活跃 iframe</span>
+          <strong id="active-frames">0</strong>
+        </article>
+      </section>
+
+      <section class="results-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">AUTOMATED GATES</p>
+            <h2>门禁结果</h2>
+          </div>
+          <p>故障注入项在成功捕获故障时记为通过。</p>
+        </div>
+        <ol id="results" class="results"></ol>
+      </section>
+
+      <section class="frames-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">SANDBOX VIEWS</p>
+            <h2>实际 Workspace App 卡片</h2>
+          </div>
+          <p>每张卡片都运行在独立 sandbox iframe，通过 AppBridge 通信。</p>
+        </div>
+        <div id="frames" class="frames"></div>
+      </section>
+
+      <section class="events-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">OBSERVABILITY</p>
+            <h2>宿主事件</h2>
+          </div>
+          <button id="clear-events" class="secondary small" type="button">
+            清空
+          </button>
+        </div>
+        <pre id="events">等待事件…</pre>
+      </section>
+    </main>
+    <script type="module" src="./webgpt-test-host.ts"></script>
+  </body>
+</html>
