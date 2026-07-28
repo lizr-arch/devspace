@@ -2,7 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { accessSync, existsSync, lstatSync, readFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  McpServer,
+  ResourceTemplate,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import {
   mcpAuthRouter,
@@ -10,7 +13,11 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ErrorCode,
+  isInitializeRequest,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   checkResourceAllowed,
   resourceUrlFromServerUrl,
@@ -164,6 +171,11 @@ const PACKAGE_VERSION = (
 export const TOOL_SCHEMA_REVISION =
   "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-v1.2026-07-28";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+export const LEGACY_WORKSPACE_APP_RESOURCE_URI =
+  "ui://devspace/workspace-app.html";
+export const VERSIONED_WORKSPACE_APP_RESOURCE_TEMPLATE =
+  "ui://devspace/workspace-app-{buildFingerprint}.html";
+const WORKSPACE_APP_RESOURCE_FINGERPRINT_PATTERN = /^[0-9a-f]{16}$/;
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
   destructiveHint: true,
@@ -1354,6 +1366,112 @@ ${stylesheets}
 </html>`;
 }
 
+function workspaceAppResourceResult(
+  config: ServerConfig,
+  workspaceApp: WorkspaceAppBuild,
+  requestedResourceUri: string,
+) {
+  return {
+    contents: [
+      {
+        uri: requestedResourceUri,
+        mimeType: RESOURCE_MIME_TYPE,
+        text: workspaceAppHtml(config, workspaceApp),
+        _meta: {
+          ui: workspaceAppUiMetadata(config),
+        },
+      },
+    ],
+  };
+}
+
+export function registerWorkspaceAppResources(
+  server: McpServer,
+  config: ServerConfig,
+  workspaceApp: WorkspaceAppBuild,
+): void {
+  const appResourceConfig = {
+    description:
+      "Versioned interactive card for viewing DevSpace workspace and tool results.",
+    _meta: {
+      ui: workspaceAppUiMetadata(config),
+    },
+  };
+
+  registerAppResource(
+    server,
+    "DevSpace Workspace App",
+    workspaceApp.resourceUri,
+    appResourceConfig,
+    async () =>
+      workspaceAppResourceResult(
+        config,
+        workspaceApp,
+        workspaceApp.resourceUri,
+      ),
+  );
+
+  registerAppResource(
+    server,
+    "DevSpace Workspace App legacy compatibility",
+    LEGACY_WORKSPACE_APP_RESOURCE_URI,
+    {
+      ...appResourceConfig,
+      description:
+        "Compatibility alias for DevSpace Workspace App cards created before versioned resource URIs.",
+    },
+    async () => {
+      logEvent(config.logging, "info", "workspace_app_compat_resource_read", {
+        compatibilityKind: "legacy",
+        requestedResourceUri: LEGACY_WORKSPACE_APP_RESOURCE_URI,
+        currentResourceUri: workspaceApp.resourceUri,
+      });
+      return workspaceAppResourceResult(
+        config,
+        workspaceApp,
+        LEGACY_WORKSPACE_APP_RESOURCE_URI,
+      );
+    },
+  );
+
+  server.registerResource(
+    "DevSpace Workspace App version compatibility",
+    new ResourceTemplate(VERSIONED_WORKSPACE_APP_RESOURCE_TEMPLATE, {
+      list: undefined,
+    }),
+    {
+      ...appResourceConfig,
+      mimeType: RESOURCE_MIME_TYPE,
+      description:
+        "Compatibility template for DevSpace Workspace App cards created by earlier builds.",
+    },
+    async (uri, variables) => {
+      const requestedFingerprint = variables.buildFingerprint;
+      if (
+        typeof requestedFingerprint !== "string" ||
+        !WORKSPACE_APP_RESOURCE_FINGERPRINT_PATTERN.test(requestedFingerprint)
+      ) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Resource ${uri.toString()} not found`,
+        );
+      }
+
+      const requestedResourceUri = uri.toString();
+      logEvent(config.logging, "info", "workspace_app_compat_resource_read", {
+        compatibilityKind: "versioned",
+        requestedResourceUri,
+        currentResourceUri: workspaceApp.resourceUri,
+      });
+      return workspaceAppResourceResult(
+        config,
+        workspaceApp,
+        requestedResourceUri,
+      );
+    },
+  );
+}
+
 function appCsp(config: Pick<ServerConfig, "publicBaseUrl">): {
   resourceDomains: string[];
   connectDomains: string[];
@@ -1583,30 +1701,7 @@ function createMcpServer(
   );
 
   if (workspaceApp) {
-    registerAppResource(
-      server,
-      "DevSpace Workspace App",
-      workspaceApp.resourceUri,
-      {
-        description:
-          "Versioned interactive card for viewing DevSpace workspace and tool results.",
-        _meta: {
-          ui: workspaceAppUiMetadata(config),
-        },
-      },
-      async () => ({
-        contents: [
-          {
-            uri: workspaceApp.resourceUri,
-            mimeType: RESOURCE_MIME_TYPE,
-            text: workspaceAppHtml(config, workspaceApp),
-            _meta: {
-              ui: workspaceAppUiMetadata(config),
-            },
-          },
-        ],
-      }),
-    );
+    registerWorkspaceAppResources(server, config, workspaceApp);
 
     registerAppTool(
       server,
