@@ -93,6 +93,12 @@ const html = liveMonitorHtml();
 assert.match(html, /DevSpace Live Monitor/);
 assert.match(html, /负载分数是保守的启发式信号/);
 assert.match(html, /resource-chart/);
+assert.match(html, /调用参数/);
+assert.match(html, /项目门禁/);
+assert.match(html, /服务故障/);
+assert.match(html, /events-invocation/);
+assert.match(html, /events-project_gate/);
+assert.match(html, /events-service/);
 assert.match(html, /setInterval\(refresh,1000\)/);
 assert.doesNotMatch(html, /https?:\/\//);
 
@@ -134,7 +140,10 @@ try {
     eventLoop: { p95Ms: number };
     system: { disk: { availableGiB: number } };
     resourceHistory: unknown[];
-    errors: { recent: Array<{ code: string }>; persisted: boolean };
+    errors: {
+      recent: Array<{ code: string; category: string }>;
+      persisted: boolean;
+    };
     jobs: { recentFailures: unknown[] };
   };
   assert.equal(payload.service.name, "devspace");
@@ -152,9 +161,12 @@ try {
   const afterMissing = (await (
     await fetch(`${baseUrl}/monitor/api`)
   ).json()) as {
-    errors: { recent: Array<{ code: string; message: string }> };
+    errors: {
+      recent: Array<{ code: string; category: string; message: string }>;
+    };
   };
   assert.equal(afterMissing.errors.recent[0]?.code, "HTTP_404");
+  assert.equal(afterMissing.errors.recent[0]?.category, "invocation");
   assert.equal(
     afterMissing.errors.recent[0]?.message,
     "GET /other returned 404",
