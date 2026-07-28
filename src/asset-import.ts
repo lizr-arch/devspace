@@ -32,6 +32,23 @@ export const MAX_IMPORT_BYTES: Record<ImportAssetFormat, number> = {
 
 const MAX_REDIRECTS = 5;
 const MAX_BASE64_CHARACTERS = Math.ceil((MAX_IMPORT_BYTES.GLB * 4) / 3) + 4;
+export const DEFAULT_ASSET_DOWNLOAD_TIMEOUTS = Object.freeze({
+  connectOrHeadersMs: 30_000,
+  idleReadMs: 30_000,
+  totalMs: 180_000,
+});
+
+export interface AssetDownloadTimeouts {
+  connectOrHeadersMs: number;
+  idleReadMs: number;
+  totalMs: number;
+}
+
+export interface HttpsDownloadOptions {
+  fetchImpl?: typeof fetch;
+  assertPublicHostnameImpl?: (hostname: string) => Promise<void>;
+  timeouts?: Partial<AssetDownloadTimeouts>;
+}
 
 export interface ImportAssetInput {
   destination: string;
@@ -219,56 +236,220 @@ async function downloadOpenAiFile(
   };
 }
 
-async function downloadHttpsBytes(
+export async function downloadHttpsBytes(
   sourceUrl: string,
   maxBytes: number,
+  options: HttpsDownloadOptions = {},
 ): Promise<{ data: Buffer; sourceHost: string }> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const assertPublicHostnameImpl =
+    options.assertPublicHostnameImpl ?? assertPublicHostname;
+  const timeouts = normalizedDownloadTimeouts(options.timeouts);
+  let bytes = 0;
   let current = parsePublicHttpsUrl(sourceUrl);
-  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
-    await assertPublicHostname(current.hostname);
-    const response = await fetch(current, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(60_000),
-      headers: { accept: "application/octet-stream,*/*;q=0.8" },
-    });
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location || redirects === MAX_REDIRECTS) {
-        throw new Error("ASSET_DOWNLOAD_FAILED: Redirect policy rejected.");
+  const totalTimeout = createDownloadTimeout(
+    timeouts.totalMs,
+    () => new AssetDownloadTimeoutError("total", timeouts.totalMs, bytes),
+  );
+  try {
+    for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+      const requestTimeout = createDownloadTimeout(
+        timeouts.connectOrHeadersMs,
+        () =>
+          new AssetDownloadTimeoutError(
+            "connect_or_headers",
+            timeouts.connectOrHeadersMs,
+            bytes,
+          ),
+      );
+      const requestSignal = AbortSignal.any([
+        totalTimeout.controller.signal,
+        requestTimeout.controller.signal,
+      ]);
+      let response: Response;
+      try {
+        await awaitWithSignal(
+          assertPublicHostnameImpl(current.hostname),
+          requestSignal,
+        );
+        response = await fetchImpl(current, {
+          redirect: "manual",
+          signal: requestSignal,
+          headers: { accept: "application/octet-stream,*/*;q=0.8" },
+        });
+      } catch (error) {
+        throw normalizedDownloadError(
+          error,
+          totalTimeout.controller.signal,
+          requestTimeout.controller.signal,
+        );
+      } finally {
+        requestTimeout.clear();
       }
-      current = parsePublicHttpsUrl(new URL(location, current).toString());
-      continue;
-    }
-    if (!response.ok) {
-      throw new Error(
-        `ASSET_DOWNLOAD_FAILED: HTTPS download returned ${response.status}.`,
-      );
-    }
-    const declaredLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-      throw new Error(`ASSET_TOO_LARGE: Asset exceeds ${maxBytes} bytes.`);
-    }
-    if (!response.body) {
-      throw new Error(
-        "ASSET_DOWNLOAD_FAILED: Download returned an empty body.",
-      );
-    }
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    for await (const chunk of response.body) {
-      const buffer = Buffer.from(chunk);
-      bytes += buffer.length;
-      if (bytes > maxBytes) {
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        await response.body?.cancel().catch(() => undefined);
+        if (!location || redirects === MAX_REDIRECTS) {
+          throw new Error("ASSET_DOWNLOAD_FAILED: Redirect policy rejected.");
+        }
+        current = parsePublicHttpsUrl(new URL(location, current).toString());
+        continue;
+      }
+      if (!response.ok) {
+        throw new Error(
+          `ASSET_DOWNLOAD_FAILED: HTTPS download returned ${response.status}.`,
+        );
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
         throw new Error(`ASSET_TOO_LARGE: Asset exceeds ${maxBytes} bytes.`);
       }
-      chunks.push(buffer);
+      if (!response.body) {
+        throw new Error(
+          "ASSET_DOWNLOAD_FAILED: Download returned an empty body.",
+        );
+      }
+      const chunks: Buffer[] = [];
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const idleTimeout = createDownloadTimeout(
+            timeouts.idleReadMs,
+            () =>
+              new AssetDownloadTimeoutError(
+                "body_idle",
+                timeouts.idleReadMs,
+                bytes,
+              ),
+          );
+          let read: ReadableStreamReadResult<Uint8Array>;
+          try {
+            read = await awaitWithSignal(
+              reader.read(),
+              AbortSignal.any([
+                totalTimeout.controller.signal,
+                idleTimeout.controller.signal,
+              ]),
+            );
+          } catch (error) {
+            const normalized = normalizedDownloadError(
+              error,
+              totalTimeout.controller.signal,
+              idleTimeout.controller.signal,
+            );
+            void reader.cancel(normalized).catch(() => undefined);
+            throw normalized;
+          } finally {
+            idleTimeout.clear();
+          }
+          if (read.done) break;
+          const buffer = Buffer.from(read.value);
+          bytes += buffer.length;
+          if (bytes > maxBytes) {
+            throw new Error(
+              `ASSET_TOO_LARGE: Asset exceeds ${maxBytes} bytes.`,
+            );
+          }
+          chunks.push(buffer);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      return {
+        data: Buffer.concat(chunks, bytes),
+        sourceHost: current.hostname,
+      };
     }
-    return {
-      data: Buffer.concat(chunks, bytes),
-      sourceHost: current.hostname,
-    };
+    throw new Error("ASSET_DOWNLOAD_FAILED: Download did not complete.");
+  } finally {
+    totalTimeout.clear();
   }
-  throw new Error("ASSET_DOWNLOAD_FAILED: Download did not complete.");
+}
+
+type AssetDownloadTimeoutPhase = "connect_or_headers" | "body_idle" | "total";
+
+class AssetDownloadTimeoutError extends Error {
+  constructor(
+    phase: AssetDownloadTimeoutPhase,
+    timeoutMs: number,
+    receivedBytes: number,
+  ) {
+    super(
+      `ASSET_DOWNLOAD_TIMEOUT: phase=${phase}; timeoutMs=${timeoutMs}; receivedBytes=${receivedBytes}.`,
+    );
+    this.name = "AssetDownloadTimeoutError";
+  }
+}
+
+function normalizedDownloadTimeouts(
+  input: Partial<AssetDownloadTimeouts> | undefined,
+): AssetDownloadTimeouts {
+  const timeouts = {
+    ...DEFAULT_ASSET_DOWNLOAD_TIMEOUTS,
+    ...input,
+  };
+  for (const [name, value] of Object.entries(timeouts)) {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(
+        `ASSET_DOWNLOAD_CONFIG_INVALID: ${name} must be a positive integer.`,
+      );
+    }
+  }
+  if (timeouts.totalMs < timeouts.connectOrHeadersMs) {
+    throw new Error(
+      "ASSET_DOWNLOAD_CONFIG_INVALID: totalMs must be at least connectOrHeadersMs.",
+    );
+  }
+  return timeouts;
+}
+
+function createDownloadTimeout(
+  timeoutMs: number,
+  reason: () => AssetDownloadTimeoutError,
+): {
+  controller: AbortController;
+  clear: () => void;
+} {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(reason()), timeoutMs);
+  return {
+    controller,
+    clear: () => clearTimeout(timer),
+  };
+}
+
+async function awaitWithSignal<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function normalizedDownloadError(
+  error: unknown,
+  totalSignal: AbortSignal,
+  phaseSignal: AbortSignal,
+): unknown {
+  if (totalSignal.aborted) return totalSignal.reason;
+  if (phaseSignal.aborted) return phaseSignal.reason;
+  return error;
 }
 
 function parsePublicHttpsUrl(value: string): URL {

@@ -132,6 +132,13 @@ uses a 256-bit short-lived bearer token kept only in memory. Raster images are
 served with `nosniff`, `no-store`, sandboxed CSP, and safe disposition headers;
 active formats are not inlined. A restart invalidates every publication URL.
 
+Conversation-file and HTTPS asset intake enforces public HTTPS, bounded
+redirects, DNS/IP SSRF checks, format-specific byte limits, a 30-second
+connect/response-header deadline, a 30-second body-idle deadline, and a
+180-second total deadline. Timeout errors report only the phase, configured
+deadline, and bytes received. Temporary signed download URLs are never written
+to logs, receipts, project files, or `devspace_info`.
+
 ## Project Memory SHADOW Boundary
 
 Project Memory commands come only from the operator's DevSpace configuration.

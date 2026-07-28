@@ -285,9 +285,10 @@ DevSpace gives ChatGPT tools to:
 - inspect the running build/tool fingerprint and recover persisted checkout or
   managed-worktree workspace IDs after reconnecting
 - read, write, and edit files inside the opened workspace
-- import original PNG bytes from a public HTTPS result URL or Base64 data with
-  workspace path checks, a 25 MiB limit, overwrite protection, and a returned
-  SHA-256 digest
+- import original PNG bytes from a ChatGPT file attachment, public HTTPS result
+  URL, or Base64 data with workspace path checks, a 25 MiB limit, overwrite
+  protection, bounded progressive-download timeouts, and a returned SHA-256
+  digest
 - search code and inspect directories
 - run shell commands for tests, builds, git, and package scripts
 - start, poll, and cancel bounded background validation jobs through approved

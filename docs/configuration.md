@@ -235,6 +235,23 @@ per workspace target, quarantines incomplete environments with a marker,
 requires `pyvenv.cfg` plus a healthy interpreter whose `sys.prefix` matches the
 target, and removes or leaves quarantined any failed creation.
 
+## Asset Intake Download Timeouts
+
+`import_png`, `import_asset`, approved-image archival, and approved-asset
+recovery use one shared HTTPS downloader. The operator-owned defaults are:
+
+```text
+connect or response headers = 30 seconds
+idle between body chunks    = 30 seconds
+total download              = 180 seconds
+```
+
+Receiving a body chunk resets only the idle timer, so an active attachment can
+take longer than 60 seconds without being aborted. The total deadline still
+bounds the request across DNS checks, redirects, headers, and body transfer.
+`devspace_info.assetIntake` reports the running values. MCP callers cannot
+override them.
+
 ## Project Memory SHADOW Preflight
 
 Project Memory integration is opt-in and operator configured in

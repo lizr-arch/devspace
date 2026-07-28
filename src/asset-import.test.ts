@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { importAsset } from "./asset-import.js";
+import { downloadHttpsBytes, importAsset } from "./asset-import.js";
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -167,7 +174,176 @@ try {
   assert.equal(replaced.outcome, "replaced");
   assert.match(replaced.previousSha256 ?? "", /^[0-9a-f]{64}$/);
   assert.deepEqual(await readFile(preserved), REPLACEMENT_PNG);
+  await testDownloadTimeouts(root);
   console.log("asset import tests passed");
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+async function testDownloadTimeouts(root: string): Promise<void> {
+  const signedUrl =
+    "https://files.example.test/asset.png?signature=must-not-leak";
+  const allowPublicHostname = async (): Promise<void> => undefined;
+
+  const activeDownload = await downloadHttpsBytes(signedUrl, PNG.length, {
+    assertPublicHostnameImpl: allowPublicHostname,
+    fetchImpl: streamingFetch(splitBuffer(PNG, 4), 20),
+    timeouts: {
+      connectOrHeadersMs: 50,
+      idleReadMs: 50,
+      totalMs: 250,
+    },
+  });
+  assert.deepEqual(activeDownload.data, PNG);
+
+  const headerTimeoutFetch = (async (
+    _input: string | URL | Request,
+    init?: RequestInit,
+  ) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      signal?.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      });
+    })) as typeof fetch;
+  await assert.rejects(
+    downloadHttpsBytes(signedUrl, PNG.length, {
+      assertPublicHostnameImpl: allowPublicHostname,
+      fetchImpl: headerTimeoutFetch,
+      timeouts: {
+        connectOrHeadersMs: 20,
+        idleReadMs: 50,
+        totalMs: 100,
+      },
+    }),
+    (error: unknown) => {
+      assert.match(
+        String(error),
+        /ASSET_DOWNLOAD_TIMEOUT: phase=connect_or_headers; timeoutMs=20; receivedBytes=0/,
+      );
+      assert.doesNotMatch(String(error), /must-not-leak|files\.example\.test/);
+      return true;
+    },
+  );
+
+  const idleTimeoutFetch = (async () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(PNG.subarray(0, 8));
+        },
+      }),
+      { status: 200 },
+    )) as typeof fetch;
+  await assert.rejects(
+    downloadHttpsBytes(signedUrl, PNG.length, {
+      assertPublicHostnameImpl: allowPublicHostname,
+      fetchImpl: idleTimeoutFetch,
+      timeouts: {
+        connectOrHeadersMs: 50,
+        idleReadMs: 20,
+        totalMs: 100,
+      },
+    }),
+    /ASSET_DOWNLOAD_TIMEOUT: phase=body_idle; timeoutMs=20; receivedBytes=8/,
+  );
+
+  await assert.rejects(
+    downloadHttpsBytes(signedUrl, PNG.length, {
+      assertPublicHostnameImpl: allowPublicHostname,
+      fetchImpl: streamingFetch(splitBuffer(PNG, PNG.length), 20),
+      timeouts: {
+        connectOrHeadersMs: 50,
+        idleReadMs: 50,
+        totalMs: 90,
+      },
+    }),
+    /ASSET_DOWNLOAD_TIMEOUT: phase=total; timeoutMs=90; receivedBytes=[1-9]/,
+  );
+
+  const timeoutDestination = join(root, "timeout-assets", "never-written.png");
+  await assert.rejects(
+    importAsset({
+      workspaceRoot: root,
+      destination: timeoutDestination,
+      file: {
+        download_url: signedUrl,
+        file_id: "file_timeout_fixture",
+        mime_type: "image/png",
+        file_name: "fixture.png",
+      },
+      httpsDownloader: (url, maxBytes) =>
+        downloadHttpsBytes(url, maxBytes, {
+          assertPublicHostnameImpl: allowPublicHostname,
+          fetchImpl: headerTimeoutFetch,
+          timeouts: {
+            connectOrHeadersMs: 20,
+            idleReadMs: 50,
+            totalMs: 100,
+          },
+        }),
+    }),
+    /ASSET_DOWNLOAD_TIMEOUT: phase=connect_or_headers/,
+  );
+  await assert.rejects(access(timeoutDestination));
+  assert.equal(
+    (await readdir(root, { recursive: true })).some((path) =>
+      path.includes(".devspace-"),
+    ),
+    false,
+  );
+}
+
+function splitBuffer(buffer: Buffer, count: number): Buffer[] {
+  const chunkSize = Math.ceil(buffer.length / count);
+  const chunks: Buffer[] = [];
+  for (let offset = 0; offset < buffer.length; offset += chunkSize) {
+    chunks.push(buffer.subarray(offset, offset + chunkSize));
+  }
+  return chunks;
+}
+
+function streamingFetch(chunks: Buffer[], intervalMs: number): typeof fetch {
+  return (async (
+    _input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    let timer: NodeJS.Timeout | undefined;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        let index = 0;
+        const push = () => {
+          if (cancelled) return;
+          if (index >= chunks.length) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunks[index]);
+          index += 1;
+          timer = setTimeout(push, intervalMs);
+        };
+        timer = setTimeout(push, intervalMs);
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            cancelled = true;
+            if (timer) clearTimeout(timer);
+            controller.error(init.signal?.reason);
+          },
+          { once: true },
+        );
+      },
+      cancel() {
+        cancelled = true;
+        if (timer) clearTimeout(timer);
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "content-length": String(chunks.reduce((n, c) => n + c.length, 0)),
+      },
+    });
+  }) as typeof fetch;
 }

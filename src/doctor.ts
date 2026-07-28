@@ -808,6 +808,14 @@ export async function probePublicExternalClientFlow(
         const runnerEntries = Array.isArray(runnerRegistry?.runners)
           ? runnerRegistry.runners
           : [];
+        const assetIntake = asRecord(devspaceInfoStructured?.assetIntake);
+        const assetDownloadTimeouts = asRecord(assetIntake?.downloadTimeouts);
+        const assetIntakeValid =
+          numberField(assetIntake, "maxPngBytes") === 25 * 1024 * 1024 &&
+          numberField(assetDownloadTimeouts, "connectOrHeadersMs") === 30_000 &&
+          numberField(assetDownloadTimeouts, "idleReadMs") === 30_000 &&
+          numberField(assetDownloadTimeouts, "totalMs") === 180_000 &&
+          assetIntake?.signedUrlsPersisted === false;
         runnerNames = runnerEntries
           .map((runner) => stringField(asRecord(runner), "name"))
           .filter((name): name is string => Boolean(name));
@@ -828,7 +836,8 @@ export async function probePublicExternalClientFlow(
           devspaceInfo.ok &&
           schemaFingerprint &&
           reportedTools.length === toolNames.length &&
-          runnerRegistryValid
+          runnerRegistryValid &&
+          assetIntakeValid
             ? okCheck(
                 devspaceInfo.status,
                 "MCP devspace_info returned the running tool schema fingerprint.",
@@ -838,7 +847,7 @@ export async function probePublicExternalClientFlow(
                   ok: false,
                   status: devspaceInfo.status,
                   detail:
-                    "MCP devspace_info responded, but its fingerprint, tool catalog, or runner registry was incomplete.",
+                    "MCP devspace_info responded, but its fingerprint, tool catalog, runner registry, or asset-intake timeout contract was incomplete.",
                 }
               : failedCheck(devspaceInfo, "MCP devspace_info did not succeed.");
 

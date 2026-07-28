@@ -94,7 +94,11 @@ import {
   IMPORT_PNG_FILE_PARAMS_META,
   openAiFileInputSchema,
 } from "./openai-file.js";
-import { importAsset, MAX_IMPORT_BYTES } from "./asset-import.js";
+import {
+  DEFAULT_ASSET_DOWNLOAD_TIMEOUTS,
+  importAsset,
+  MAX_IMPORT_BYTES,
+} from "./asset-import.js";
 import { inspectArtifact } from "./artifact-inspector.js";
 import {
   copyWorkspacePath,
@@ -158,7 +162,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-v1.2026-07-28";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-v1.2026-07-28";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -1804,6 +1808,15 @@ function createMcpServer(
           ordinaryPythonFallback: z.literal(false),
           bootstrapTargets: z.tuple([z.literal(".venv"), z.literal("venv")]),
         }),
+        assetIntake: z.object({
+          maxPngBytes: z.number().int().positive(),
+          downloadTimeouts: z.object({
+            connectOrHeadersMs: z.number().int().positive(),
+            idleReadMs: z.number().int().positive(),
+            totalMs: z.number().int().positive(),
+          }),
+          signedUrlsPersisted: z.literal(false),
+        }),
       }),
       _meta: {},
       annotations: {
@@ -1887,6 +1900,11 @@ function createMcpServer(
           ordinaryPythonFallback: false as const,
           bootstrapTargets: [".venv", "venv"] as const,
         },
+        assetIntake: {
+          maxPngBytes: MAX_PNG_IMPORT_BYTES,
+          downloadTimeouts: DEFAULT_ASSET_DOWNLOAD_TIMEOUTS,
+          signedUrlsPersisted: false as const,
+        },
       };
       const result = [
         `DevSpace ${PACKAGE_VERSION}`,
@@ -1902,6 +1920,7 @@ function createMcpServer(
         `Allowed roots: ${config.allowedRoots.join(", ")}`,
         `Git remote write: enabled=${String(config.gitRemoteWrite.enabled)}, remotes=${config.gitRemoteWrite.approvedRemotes.join(", ") || "(none)"}, branches=${config.gitRemoteWrite.approvedDestinationBranches.join(", ") || "(none)"}, force=false`,
         `Task Python: bootstrap=${taskExecutionStatus.available ? "available" : taskExecutionStatus.configured ? "configured-unavailable" : "unconfigured"}, ordinary fallback=false`,
+        `Asset intake: PNG max=${MAX_PNG_IMPORT_BYTES} bytes; connect/headers=${DEFAULT_ASSET_DOWNLOAD_TIMEOUTS.connectOrHeadersMs}ms; idle=${DEFAULT_ASSET_DOWNLOAD_TIMEOUTS.idleReadMs}ms; total=${DEFAULT_ASSET_DOWNLOAD_TIMEOUTS.totalMs}ms; signed URLs persisted=false`,
         `Runners: ${formatRunnerSummary(runnerRegistry.runners)}`,
         runnerRegistry.diagnostics.length > 0
           ? `Runner diagnostics: ${runnerRegistry.diagnostics.join(" | ")}`
