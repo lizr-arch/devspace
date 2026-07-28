@@ -3934,7 +3934,6 @@ function createMcpServer(
         );
         try {
           await assertManagedAttachedGitWorkspace(workspace);
-          gitRemotePolicyForWorkspace(config, workspace);
           const merge = await mergeGit({
             workspaceRoot: workspace.root,
             sourceRef,
