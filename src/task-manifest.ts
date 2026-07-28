@@ -12,7 +12,8 @@ import { TaskError, type TaskErrorCode } from "./task-errors.js";
 
 export type TaskMode = "run" | "session";
 
-export type TaskRuntime = "workspace-python" | "system";
+export type TaskRuntime =
+  "workspace-python" | "operator-python-bootstrap" | "system";
 
 export interface TaskSecretBinding {
   secret_ref: string;
@@ -167,6 +168,7 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest {
     if (
       runtime !== undefined &&
       runtime !== "workspace-python" &&
+      runtime !== "operator-python-bootstrap" &&
       runtime !== "system"
     ) {
       throw new TaskError({
@@ -291,6 +293,39 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest {
           param.max = pd.max;
         }
         parameters[pname] = param;
+      }
+    }
+
+    if (runtime === "operator-python-bootstrap") {
+      const command = d.command as string[];
+      const target = command[2];
+      if (
+        mode !== "run" ||
+        command.length !== 3 ||
+        command[0] !== "-m" ||
+        command[1] !== "venv" ||
+        (target !== ".venv" && target !== "venv")
+      ) {
+        throw new TaskError({
+          code: "TASK_MANIFEST_SCHEMA_ERROR",
+          manifestPath: path,
+          taskId: id,
+          field: "command",
+          message:
+            `Task ${id}: operator-python-bootstrap must be a run task with command ` +
+            '["-m", "venv", ".venv"] or ["-m", "venv", "venv"].',
+          recoverable: true,
+        });
+      }
+      if (parameters && Object.keys(parameters).length > 0) {
+        throw new TaskError({
+          code: "TASK_MANIFEST_SCHEMA_ERROR",
+          manifestPath: path,
+          taskId: id,
+          field: "parameters",
+          message: `Task ${id}: operator-python-bootstrap does not accept parameters.`,
+          recoverable: true,
+        });
       }
     }
 

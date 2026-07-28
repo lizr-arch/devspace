@@ -1,6 +1,18 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, statSync, readFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, delimiter } from "node:path";
 import { resolveWorkspacePytestInvocation } from "./background-jobs.js";
 import {
@@ -40,6 +52,7 @@ export interface TaskSession {
     environmentSource: string;
   };
   environmentInfo?: EnvironmentInfo;
+  bootstrap?: BootstrapResult;
   errors: ParamValidationError[];
 }
 
@@ -54,6 +67,7 @@ export interface TaskRunResult {
   durationMs: number;
   runtime: TaskSession["runtime"];
   environmentInfo?: EnvironmentInfo;
+  bootstrap?: BootstrapResult;
   errors: ParamValidationError[];
 }
 
@@ -90,6 +104,31 @@ export interface EnvironmentInfo {
   dependencyLockSha256: string | null;
 }
 
+export interface BootstrapResult {
+  outcome: "created" | "unchanged";
+  target: ".venv" | "venv";
+}
+
+interface WorkspacePythonResolutionOptions {
+  allowIncompleteTarget?: ".venv" | "venv";
+}
+
+export interface TaskRunnerOptions {
+  operatorPythonCommand?: readonly [string, ...string[]];
+  workspacePythonResolver?: (
+    workspaceRoot: string,
+    platform?: NodeJS.Platform,
+    options?: WorkspacePythonResolutionOptions,
+  ) => EnvironmentInfo;
+}
+
+interface BootstrapContext {
+  key: string;
+  target: ".venv" | "venv";
+  targetPath: string;
+  markerPath: string;
+}
+
 // ---------------------------------------------------------------------------
 // Workspace Python environment resolution (standalone export)
 // ---------------------------------------------------------------------------
@@ -97,6 +136,7 @@ export interface EnvironmentInfo {
 export function resolveWorkspacePythonEnvironment(
   workspaceRoot: string,
   platform: NodeJS.Platform = process.platform,
+  options: WorkspacePythonResolutionOptions = {},
 ): EnvironmentInfo {
   const scriptsDir = platform === "win32" ? "Scripts" : "bin";
   const pythonName = platform === "win32" ? "python.exe" : "python";
@@ -105,14 +145,22 @@ export function resolveWorkspacePythonEnvironment(
     const venvRoot = join(workspaceRoot, name);
     const venvScripts = join(venvRoot, scriptsDir);
     const python = join(venvScripts, pythonName);
+    const incompleteMarker = join(venvRoot, ".devspace-bootstrap-incomplete");
 
     if (!existsSync(python)) continue;
+    if (
+      existsSync(incompleteMarker) &&
+      options.allowIncompleteTarget !== name
+    ) {
+      continue;
+    }
 
-    // Reject symlinked venv directories
+    // Reject symlinked or incomplete venv directories.
     try {
       if (
         lstatSync(venvRoot).isSymbolicLink() ||
         lstatSync(venvScripts).isSymbolicLink() ||
+        !statSync(join(venvRoot, "pyvenv.cfg")).isFile() ||
         !statSync(python).isFile()
       ) {
         continue;
@@ -121,8 +169,10 @@ export function resolveWorkspacePythonEnvironment(
       continue;
     }
 
-    // Get Python version via direct exec (no shell)
-    let pythonVersion: string | null = null;
+    // A candidate is usable only when the interpreter starts and reports that
+    // sys.prefix is the selected workspace venv. A python-shaped half install
+    // must never become the ordinary task runtime.
+    let pythonVersion: string;
     try {
       const versionOutput = execFileSync(python, ["--version"], {
         cwd: workspaceRoot,
@@ -130,11 +180,26 @@ export function resolveWorkspacePythonEnvironment(
         timeout: 10_000,
         windowsHide: true,
       }).trim();
-      // "Python 3.11.9" → "3.11.9"
       const match = versionOutput.match(/Python\s+(\S+)/);
       pythonVersion = match ? match[1] : versionOutput;
+      const prefixOutput = execFileSync(
+        python,
+        ["-c", "import os,sys; print(os.path.realpath(sys.prefix))"],
+        {
+          cwd: workspaceRoot,
+          encoding: "utf8",
+          timeout: 10_000,
+          windowsHide: true,
+        },
+      ).trim();
+      const expectedPrefix = realpathSync(venvRoot);
+      const normalizeCase = (value: string) =>
+        platform === "win32" ? value.toLowerCase() : value;
+      if (normalizeCase(prefixOutput) !== normalizeCase(expectedPrefix)) {
+        continue;
+      }
     } catch {
-      // Python --version failed — still usable but without version info
+      continue;
     }
 
     // Detect dependency lock file
@@ -179,6 +244,17 @@ export class TaskRunner {
    * Cleared when the session completes. Values are NEVER persisted.
    */
   private sessionSecretValues = new Map<string, string[]>();
+  private readonly bootstrapLocks = new Set<string>();
+  private readonly operatorPythonCommand?: readonly [string, ...string[]];
+  private readonly workspacePythonResolver: NonNullable<
+    TaskRunnerOptions["workspacePythonResolver"]
+  >;
+
+  constructor(options: TaskRunnerOptions = {}) {
+    this.operatorPythonCommand = options.operatorPythonCommand;
+    this.workspacePythonResolver =
+      options.workspacePythonResolver ?? resolveWorkspacePythonEnvironment;
+  }
 
   /**
    * Set the SecretResolver for this runner.
@@ -186,6 +262,16 @@ export class TaskRunner {
    */
   setSecretResolver(resolver: SecretResolver): void {
     this.secretResolver = resolver;
+  }
+
+  getOperatorPythonBootstrapStatus(): {
+    configured: boolean;
+    available: boolean;
+  } {
+    return {
+      configured: Boolean(this.operatorPythonCommand),
+      available: this.isOperatorPythonAvailable(),
+    };
   }
 
   async runTask(input: {
@@ -205,6 +291,19 @@ export class TaskRunner {
         manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
         taskId: input.taskId,
         message: `Task ${input.taskId} not found in manifest.`,
+        recoverable: true,
+      });
+    }
+    if (
+      task.runtime === "operator-python-bootstrap" &&
+      Object.keys(input.params).length > 0
+    ) {
+      throw new TaskError({
+        code: "TASK_PARAMETER_SCHEMA_INVALID",
+        manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+        taskId: input.taskId,
+        field: "params",
+        message: `Task ${input.taskId}: operator-python-bootstrap does not accept caller parameters.`,
         recoverable: true,
       });
     }
@@ -361,6 +460,46 @@ export class TaskRunner {
 
     // Collect secret values for redaction (MUST not leak beyond this scope)
     const secretValuesForRedaction = Array.from(resolvedSecrets.values());
+    const bootstrapTarget =
+      task.runtime === "operator-python-bootstrap"
+        ? (command[2] as ".venv" | "venv")
+        : undefined;
+    let bootstrapContext: BootstrapContext | undefined;
+
+    if (bootstrapTarget) {
+      const prepared = this.prepareBootstrap(
+        input.workspaceRoot,
+        bootstrapTarget,
+        input.taskId,
+      );
+      if (prepared.outcome === "unchanged") {
+        const durationMs = Math.round(performance.now() - startTime);
+        session.status = "succeeded";
+        session.exitCode = 0;
+        session.finishedAt = new Date().toISOString();
+        session.environmentInfo = prepared.environmentInfo;
+        session.bootstrap = {
+          outcome: "unchanged",
+          target: bootstrapTarget,
+        };
+        this.sessions.set(sessionId, session);
+        return {
+          taskId: input.taskId,
+          mode: "run",
+          sessionId,
+          status: "succeeded",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          durationMs,
+          runtime: session.runtime,
+          environmentInfo: prepared.environmentInfo,
+          bootstrap: session.bootstrap,
+          errors: [],
+        };
+      }
+      bootstrapContext = prepared.context;
+    }
 
     try {
       const result = await this.runAndWait(
@@ -370,27 +509,63 @@ export class TaskRunner {
         runEnv as Record<string, string>,
         timeoutMs,
       );
+      let effectiveExitCode = result.exitCode;
+      let bootstrapDiagnostic = "";
+      let environmentInfo = runtime.environmentInfo;
+      if (bootstrapContext) {
+        if (!result.timedOut && result.exitCode === 0) {
+          try {
+            const resolved = this.workspacePythonResolver(
+              input.workspaceRoot,
+              process.platform,
+              { allowIncompleteTarget: bootstrapContext.target },
+            );
+            if (resolved.environmentSource !== bootstrapContext.target) {
+              throw new Error("created environment did not match target");
+            }
+            unlinkSync(bootstrapContext.markerPath);
+            environmentInfo = this.workspacePythonResolver(
+              input.workspaceRoot,
+              process.platform,
+            );
+            session.bootstrap = {
+              outcome: "created",
+              target: bootstrapContext.target,
+            };
+          } catch {
+            effectiveExitCode = 1;
+            bootstrapDiagnostic =
+              "\n[TASK BOOTSTRAP VALIDATION FAILED: created environment was quarantined]";
+            this.cleanupFailedBootstrap(bootstrapContext);
+          }
+        } else {
+          bootstrapDiagnostic =
+            "\n[TASK BOOTSTRAP FAILED: incomplete environment was removed or quarantined]";
+          this.cleanupFailedBootstrap(bootstrapContext);
+        }
+      }
 
       // Redact secrets from stdout/stderr before returning
       const redactedStdout = redactSecrets(
-        result.stdout,
+        this.sanitizeOperatorPath(result.stdout),
         secretValuesForRedaction,
       );
       const redactedStderr = redactSecrets(
-        result.stderr,
+        this.sanitizeOperatorPath(result.stderr + bootstrapDiagnostic),
         secretValuesForRedaction,
       );
 
       const durationMs = Math.round(performance.now() - startTime);
       session.status = result.timedOut
         ? "timed_out"
-        : result.exitCode === 0
+        : effectiveExitCode === 0
           ? "succeeded"
           : "failed";
-      session.exitCode = result.exitCode ?? undefined;
+      session.exitCode = effectiveExitCode ?? undefined;
       session.stdout = redactedStdout;
       session.stderr = redactedStderr;
       session.finishedAt = new Date().toISOString();
+      session.environmentInfo = environmentInfo;
       this.sessions.set(sessionId, session);
 
       return {
@@ -403,12 +578,14 @@ export class TaskRunner {
         stderr: redactedStderr,
         durationMs,
         runtime: session.runtime,
-        environmentInfo: runtime.environmentInfo,
+        environmentInfo,
+        bootstrap: session.bootstrap,
         errors: [],
       };
     } catch (err) {
+      if (bootstrapContext) this.cleanupFailedBootstrap(bootstrapContext);
       const durationMs = Math.round(performance.now() - startTime);
-      const errorMsg = String(err);
+      const errorMsg = this.sanitizeOperatorPath(String(err));
       const redactedError = redactSecrets(errorMsg, secretValuesForRedaction);
 
       session.status = "interrupted";
@@ -428,6 +605,10 @@ export class TaskRunner {
         environmentInfo: runtime.environmentInfo,
         errors: [],
       };
+    } finally {
+      if (bootstrapContext) {
+        this.bootstrapLocks.delete(bootstrapContext.key);
+      }
     }
   }
 
@@ -470,6 +651,124 @@ export class TaskRunner {
   // Runtime resolution
   // -----------------------------------------------------------------------
 
+  private prepareBootstrap(
+    workspaceRoot: string,
+    target: ".venv" | "venv",
+    taskId: string,
+  ):
+    | { outcome: "unchanged"; environmentInfo: EnvironmentInfo }
+    | { outcome: "create"; context: BootstrapContext } {
+    const targetPath = join(workspaceRoot, target);
+    const markerPath = join(targetPath, ".devspace-bootstrap-incomplete");
+    const key = `${workspaceRoot}\0${target}`;
+    if (this.bootstrapLocks.has(key)) {
+      throw new TaskError({
+        code: "TASK_BOOTSTRAP_CONFLICT",
+        taskId,
+        field: "runtime.venv",
+        message: `Workspace Python bootstrap is already running for ${target}.`,
+        recoverable: true,
+      });
+    }
+    this.bootstrapLocks.add(key);
+
+    try {
+      if (existsSync(targetPath)) {
+        try {
+          const environmentInfo = this.workspacePythonResolver(
+            workspaceRoot,
+            process.platform,
+          );
+          if (environmentInfo.environmentSource === target) {
+            this.bootstrapLocks.delete(key);
+            return { outcome: "unchanged", environmentInfo };
+          }
+        } catch {
+          // Existing invalid targets remain untouched and are never adopted.
+        }
+        throw new TaskError({
+          code: "TASK_BOOTSTRAP_CONFLICT",
+          taskId,
+          field: "runtime.venv",
+          message: `Bootstrap target ${target} already exists but is not a valid workspace virtual environment.`,
+          recoverable: true,
+        });
+      }
+
+      mkdirSync(targetPath);
+      writeFileSync(
+        markerPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          target,
+          state: "incomplete",
+        }) + "\n",
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
+      );
+      return {
+        outcome: "create",
+        context: { key, target, targetPath, markerPath },
+      };
+    } catch (error) {
+      this.bootstrapLocks.delete(key);
+      if (
+        error instanceof TaskError &&
+        error.code === "TASK_BOOTSTRAP_CONFLICT"
+      ) {
+        throw error;
+      }
+      try {
+        rmSync(targetPath, { recursive: true, force: true });
+      } catch {
+        // A remaining marker keeps any partial target quarantined.
+      }
+      throw new TaskError({
+        code: "TASK_BOOTSTRAP_FAILED",
+        taskId,
+        field: "runtime.venv",
+        message: `Unable to initialize bootstrap target ${target}.`,
+        recoverable: true,
+      });
+    }
+  }
+
+  private cleanupFailedBootstrap(context: BootstrapContext): void {
+    try {
+      rmSync(context.targetPath, { recursive: true, force: true });
+      return;
+    } catch {
+      // Keep or recreate the marker so normal tasks cannot adopt a half venv.
+    }
+    try {
+      mkdirSync(context.targetPath, { recursive: true });
+      writeFileSync(context.markerPath, "incomplete\n", {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+    } catch {
+      // The resolver additionally requires pyvenv.cfg and a healthy prefix.
+    }
+  }
+
+  private sanitizeOperatorPath(value: string): string {
+    const executable = this.operatorPythonCommand?.[0];
+    return executable
+      ? value.split(executable).join("[OPERATOR_PYTHON]")
+      : value;
+  }
+
+  private isOperatorPythonAvailable(): boolean {
+    const operatorCommand = this.operatorPythonCommand;
+    if (!operatorCommand) return false;
+    try {
+      if (!statSync(operatorCommand[0]).isFile()) return false;
+      accessSync(operatorCommand[0], constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private resolveRuntime(
     task: TaskDefinition,
     workspaceRoot: string,
@@ -485,7 +784,7 @@ export class TaskRunner {
     if (rt === "workspace-python") {
       // Use enhanced environment resolution — throws TASK_ENVIRONMENT_UNAVAILABLE
       // if no .venv is found; never falls back to system Python.
-      const envInfo = resolveWorkspacePythonEnvironment(workspaceRoot);
+      const envInfo = this.workspacePythonResolver(workspaceRoot);
 
       const venvScripts = join(
         workspaceRoot,
@@ -505,6 +804,25 @@ export class TaskRunner {
         },
         source: envInfo.environmentSource,
         environmentInfo: envInfo,
+      };
+    }
+
+    if (rt === "operator-python-bootstrap") {
+      const operatorCommand = this.operatorPythonCommand;
+      if (!operatorCommand || !this.isOperatorPythonAvailable()) {
+        throw new TaskError({
+          code: "TASK_BOOTSTRAP_UNAVAILABLE",
+          field: "runtime.operatorPython",
+          message:
+            "Workspace Python bootstrap is unavailable because the operator interpreter is not configured or executable.",
+          recoverable: true,
+        });
+      }
+      return {
+        interpreter: "operator-python-bootstrap",
+        prefix: [...operatorCommand],
+        env: {},
+        source: "operator-python-bootstrap",
       };
     }
 

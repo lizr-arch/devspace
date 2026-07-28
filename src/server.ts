@@ -157,7 +157,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-v1.2026-07-28";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-v1.2026-07-28";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -1746,6 +1746,12 @@ function createMcpServer(
           requireExpectedRemoteSha: z.literal(true),
           requireFastForward: z.literal(true),
         }),
+        taskExecution: z.object({
+          operatorPythonBootstrapConfigured: z.boolean(),
+          operatorPythonBootstrapAvailable: z.boolean(),
+          ordinaryPythonFallback: z.literal(false),
+          bootstrapTargets: z.tuple([z.literal(".venv"), z.literal("venv")]),
+        }),
       }),
       _meta: {},
       annotations: {
@@ -1758,6 +1764,7 @@ function createMcpServer(
       const runnerRegistry = await runners.inspectAll();
       const mcpSessions = runtime.mcpSessionStats();
       const memory = processMemorySnapshot();
+      const taskExecutionStatus = tasks.getOperatorPythonBootstrapStatus();
       const uptimeSeconds = Math.max(
         0,
         (Date.now() - Date.parse(runtime.startedAt)) / 1000,
@@ -1822,6 +1829,12 @@ function createMcpServer(
           captureProfileDirectory: ".devspace/captures" as const,
         },
         gitRemoteWrite: gitRemoteWriteSummary(config),
+        taskExecution: {
+          operatorPythonBootstrapConfigured: taskExecutionStatus.configured,
+          operatorPythonBootstrapAvailable: taskExecutionStatus.available,
+          ordinaryPythonFallback: false as const,
+          bootstrapTargets: [".venv", "venv"] as const,
+        },
       };
       const result = [
         `DevSpace ${PACKAGE_VERSION}`,
@@ -1836,6 +1849,7 @@ function createMcpServer(
           : "Workspace App: disabled",
         `Allowed roots: ${config.allowedRoots.join(", ")}`,
         `Git remote write: enabled=${String(config.gitRemoteWrite.enabled)}, remotes=${config.gitRemoteWrite.approvedRemotes.join(", ") || "(none)"}, branches=${config.gitRemoteWrite.approvedDestinationBranches.join(", ") || "(none)"}, force=false`,
+        `Task Python: bootstrap=${taskExecutionStatus.available ? "available" : taskExecutionStatus.configured ? "configured-unavailable" : "unconfigured"}, ordinary fallback=false`,
         `Runners: ${formatRunnerSummary(runnerRegistry.runners)}`,
         runnerRegistry.diagnostics.length > 0
           ? `Runner diagnostics: ${runnerRegistry.diagnostics.join(" | ")}`
@@ -6144,7 +6158,15 @@ export function createServer(
     },
   });
   const runners = new RunnerRegistry(config.runners);
-  const tasks = new TaskRunner();
+  const tasks = new TaskRunner({
+    ...(config.taskExecution.operatorPythonExecutable
+      ? {
+          operatorPythonCommand: [
+            config.taskExecution.operatorPythonExecutable,
+          ] as [string],
+        }
+      : {}),
+  });
 
   // Task secrets are bound by the operator to per-process child environments.
   // Invalid or absent mappings leave secret-bearing tasks unavailable.

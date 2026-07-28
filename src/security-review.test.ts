@@ -14,6 +14,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -64,6 +65,8 @@ function createFakeVenv(dir: string, venvName: string = ".venv"): string {
   const venvRoot = join(dir, venvName);
   const venvScripts = join(venvRoot, scriptsDir);
   mkdirSync(venvScripts, { recursive: true });
+  writeFileSync(join(venvRoot, "pyvenv.cfg"), "home = test\n", "utf8");
+  const expectedPrefix = realpathSync(venvRoot);
 
   if (isWin) {
     // On Windows, use a simple batch file that Node can execFileSync
@@ -79,7 +82,7 @@ function createFakeVenv(dir: string, venvName: string = ".venv"): string {
       wrapperJs,
       `const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('Python 3.11.9'); process.exit(0); }
-if (args[0] === '-c') eval(args[1]);
+if (args[0] === '-c') { console.log(${JSON.stringify(expectedPrefix)}); process.exit(0); }
 console.log(JSON.stringify({ argv: args }));
 `,
     );

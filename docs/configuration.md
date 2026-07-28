@@ -202,6 +202,39 @@ reported by `devspace_info` without preventing the service from starting. See
 [Runner Registry](runner-registry.md) and
 [Houdini runners](houdini-runners.md) for the policy and containment contract.
 
+## Workspace Python Bootstrap
+
+Ordinary `project_task` entries with `runtime: workspace-python` require an
+existing healthy `.venv` or `venv` and never fall back to an operator or system
+Python. Operators may opt into the one-purpose bootstrap runtime with an exact
+absolute interpreter path:
+
+```json
+{
+  "taskExecution": {
+    "operatorPythonExecutable": "/usr/bin/python3"
+  }
+}
+```
+
+`DEVSPACE_OPERATOR_PYTHON` overrides the JSON value. Repository manifests
+cannot supply or parameterize that path. The only accepted bootstrap form is:
+
+```yaml
+version: 1
+tasks:
+  bootstrap-python:
+    mode: run
+    runtime: operator-python-bootstrap
+    command: ["-m", "venv", ".venv"]
+```
+
+The target is fixed to workspace-relative `.venv` or `venv`. Bootstrap tasks
+cannot be sessions and accept no caller parameters. DevSpace serializes creation
+per workspace target, quarantines incomplete environments with a marker,
+requires `pyvenv.cfg` plus a healthy interpreter whose `sys.prefix` matches the
+target, and removes or leaves quarantined any failed creation.
+
 ## Project Memory SHADOW Preflight
 
 Project Memory integration is opt-in and operator configured in

@@ -18,6 +18,22 @@ assert.equal(loadConfig(baseEnv).mcpTransportMode, "stateless");
 assert.equal(loadConfig(baseEnv).mcpSessionIdleTtlMs, 300_000);
 assert.equal(loadConfig(baseEnv).mcpSessionMaxSessions, 64);
 assert.equal(loadConfig(baseEnv).mcpSessionSweepIntervalMs, 30_000);
+assert.deepEqual(loadConfig(baseEnv).taskExecution, {});
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_OPERATOR_PYTHON: "/usr/bin/python3",
+  }).taskExecution.operatorPythonExecutable,
+  "/usr/bin/python3",
+);
+assert.throws(
+  () =>
+    loadConfig({
+      ...baseEnv,
+      DEVSPACE_OPERATOR_PYTHON: "python3",
+    }),
+  /absolute path/,
+);
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_MCP_TRANSPORT_MODE: "stateful" })
     .mcpTransportMode,
@@ -126,6 +142,9 @@ writeFileSync(
       maxSessions: 48,
       sweepIntervalSeconds: 10,
     },
+    taskExecution: {
+      operatorPythonExecutable: "/opt/operator/python3",
+    },
   }),
 );
 assert.equal(
@@ -148,6 +167,21 @@ assert.equal(
     DEVSPACE_CONFIG_DIR: fullToolConfigDir,
   }).mcpTransportMode,
   "stateful",
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+  }).taskExecution.operatorPythonExecutable,
+  "/opt/operator/python3",
+);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CONFIG_DIR: fullToolConfigDir,
+    DEVSPACE_OPERATOR_PYTHON: "/usr/bin/python3",
+  }).taskExecution.operatorPythonExecutable,
+  "/usr/bin/python3",
 );
 assert.deepEqual(
   {

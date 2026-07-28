@@ -152,6 +152,23 @@ access. NORMAL, AUDIT, and UPDATE enforcement are not enabled by this
 configuration. Project Memory constrains only DevSpace's MCP tool layer; it is
 not a sandbox for other local processes or direct filesystem access.
 
+## Workspace Python Bootstrap Boundary
+
+The operator Python interpreter is an operator-owned absolute configuration
+value. It is never accepted from a repository manifest or MCP task parameter.
+The `operator-python-bootstrap` runtime is not a general Python executor: it
+accepts only a run-mode `python -m venv` operation targeting `.venv` or `venv`
+inside the workspace.
+
+Ordinary `workspace-python` tasks resolve only a healthy workspace environment.
+They reject incomplete markers, symbolic-link environment roots, missing
+`pyvenv.cfg`, interpreters that cannot start, and interpreters whose real
+`sys.prefix` does not match the selected workspace environment. Failed,
+cancelled, or timed-out bootstrap operations remove their newly created target
+or leave it quarantined so later tasks cannot mistake it for a valid runtime.
+The operator interpreter path is replaced in task output and is not returned as
+the task runtime identity.
+
 ## Worktrees
 
 Managed worktrees reduce accidental edits to your active checkout, but they are

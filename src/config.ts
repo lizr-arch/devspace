@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import {
@@ -24,6 +24,9 @@ export interface ProjectMemoryRepositoryConfig {
 
 export interface ProjectMemoryConfig {
   repositories: ProjectMemoryRepositoryConfig[];
+}
+export interface TaskExecutionConfig {
+  operatorPythonExecutable?: string;
 }
 export interface GitRemoteWritePolicy {
   enabled: boolean;
@@ -61,6 +64,7 @@ export interface ServerConfig {
   mcpSessionMaxSessions: number;
   mcpSessionSweepIntervalMs: number;
   projectMemory: ProjectMemoryConfig;
+  taskExecution: TaskExecutionConfig;
   runners: RunnerRegistryConfig;
   gitRemoteWrite: GitRemoteWritePolicy;
 }
@@ -368,6 +372,25 @@ function parseProjectMemoryConfig(
   };
 }
 
+function parseTaskExecutionConfig(
+  env: NodeJS.ProcessEnv,
+  value: ReturnType<typeof loadDevspaceFiles>["config"]["taskExecution"],
+): TaskExecutionConfig {
+  const configured =
+    env.DEVSPACE_OPERATOR_PYTHON ?? value?.operatorPythonExecutable;
+  if (!configured?.trim()) return {};
+  if (configured.includes("\0")) {
+    throw new Error("Invalid operator Python executable");
+  }
+  const expanded = expandHomePath(configured.trim());
+  if (!isAbsolute(expanded)) {
+    throw new Error("Operator Python executable must be an absolute path");
+  }
+  return {
+    operatorPythonExecutable: resolve(expanded),
+  };
+}
+
 function parseGitRemoteWritePolicy(
   env: NodeJS.ProcessEnv,
   value: DevspaceUserConfigGitRemoteWrite | undefined,
@@ -669,6 +692,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       files.config.projectMemory,
       allowedRoots,
     ),
+    taskExecution: parseTaskExecutionConfig(env, files.config.taskExecution),
     runners: files.config.runners ?? {},
     gitRemoteWrite: parseGitRemoteWritePolicy(
       env,

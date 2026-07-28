@@ -3,6 +3,7 @@ import {
   chmodSync,
   mkdtempSync,
   mkdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -44,6 +45,8 @@ function createFakeVenv(
   const venvRoot = join(base, venvName);
   const venvScripts = join(venvRoot, scriptsDir);
   mkdirSync(venvScripts, { recursive: true });
+  writeFileSync(join(venvRoot, "pyvenv.cfg"), "home = test\n", "utf8");
+  const expectedPrefix = realpathSync(venvRoot);
 
   if (isWin) {
     // Windows: create a minimal file that passes existsSync + statSync.isFile().
@@ -61,6 +64,10 @@ function createFakeVenv(
       `const args = process.argv.slice(2);
 if (args[0] === '--version') {
   console.log('${versionStr}');
+  process.exit(0);
+}
+if (args[0] === '-c') {
+  console.log(${JSON.stringify(expectedPrefix)});
   process.exit(0);
 }
 if (args[0] === '-m' && args[1] === 'pip' && args[2] === 'list') {
@@ -294,6 +301,28 @@ if (!isWin) {
     const info = resolveWorkspacePythonEnvironment(root);
     assert.equal(info.environmentSource, ".venv");
     console.log("PASS: test12 - .venv preferred over venv");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: incomplete bootstrap marker quarantines an otherwise shaped venv
+// ---------------------------------------------------------------------------
+{
+  const root = mkdtempSync(join(tmpdir(), "devspace-task-env-test13-"));
+  try {
+    createFakeVenv(root, ".venv", "Python 3.11.9");
+    writeFileSync(
+      join(root, ".venv", ".devspace-bootstrap-incomplete"),
+      "incomplete\n",
+    );
+    assert.throws(
+      () => resolveWorkspacePythonEnvironment(root),
+      (err: unknown) =>
+        err instanceof TaskError && err.code === "TASK_ENVIRONMENT_UNAVAILABLE",
+    );
+    console.log("PASS: test13 - incomplete bootstrap remains quarantined");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

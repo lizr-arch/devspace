@@ -31,6 +31,9 @@ export interface DevspaceUserConfig {
       maxConcurrent?: number;
     }
   >;
+  taskExecution?: {
+    operatorPythonExecutable?: string;
+  };
   projectMemory?: {
     repositories?: Array<{
       root: string;
