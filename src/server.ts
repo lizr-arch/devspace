@@ -144,6 +144,7 @@ import {
 import { type AdditionalRoot, normalizeAdditionalRoots } from "./roots.js";
 import { TaskRunner } from "./task-runner.js";
 import { checkManifestIntegrity, isTaskApproved } from "./task-manifest.js";
+import { OperatorServiceEnvironmentResolver } from "./secret-resolver.js";
 import {
   McpSessionRegistry,
   type McpSessionSnapshot,
@@ -156,7 +157,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-v1.2026-07-28";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-v1.2026-07-28";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -6144,6 +6145,23 @@ export function createServer(
   });
   const runners = new RunnerRegistry(config.runners);
   const tasks = new TaskRunner();
+
+  // Task secrets are bound by the operator to per-process child environments.
+  // Invalid or absent mappings leave secret-bearing tasks unavailable.
+  try {
+    const rawMappings = process.env["DEVSPACE_SECRET_MAPPINGS"];
+    if (rawMappings) {
+      const mappings = JSON.parse(rawMappings);
+      if (Array.isArray(mappings) && mappings.length > 0) {
+        tasks.setSecretResolver(
+          new OperatorServiceEnvironmentResolver({ mappings }),
+        );
+      }
+    }
+  } catch {
+    // The task runner returns TASK_SECRET_UNAUTHORIZED when no resolver exists.
+  }
+
   const runtime = createServiceRuntime(
     config,
     workspaceApp,

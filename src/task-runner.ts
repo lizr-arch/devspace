@@ -1,6 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { existsSync, lstatSync, statSync, readFileSync } from "node:fs";
+import { join, delimiter } from "node:path";
 import { resolveWorkspacePytestInvocation } from "./background-jobs.js";
 import {
   type TaskDefinition,
@@ -12,6 +13,8 @@ import {
   type ParamValidationError,
 } from "./task-manifest.js";
 import { type AdditionalRoot } from "./roots.js";
+import { TaskError } from "./task-errors.js";
+import { type SecretResolver, redactSecrets } from "./secret-resolver.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,6 +39,7 @@ export interface TaskSession {
     interpreter: string;
     environmentSource: string;
   };
+  environmentInfo?: EnvironmentInfo;
   errors: ParamValidationError[];
 }
 
@@ -49,6 +53,7 @@ export interface TaskRunResult {
   stderr: string;
   durationMs: number;
   runtime: TaskSession["runtime"];
+  environmentInfo?: EnvironmentInfo;
   errors: ParamValidationError[];
 }
 
@@ -65,10 +70,123 @@ export interface TaskSessionResult {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TASK_TIMEOUT = 600_000; // 10 minutes
+const VENV_CANDIDATES = [".venv", "venv"];
+const DEPENDENCY_LOCK_CANDIDATES = [
+  "poetry.lock",
+  "Pipfile.lock",
+  "requirements-lock.txt",
+  "requirements.txt",
+];
+
+// ---------------------------------------------------------------------------
+// Environment diagnostics types
+// ---------------------------------------------------------------------------
+
+export interface EnvironmentInfo {
+  resolvedExecutable: string;
+  pythonVersion: string | null;
+  environmentSource: ".venv" | "venv" | "workspace-config" | "system";
+  dependencyLockPath: string | null;
+  dependencyLockSha256: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Python environment resolution (standalone export)
+// ---------------------------------------------------------------------------
+
+export function resolveWorkspacePythonEnvironment(
+  workspaceRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): EnvironmentInfo {
+  const scriptsDir = platform === "win32" ? "Scripts" : "bin";
+  const pythonName = platform === "win32" ? "python.exe" : "python";
+
+  for (const name of VENV_CANDIDATES) {
+    const venvRoot = join(workspaceRoot, name);
+    const venvScripts = join(venvRoot, scriptsDir);
+    const python = join(venvScripts, pythonName);
+
+    if (!existsSync(python)) continue;
+
+    // Reject symlinked venv directories
+    try {
+      if (
+        lstatSync(venvRoot).isSymbolicLink() ||
+        lstatSync(venvScripts).isSymbolicLink() ||
+        !statSync(python).isFile()
+      ) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    // Get Python version via direct exec (no shell)
+    let pythonVersion: string | null = null;
+    try {
+      const versionOutput = execFileSync(python, ["--version"], {
+        cwd: workspaceRoot,
+        encoding: "utf8",
+        timeout: 10_000,
+        windowsHide: true,
+      }).trim();
+      // "Python 3.11.9" → "3.11.9"
+      const match = versionOutput.match(/Python\s+(\S+)/);
+      pythonVersion = match ? match[1] : versionOutput;
+    } catch {
+      // Python --version failed — still usable but without version info
+    }
+
+    // Detect dependency lock file
+    let dependencyLockPath: string | null = null;
+    let dependencyLockSha256: string | null = null;
+    for (const candidate of DEPENDENCY_LOCK_CANDIDATES) {
+      const lockPath = join(workspaceRoot, candidate);
+      if (existsSync(lockPath) && statSync(lockPath).isFile()) {
+        dependencyLockPath = candidate;
+        dependencyLockSha256 = createHash("sha256")
+          .update(readFileSync(lockPath, "utf8"))
+          .digest("hex");
+        break;
+      }
+    }
+
+    return {
+      resolvedExecutable: python,
+      pythonVersion,
+      environmentSource: name as ".venv" | "venv",
+      dependencyLockPath,
+      dependencyLockSha256,
+    };
+  }
+
+  // No .venv found — TASK_ENVIRONMENT_UNAVAILABLE for workspace-python runtime
+  throw new TaskError({
+    code: "TASK_ENVIRONMENT_UNAVAILABLE",
+    manifestPath: join(workspaceRoot, ".devspace/tasks.yaml"),
+    field: "runtime.venv",
+    message: `Workspace requires Python virtual environment but neither .venv nor venv was found at ${workspaceRoot}. Create a venv with 'python -m venv .venv'.`,
+    recoverable: true,
+  });
+}
 
 export class TaskRunner {
   private sessions = new Map<string, TaskSession>();
   private processes = new Map<string, ChildProcess>();
+  private secretResolver?: SecretResolver;
+  /**
+   * Per-session secret values for redaction (keyed by sessionId).
+   * Cleared when the session completes. Values are NEVER persisted.
+   */
+  private sessionSecretValues = new Map<string, string[]>();
+
+  /**
+   * Set the SecretResolver for this runner.
+   * If unset, tasks declaring secrets will fail with TASK_SECRET_UNAUTHORIZED.
+   */
+  setSecretResolver(resolver: SecretResolver): void {
+    this.secretResolver = resolver;
+  }
 
   async runTask(input: {
     workspaceId: string;
@@ -79,13 +197,16 @@ export class TaskRunner {
     timeoutSeconds?: number;
   }): Promise<TaskRunResult | TaskSessionResult> {
     const manifest = loadTaskManifest(input.workspaceRoot);
-    if (!manifest) {
-      throw new Error("TASK_MANIFEST_MISSING: No .devspace/tasks.yaml found.");
-    }
 
     const task = manifest.tasks[input.taskId];
     if (!task) {
-      throw new Error(`TASK_NOT_FOUND: Task ${input.taskId} not in manifest.`);
+      throw new TaskError({
+        code: "TASK_ID_UNKNOWN",
+        manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+        taskId: input.taskId,
+        message: `Task ${input.taskId} not found in manifest.`,
+        recoverable: true,
+      });
     }
 
     // Validate params
@@ -103,6 +224,51 @@ export class TaskRunner {
       throw new Error(
         `TASK_PARAM_ERROR: ${errors.map((e) => `${e.param}: ${e.message}`).join("; ")}`,
       );
+    }
+
+    // -------------------------------------------------------------------
+    // Resolve secret bindings (M3)
+    // -------------------------------------------------------------------
+    let resolvedSecrets: Map<string, string> = new Map();
+    if (task.secrets && task.secrets.length > 0) {
+      if (!this.secretResolver) {
+        throw new TaskError({
+          code: "TASK_SECRET_NOT_AUTHORIZED",
+          manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+          taskId: input.taskId,
+          message: `Task ${input.taskId} declares secrets but no SecretResolver is configured.`,
+          recoverable: true,
+        });
+      }
+      for (const binding of task.secrets) {
+        let secretValue: string;
+        try {
+          secretValue = this.secretResolver.resolve(binding.secret_ref);
+        } catch (err) {
+          throw new TaskError({
+            code: "TASK_SECRET_UNRESOLVED",
+            manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+            taskId: input.taskId,
+            field: `secrets.${binding.secret_ref}`,
+            message:
+              `Unable to resolve secret '${binding.secret_ref}': ` +
+              (err instanceof Error ? err.message : String(err)),
+            recoverable: true,
+          });
+        }
+        // Validate target_env is a legal env var name
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(binding.target_env)) {
+          throw new TaskError({
+            code: "TASK_MANIFEST_SCHEMA_ERROR",
+            manifestPath: join(input.workspaceRoot, ".devspace/tasks.yaml"),
+            taskId: input.taskId,
+            field: `secrets.target_env`,
+            message: `Invalid target_env name: '${binding.target_env}'.`,
+            recoverable: true,
+          });
+        }
+        resolvedSecrets.set(binding.target_env, secretValue);
+      }
     }
 
     // Resolve runtime
@@ -126,13 +292,31 @@ export class TaskRunner {
         interpreter: runtime.interpreter,
         environmentSource: runtime.source,
       },
+      environmentInfo: runtime.environmentInfo,
       errors: [],
     };
 
     if (task.mode === "session") {
+      // Merge resolved secrets into child env (NOT global process.env)
+      const childEnv: Record<string, string | undefined> = {
+        ...process.env,
+        ...runtime.env,
+      };
+      for (const [envName, secretValue] of resolvedSecrets) {
+        childEnv[envName] = secretValue;
+      }
+
+      // Store secret values for redaction on poll (cleared on session complete)
+      if (resolvedSecrets.size > 0) {
+        this.sessionSecretValues.set(
+          sessionId,
+          Array.from(resolvedSecrets.values()),
+        );
+      }
+
       const proc = spawn(fullCommand[0], fullCommand.slice(1), {
         cwd: input.workspaceRoot,
-        env: { ...process.env, ...runtime.env },
+        env: childEnv as Record<string, string>,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
@@ -151,6 +335,8 @@ export class TaskRunner {
         session.status = code === 0 ? "succeeded" : "failed";
         session.exitCode = code ?? undefined;
         session.finishedAt = new Date().toISOString();
+        // Clean up secret values — they are no longer needed after exit
+        this.sessionSecretValues.delete(sessionId);
       });
 
       return {
@@ -167,13 +353,32 @@ export class TaskRunner {
       (task.timeout_seconds ?? input.timeoutSeconds ?? 600) * 1000;
     const startTime = performance.now();
 
+    // Merge resolved secrets into child env for run mode
+    const runEnv: Record<string, string | undefined> = { ...runtime.env };
+    for (const [envName, secretValue] of resolvedSecrets) {
+      runEnv[envName] = secretValue;
+    }
+
+    // Collect secret values for redaction (MUST not leak beyond this scope)
+    const secretValuesForRedaction = Array.from(resolvedSecrets.values());
+
     try {
       const result = await this.runAndWait(
         fullCommand[0],
         fullCommand.slice(1),
         input.workspaceRoot,
-        runtime.env,
+        runEnv as Record<string, string>,
         timeoutMs,
+      );
+
+      // Redact secrets from stdout/stderr before returning
+      const redactedStdout = redactSecrets(
+        result.stdout,
+        secretValuesForRedaction,
+      );
+      const redactedStderr = redactSecrets(
+        result.stderr,
+        secretValuesForRedaction,
       );
 
       const durationMs = Math.round(performance.now() - startTime);
@@ -183,8 +388,8 @@ export class TaskRunner {
           ? "succeeded"
           : "failed";
       session.exitCode = result.exitCode ?? undefined;
-      session.stdout = result.stdout;
-      session.stderr = result.stderr;
+      session.stdout = redactedStdout;
+      session.stderr = redactedStderr;
       session.finishedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
 
@@ -194,16 +399,20 @@ export class TaskRunner {
         sessionId,
         status: session.status,
         exitCode: session.exitCode,
-        stdout: session.stdout,
-        stderr: session.stderr,
+        stdout: redactedStdout,
+        stderr: redactedStderr,
         durationMs,
         runtime: session.runtime,
+        environmentInfo: runtime.environmentInfo,
         errors: [],
       };
     } catch (err) {
       const durationMs = Math.round(performance.now() - startTime);
+      const errorMsg = String(err);
+      const redactedError = redactSecrets(errorMsg, secretValuesForRedaction);
+
       session.status = "interrupted";
-      session.stderr = String(err);
+      session.stderr = redactedError;
       session.finishedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
 
@@ -212,17 +421,29 @@ export class TaskRunner {
         mode: "run",
         sessionId,
         status: "interrupted",
-        stdout: session.stdout,
-        stderr: session.stderr,
+        stdout: redactSecrets(session.stdout, secretValuesForRedaction),
+        stderr: redactedError,
         durationMs,
         runtime: session.runtime,
+        environmentInfo: runtime.environmentInfo,
         errors: [],
       };
     }
   }
 
   getSession(sessionId: string): TaskSession | undefined {
-    return this.sessions.get(sessionId);
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    // Redact secrets from session output before returning
+    const secretValues = this.sessionSecretValues.get(sessionId);
+    if (secretValues && secretValues.length > 0) {
+      return {
+        ...session,
+        stdout: redactSecrets(session.stdout, secretValues),
+        stderr: redactSecrets(session.stderr, secretValues),
+      };
+    }
+    return session;
   }
 
   stopSession(sessionId: string): boolean {
@@ -240,6 +461,8 @@ export class TaskRunner {
     } catch {
       return false;
     }
+    // Clean up secret values
+    this.sessionSecretValues.delete(sessionId);
     return true;
   }
 
@@ -255,29 +478,37 @@ export class TaskRunner {
     prefix: string[];
     env: Record<string, string>;
     source: string;
+    environmentInfo?: EnvironmentInfo;
   } {
     const rt = task.runtime ?? "workspace-python";
 
     if (rt === "workspace-python") {
-      const pytestInv = resolveWorkspacePytestInvocation(workspaceRoot);
-      if (pytestInv) {
-        return {
-          interpreter: pytestInv.executable,
-          prefix: [pytestInv.executable],
-          env: { VIRTUAL_ENV: pytestInv.venvRoot },
-          source: ".venv",
-        };
-      }
-      // Fallback to system python
+      // Use enhanced environment resolution — throws TASK_ENVIRONMENT_UNAVAILABLE
+      // if no .venv is found; never falls back to system Python.
+      const envInfo = resolveWorkspacePythonEnvironment(workspaceRoot);
+
+      const venvScripts = join(
+        workspaceRoot,
+        envInfo.environmentSource,
+        process.platform === "win32" ? "Scripts" : "bin",
+      );
+      const pathKey =
+        Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ??
+        "PATH";
+
       return {
-        interpreter: "python",
-        prefix: ["python"],
-        env: {},
-        source: "system (no .venv found)",
+        interpreter: envInfo.resolvedExecutable,
+        prefix: [envInfo.resolvedExecutable],
+        env: {
+          VIRTUAL_ENV: join(workspaceRoot, envInfo.environmentSource),
+          [pathKey]: [venvScripts, process.env[pathKey] ?? ""].join(delimiter),
+        },
+        source: envInfo.environmentSource,
+        environmentInfo: envInfo,
       };
     }
 
-    // system runtime
+    // system runtime — use command's first element directly (no shell)
     return {
       interpreter: task.command[0],
       prefix: [],

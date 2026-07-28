@@ -173,7 +173,7 @@ export async function stageGitPaths(
 ): Promise<GitWorkspaceStatus> {
   const root = await assertWorkspaceGitRoot(workspaceRoot);
   const normalized = normalizeRequiredGitPaths(paths);
-  await assertNoExecutableGitFilters(root);
+  await assertNoEffectiveGitFilters(root, normalized);
   await runGit(root, ["add", "-A", "--", ...normalized]);
   return inspectGitStatus(root);
 }
@@ -925,9 +925,133 @@ function spawnGitProcessGroup(input: {
   });
 }
 
+async function assertNoEffectiveGitFilters(
+  root: string,
+  paths: string[],
+): Promise<void> {
+  if (paths.length === 0) return;
+
+  const { stdout } = await runGit(root, [
+    "check-attr",
+    "-z",
+    "filter",
+    "diff",
+    "merge",
+    "working-tree-encoding",
+    "--",
+    ...paths,
+  ]);
+
+  const byPath = parseCheckAttrOutput(stdout);
+  const filterNames = new Set<string>();
+  const diffNames = new Set<string>();
+  const mergeNames = new Set<string>();
+  const pathsWithWte: string[] = [];
+
+  for (const [path, attrs] of byPath) {
+    const filterVal = attrs.get("filter");
+    if (filterVal && filterVal !== "unspecified" && filterVal !== "unset") {
+      filterNames.add(filterVal);
+    }
+    const diffVal = attrs.get("diff");
+    if (
+      diffVal &&
+      diffVal !== "unspecified" &&
+      diffVal !== "unset" &&
+      diffVal !== "set"
+    ) {
+      diffNames.add(diffVal);
+    }
+    const mergeVal = attrs.get("merge");
+    if (
+      mergeVal &&
+      mergeVal !== "unspecified" &&
+      mergeVal !== "unset" &&
+      mergeVal !== "set"
+    ) {
+      mergeNames.add(mergeVal);
+    }
+    const wteVal = attrs.get("working-tree-encoding");
+    if (wteVal && wteVal !== "unspecified" && wteVal !== "unset") {
+      pathsWithWte.push(path);
+    }
+  }
+
+  if (pathsWithWte.length > 0) {
+    throw new Error(
+      `GIT_FILTER_REJECTED: Unsupported working-tree-encoding attribute on: ${pathsWithWte.join(", ")}.`,
+    );
+  }
+
+  if (filterNames.size > 0) {
+    for (const name of filterNames) {
+      const configured = await runGit(root, [
+        "config",
+        "--local",
+        "--get-regexp",
+        `^filter\\.${escapeRegex(name)}\\.(clean|smudge|process)$`,
+      ]).catch(() => undefined);
+      if (configured?.stdout.trim()) {
+        throw new Error(
+          `GIT_FILTER_REJECTED: Paths use filter "${name}" which has an executable driver configured. Safe staging does not support external content filters.`,
+        );
+      }
+    }
+  }
+
+  if (diffNames.size > 0) {
+    for (const name of diffNames) {
+      const configured = await runGit(root, [
+        "config",
+        "--local",
+        "--get",
+        `diff.${name}.command`,
+      ]).catch(() => undefined);
+      if (configured?.stdout.trim()) {
+        throw new Error(
+          `GIT_FILTER_REJECTED: Paths use diff driver "${name}" which has an external command configured. Safe staging does not support external diff drivers.`,
+        );
+      }
+    }
+  }
+
+  if (mergeNames.size > 0) {
+    for (const name of mergeNames) {
+      const configured = await runGit(root, [
+        "config",
+        "--local",
+        "--get",
+        `merge.${name}.driver`,
+      ]).catch(() => undefined);
+      if (configured?.stdout.trim()) {
+        throw new Error(
+          `GIT_FILTER_REJECTED: Paths use merge driver "${name}" which has an external driver configured. Safe staging does not support external merge drivers.`,
+        );
+      }
+    }
+  }
+}
+
+function parseCheckAttrOutput(
+  output: string,
+): Map<string, Map<string, string>> {
+  const parts = output.split("\0");
+  const result = new Map<string, Map<string, string>>();
+  for (let i = 0; i + 2 < parts.length; i += 3) {
+    const path = parts[i];
+    const attr = parts[i + 1];
+    const info = parts[i + 2];
+    if (!path || !attr) continue;
+    if (!result.has(path)) result.set(path, new Map());
+    result.get(path)!.set(attr, info);
+  }
+  return result;
+}
+
 async function assertNoExecutableGitFilters(root: string): Promise<void> {
   const configured = await runGit(root, [
     "config",
+    "--local",
     "--get-regexp",
     "^filter\\..*\\.(clean|smudge|process)$",
   ]).catch(() => undefined);
@@ -941,6 +1065,7 @@ async function assertNoExecutableGitFilters(root: string): Promise<void> {
 async function assertNoExecutableMergeDrivers(root: string): Promise<void> {
   const configured = await runGit(root, [
     "config",
+    "--local",
     "--get-regexp",
     "^merge\\..*\\.driver$",
   ]).catch(() => undefined);

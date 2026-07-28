@@ -25,7 +25,7 @@ const tempRoot = mkdtempSync(join(tmpdir(), "devspace-doctor-test-"));
 const testWorkspaceAppBuild = createWorkspaceAppFixture("shared");
 assert.equal(
   TOOL_SCHEMA_REVISION,
-  "devspacemac-approved-asset-intake-p1.5-houdini-v1.2026-07-28",
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-v1.2026-07-28",
 );
 
 try {
@@ -265,7 +265,7 @@ async function testLiveChatGptProbe(): Promise<void> {
 
   try {
     const probe = await probeLocalChatGptFlow(config);
-    assert.equal(probe.ready, true);
+    assert.equal(probe.ready, true, JSON.stringify(probe, null, 2));
     assert.equal(probe.healthz.ok, true);
     assert.equal(probe.protectedResourceMetadata.ok, true);
     assert.equal(probe.authorizationServerMetadata.ok, true);
@@ -395,7 +395,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
         args: ["run", "typecheck"],
       },
     });
-    assert.equal(probe.ready, true);
+    assert.equal(probe.ready, true, JSON.stringify(probe, null, 2));
     assert.equal(probe.clientRegistration.ok, true);
     assert.equal(probe.authorization.ok, true);
     assert.equal(probe.tokenExchange.ok, true);
