@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -45,6 +53,107 @@ try {
   assert.deepEqual(
     availableAgentsFiles.map((file) => file.path),
     [join(root, "nested", "AGENTS.md")],
+  );
+
+  const firstAdditionalRoot = join(root, "additional-read");
+  const secondAdditionalRoot = join(root, "additional-write");
+  const additionalRootFile = join(root, "additional-root-file");
+  const additionalRootsWorkspace = join(root, "additional-roots-workspace");
+  await mkdir(firstAdditionalRoot);
+  await mkdir(secondAdditionalRoot);
+  await mkdir(additionalRootsWorkspace);
+  await writeFile(join(firstAdditionalRoot, "reference.txt"), "reference\n");
+  await writeFile(additionalRootFile, "not a directory\n");
+  const authorizedWorkspace = await registry.openWorkspace({
+    path: additionalRootsWorkspace,
+    additionalRoots: [
+      { path: firstAdditionalRoot, access: "read_only" },
+      { path: secondAdditionalRoot, access: "read_write" },
+    ],
+  });
+  assert.deepEqual(
+    authorizedWorkspace.additionalRootsAuthorization.requestedAdditionalRoots,
+    [
+      { path: firstAdditionalRoot, access: "read_only" },
+      { path: secondAdditionalRoot, access: "read_write" },
+    ],
+  );
+  assert.deepEqual(
+    authorizedWorkspace.additionalRootsAuthorization.effectiveAdditionalRoots,
+    [
+      { path: await realpath(firstAdditionalRoot), access: "read_only" },
+      { path: await realpath(secondAdditionalRoot), access: "read_write" },
+    ],
+  );
+  assert.deepEqual(
+    authorizedWorkspace.additionalRootsAuthorization.rejectedAdditionalRoots,
+    [],
+  );
+  assert.equal(
+    authorizedWorkspace.additionalRootsAuthorization.additionalRootsScope,
+    "in_memory_session",
+  );
+  assert.equal(
+    authorizedWorkspace.additionalRootsAuthorization.additionalRootsPersisted,
+    false,
+  );
+  assert.equal(
+    registry.resolvePath(
+      authorizedWorkspace.workspace,
+      join(firstAdditionalRoot, "reference.txt"),
+    ),
+    join(firstAdditionalRoot, "reference.txt"),
+  );
+  const effectiveWritableRoot =
+    authorizedWorkspace.additionalRootsAuthorization.effectiveAdditionalRoots[1]
+      ?.path;
+  assert.ok(effectiveWritableRoot);
+  assert.equal(
+    registry.resolvePath(
+      authorizedWorkspace.workspace,
+      join(effectiveWritableRoot, "new-output.txt"),
+    ),
+    join(effectiveWritableRoot, "new-output.txt"),
+  );
+  const authorizedList = await registry.listWorkspaces();
+  assert.deepEqual(
+    authorizedList.find(
+      (session) => session.workspaceId === authorizedWorkspace.workspace.id,
+    )?.effectiveAdditionalRoots,
+    authorizedWorkspace.additionalRootsAuthorization.effectiveAdditionalRoots,
+  );
+
+  const rejectedUpdate = await registry.resumeWorkspace(
+    authorizedWorkspace.workspace.id,
+    undefined,
+    [
+      { path: secondAdditionalRoot, access: "read_write" },
+      { path: additionalRootFile, access: "read_only" },
+    ],
+  );
+  assert.deepEqual(
+    rejectedUpdate.additionalRootsAuthorization.effectiveAdditionalRoots,
+    authorizedWorkspace.workspace.additionalRoots,
+  );
+  assert.equal(
+    rejectedUpdate.additionalRootsAuthorization.rejectedAdditionalRoots[0]
+      ?.code,
+    "ADDITIONAL_ROOT_NOT_DIRECTORY",
+  );
+  assert.deepEqual(rejectedUpdate.workspace.additionalRoots, [
+    { path: await realpath(firstAdditionalRoot), access: "read_only" },
+    { path: await realpath(secondAdditionalRoot), access: "read_write" },
+  ]);
+
+  const clearedAuthorization = await registry.resumeWorkspace(
+    authorizedWorkspace.workspace.id,
+    undefined,
+    [],
+  );
+  assert.deepEqual(clearedAuthorization.workspace.additionalRoots, []);
+  assert.deepEqual(
+    clearedAuthorization.additionalRootsAuthorization.effectiveAdditionalRoots,
+    [],
   );
 
   const missingWorkspaceRoot = join(root, "missing", "workspace");
@@ -107,7 +216,10 @@ try {
   const stateDir = join(root, ".state");
   const firstStore = new SqliteWorkspaceStore(stateDir);
   const persistentRegistry = new WorkspaceRegistry(config, firstStore);
-  const persistentWorkspace = await persistentRegistry.openWorkspace(root);
+  const persistentWorkspace = await persistentRegistry.openWorkspace({
+    path: root,
+    additionalRoots: [{ path: firstAdditionalRoot, access: "read_only" }],
+  });
   const persistentWorktree = await persistentRegistry.openWorkspace({
     path: gitRoot,
     mode: "worktree",
@@ -121,6 +233,11 @@ try {
   );
   assert.equal(restoredWorkspace.root, root);
   assert.equal(restoredWorkspace.mode, "checkout");
+  assert.deepEqual(restoredWorkspace.additionalRoots, []);
+  assert.equal(
+    restoredWorkspace.additionalRootsAuthorization.additionalRootsPersisted,
+    false,
+  );
 
   const restoredWorktree = restoredRegistry.getWorkspace(
     persistentWorktree.workspace.id,
@@ -148,6 +265,12 @@ try {
     ),
     true,
   );
+  assert.deepEqual(
+    listedWorkspaces.find(
+      (session) => session.workspaceId === persistentWorkspace.workspace.id,
+    )?.effectiveAdditionalRoots,
+    [],
+  );
 
   const resumedWorktree = await restoredRegistry.resumeWorkspace(
     persistentWorktree.workspace.id,
@@ -160,6 +283,33 @@ try {
     resumedWorktree.agentsFiles.map((file) => file.content).join("\n"),
     /git root instructions/,
   );
+  const managedBranch = persistentWorktree.workspace.worktree?.branch;
+  assert.ok(managedBranch);
+  await git(persistentWorktree.workspace.root, ["checkout", "--detach"]);
+  const detachedResume = await restoredRegistry.resumeWorkspace(
+    persistentWorktree.workspace.id,
+  );
+  assert.equal(detachedResume.workspace.worktree?.detached, true);
+  assert.equal(detachedResume.workspace.worktree?.branch, undefined);
+  const detachedList = await restoredRegistry.listWorkspaces();
+  assert.equal(
+    detachedList.find(
+      (session) => session.workspaceId === persistentWorktree.workspace.id,
+    )?.detached,
+    true,
+  );
+  assert.equal(
+    detachedList.find(
+      (session) => session.workspaceId === persistentWorktree.workspace.id,
+    )?.branch,
+    undefined,
+  );
+  await git(persistentWorktree.workspace.root, ["switch", managedBranch]);
+  const attachedResume = await restoredRegistry.resumeWorkspace(
+    persistentWorktree.workspace.id,
+  );
+  assert.equal(attachedResume.workspace.worktree?.detached, false);
+  assert.equal(attachedResume.workspace.worktree?.branch, managedBranch);
   secondStore.close();
 
   if (platform() !== "win32") {
@@ -183,6 +333,47 @@ try {
       aliasWorkspace.workspace.sourceRoot,
       join(aliasRoot, "git-project"),
     );
+
+    const additionalAliasRoot = join(root, "additional-alias-root");
+    await symlink(firstAdditionalRoot, additionalAliasRoot, "dir");
+    const canonicalizedAdditionalRoot = await registry.resumeWorkspace(
+      authorizedWorkspace.workspace.id,
+      undefined,
+      [{ path: additionalAliasRoot, access: "read_only" }],
+    );
+    assert.deepEqual(
+      canonicalizedAdditionalRoot.additionalRootsAuthorization
+        .requestedAdditionalRoots,
+      [{ path: additionalAliasRoot, access: "read_only" }],
+    );
+    assert.deepEqual(
+      canonicalizedAdditionalRoot.additionalRootsAuthorization
+        .effectiveAdditionalRoots,
+      [{ path: await realpath(firstAdditionalRoot), access: "read_only" }],
+    );
+
+    const conflictingAdditionalRoot = await registry.resumeWorkspace(
+      authorizedWorkspace.workspace.id,
+      undefined,
+      [
+        { path: firstAdditionalRoot, access: "read_only" },
+        { path: additionalAliasRoot, access: "read_write" },
+      ],
+    );
+    assert.equal(
+      conflictingAdditionalRoot.additionalRootsAuthorization
+        .rejectedAdditionalRoots.length,
+      2,
+    );
+    assert.equal(
+      conflictingAdditionalRoot.additionalRootsAuthorization.rejectedAdditionalRoots.every(
+        (rejection) => rejection.code === "ADDITIONAL_ROOT_ACCESS_CONFLICT",
+      ),
+      true,
+    );
+    assert.deepEqual(conflictingAdditionalRoot.workspace.additionalRoots, [
+      { path: await realpath(firstAdditionalRoot), access: "read_only" },
+    ]);
   }
 } finally {
   await rm(root, { recursive: true, force: true });

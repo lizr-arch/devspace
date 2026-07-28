@@ -181,9 +181,19 @@ auto-stashes, cleans, resets, or ignores untracked files.
 
 `git_merge` and `git_push` enforce this workflow boundary: ordinary checkout,
 detached, unmanaged, or unapproved-source workspaces are rejected before a Git
-mutation runs. Remote Git calls use a separate POSIX process group so timeout
-termination also stops local Git descendants before the repository lock is
-released.
+mutation runs. Their preflight probes Git live, so stale persisted
+creation-time branch metadata cannot authorize a detached worktree or falsely
+deny a worktree that has since been attached. Remote Git calls use a separate
+POSIX process group so timeout termination also stops local Git descendants
+before the repository lock is released.
+
+Additional roots are explicit, in-memory workspace-session grants. DevSpace
+canonicalizes each existing directory before use, rejects conflicting access
+modes, and applies a requested set atomically: if any requested root is
+rejected, none of the requested changes partially take effect. An explicit
+empty array clears the grants. SQLite does not persist them, and tool results
+state the requested, effective, and rejected sets so a caller can distinguish
+an active grant from a rejected or expired one.
 
 ## Logs
 

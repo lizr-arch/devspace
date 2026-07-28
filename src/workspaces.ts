@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
-import { mkdir, opendir, stat } from "node:fs/promises";
+import { mkdir, opendir, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
+import { inspectGitStatus } from "./git-tools.js";
 import type {
   ProjectMemoryAccessObservation,
   ProjectMemoryActiveState,
@@ -54,6 +55,22 @@ export interface WorkspaceWorktree {
   branch?: string;
 }
 
+export interface AdditionalRootRejection extends AdditionalRoot {
+  code:
+    | "ADDITIONAL_ROOT_NOT_FOUND"
+    | "ADDITIONAL_ROOT_NOT_DIRECTORY"
+    | "ADDITIONAL_ROOT_ACCESS_CONFLICT";
+  message: string;
+}
+
+export interface AdditionalRootsAuthorization {
+  requestedAdditionalRoots: AdditionalRoot[];
+  effectiveAdditionalRoots: AdditionalRoot[];
+  rejectedAdditionalRoots: AdditionalRootRejection[];
+  additionalRootsScope: "in_memory_session";
+  additionalRootsPersisted: false;
+}
+
 export interface Workspace {
   id: string;
   root: string;
@@ -61,6 +78,7 @@ export interface Workspace {
   sourceRoot?: string;
   worktree?: WorkspaceWorktree;
   additionalRoots: AdditionalRoot[];
+  additionalRootsAuthorization: AdditionalRootsAuthorization;
   approvedTasks?: ApprovedTasks;
   skills: LoadedSkills["skills"];
   skillDiagnostics: LoadedSkills["diagnostics"];
@@ -73,6 +91,7 @@ export interface WorkspaceContext {
   agentsFiles: LoadedAgentsFile[];
   availableAgentsFiles: AvailableAgentsFile[];
   projectMemory?: ProjectMemoryPreflightView;
+  additionalRootsAuthorization: AdditionalRootsAuthorization;
 }
 
 export interface WorkspaceSessionSummary {
@@ -81,7 +100,14 @@ export interface WorkspaceSessionSummary {
   mode: WorkspaceMode;
   sourceRoot?: string;
   additionalRoots: AdditionalRoot[];
+  requestedAdditionalRoots: AdditionalRoot[];
+  effectiveAdditionalRoots: AdditionalRoot[];
+  rejectedAdditionalRoots: AdditionalRootRejection[];
+  additionalRootsScope: "in_memory_session";
+  additionalRootsPersisted: false;
   managed: boolean;
+  detached?: boolean;
+  branch?: string;
   status: string;
   createdAt: string;
   lastUsedAt: string;
@@ -103,6 +129,15 @@ export interface OpenWorkspaceInput {
   additionalRoots?: AdditionalRoot[];
 }
 
+export async function refreshWorkspaceGitAttachment(
+  workspace: Workspace,
+): Promise<void> {
+  if (workspace.mode !== "worktree" || !workspace.worktree) return;
+  const gitStatus = await inspectGitStatus(workspace.root);
+  workspace.worktree.detached = !gitStatus.branch;
+  workspace.worktree.branch = gitStatus.branch;
+}
+
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
 
@@ -117,21 +152,25 @@ export class WorkspaceRegistry {
   ): Promise<WorkspaceContext> {
     const options = typeof input === "string" ? { path: input } : input;
     const mode = options.mode ?? "checkout";
-    const additionalRoots = options.additionalRoots ?? [];
+    const additionalRootsAuthorization =
+      await this.resolveAdditionalRootsAuthorization(
+        options.additionalRoots ?? [],
+        [],
+      );
 
     if (mode === "worktree") {
       return this.openWorktreeWorkspace(
         options.path,
         options.baseRef,
         options.task,
-        additionalRoots,
+        additionalRootsAuthorization,
       );
     }
 
     return this.openCheckoutWorkspace(
       options.path,
       options.task,
-      additionalRoots,
+      additionalRootsAuthorization,
     );
   }
 
@@ -141,14 +180,21 @@ export class WorkspaceRegistry {
     additionalRoots?: AdditionalRoot[],
   ): Promise<WorkspaceContext> {
     const workspace = this.getWorkspace(workspaceId);
-    if (additionalRoots && additionalRoots.length > 0) {
-      workspace.additionalRoots = additionalRoots;
-    }
     const rootStats = await stat(workspace.root).catch(() => undefined);
     if (!rootStats?.isDirectory()) {
       throw new Error(
         `Stored workspace is no longer available: ${workspace.root}`,
       );
+    }
+    await refreshWorkspaceGitAttachment(workspace);
+
+    if (additionalRoots !== undefined) {
+      const authorization = await this.resolveAdditionalRootsAuthorization(
+        additionalRoots,
+        workspace.additionalRoots,
+      );
+      workspace.additionalRoots = authorization.effectiveAdditionalRoots;
+      workspace.additionalRootsAuthorization = authorization;
     }
 
     const agentsFiles = this.loadInitialAgentsFiles(workspace.root);
@@ -160,7 +206,13 @@ export class WorkspaceRegistry {
       ? await this.preflightProjectMemory(workspace.id, task)
       : undefined;
 
-    return { workspace, agentsFiles, availableAgentsFiles, projectMemory };
+    return {
+      workspace,
+      agentsFiles,
+      availableAgentsFiles,
+      projectMemory,
+      additionalRootsAuthorization: workspace.additionalRootsAuthorization,
+    };
   }
 
   async listWorkspaces(limit = 20): Promise<WorkspaceSessionSummary[]> {
@@ -197,13 +249,38 @@ export class WorkspaceRegistry {
 
       const rootStats = await stat(session.root).catch(() => undefined);
       const resumable = Boolean(rootStats?.isDirectory());
+      const activeWorkspace = this.workspaces.get(session.id);
+      const additionalRootsAuthorization =
+        activeWorkspace?.additionalRootsAuthorization ??
+        emptyAdditionalRootsAuthorization();
+      let detached: boolean | undefined;
+      let branch: string | undefined;
+      if (resumable && session.mode === "worktree") {
+        try {
+          if (activeWorkspace) {
+            await refreshWorkspaceGitAttachment(activeWorkspace);
+            detached = activeWorkspace.worktree?.detached;
+            branch = activeWorkspace.worktree?.branch;
+          } else {
+            const gitStatus = await inspectGitStatus(session.root);
+            detached = !gitStatus.branch;
+            branch = gitStatus.branch;
+          }
+        } catch {
+          // Never return persisted creation-time attachment metadata as if it
+          // were current. A later resume will surface the live Git error.
+        }
+      }
       summaries.push({
         workspaceId: session.id,
         root: session.root,
         mode: session.mode,
         sourceRoot: session.sourceRoot,
-        additionalRoots: [],
+        additionalRoots: additionalRootsAuthorization.effectiveAdditionalRoots,
+        ...additionalRootsAuthorization,
         managed: session.managed,
+        detached,
+        branch,
         status: session.status,
         createdAt: session.createdAt,
         lastUsedAt: session.lastUsedAt,
@@ -242,6 +319,7 @@ export class WorkspaceRegistry {
       mode: session.mode,
       sourceRoot: session.sourceRoot,
       additionalRoots: [],
+      additionalRootsAuthorization: emptyAdditionalRootsAuthorization(),
       worktree:
         session.mode === "worktree"
           ? {
@@ -363,7 +441,7 @@ export class WorkspaceRegistry {
   private async openCheckoutWorkspace(
     path: string,
     task: string | undefined,
-    additionalRoots: AdditionalRoot[],
+    additionalRootsAuthorization: AdditionalRootsAuthorization,
   ): Promise<WorkspaceContext> {
     const root = assertAllowedPath(path, this.config.allowedRoots);
     await mkdir(root, { recursive: true });
@@ -377,7 +455,7 @@ export class WorkspaceRegistry {
       root,
       mode: "checkout",
       task,
-      additionalRoots,
+      additionalRootsAuthorization,
     });
   }
 
@@ -385,7 +463,7 @@ export class WorkspaceRegistry {
     path: string,
     baseRef: string | undefined,
     task: string | undefined,
-    additionalRoots: AdditionalRoot[],
+    additionalRootsAuthorization: AdditionalRootsAuthorization,
   ): Promise<WorkspaceContext> {
     const worktree = await createManagedWorktree({
       sourcePath: path,
@@ -399,7 +477,7 @@ export class WorkspaceRegistry {
       sourceRoot: worktree.sourceRoot,
       worktree,
       task,
-      additionalRoots,
+      additionalRootsAuthorization,
     });
   }
 
@@ -409,16 +487,17 @@ export class WorkspaceRegistry {
     sourceRoot?: string;
     worktree?: WorkspaceWorktree;
     task?: string;
-    additionalRoots?: AdditionalRoot[];
+    additionalRootsAuthorization: AdditionalRootsAuthorization;
   }): Promise<WorkspaceContext> {
-    const additionalRoots = input.additionalRoots ?? [];
     const workspace: Workspace = {
       id: `ws_${randomUUID()}`,
       root: input.root,
       mode: input.mode,
       sourceRoot: input.sourceRoot,
       worktree: input.worktree,
-      additionalRoots,
+      additionalRoots:
+        input.additionalRootsAuthorization.effectiveAdditionalRoots,
+      additionalRootsAuthorization: input.additionalRootsAuthorization,
       ...this.loadSkillsForWorkspace(input.root),
       activatedSkillDirs: new Set(),
     };
@@ -444,7 +523,104 @@ export class WorkspaceRegistry {
       ? await this.preflightProjectMemory(workspace.id, input.task)
       : undefined;
 
-    return { workspace, agentsFiles, availableAgentsFiles, projectMemory };
+    return {
+      workspace,
+      agentsFiles,
+      availableAgentsFiles,
+      projectMemory,
+      additionalRootsAuthorization: workspace.additionalRootsAuthorization,
+    };
+  }
+
+  private async resolveAdditionalRootsAuthorization(
+    requestedRoots: AdditionalRoot[],
+    currentEffectiveRoots: AdditionalRoot[],
+  ): Promise<AdditionalRootsAuthorization> {
+    const requestedAdditionalRoots = requestedRoots.map((root) => ({
+      path: resolve(expandHomePath(root.path)),
+      access: root.access,
+    }));
+    const resolved = await Promise.all(
+      requestedAdditionalRoots.map(async (root) => {
+        let canonicalPath: string;
+        try {
+          canonicalPath = await realpath(root.path);
+        } catch {
+          return {
+            root,
+            rejection: {
+              ...root,
+              code: "ADDITIONAL_ROOT_NOT_FOUND" as const,
+              message: `Additional root does not exist or is inaccessible: ${root.path}`,
+            },
+          };
+        }
+        const rootStats = await stat(canonicalPath).catch(() => undefined);
+        if (!rootStats?.isDirectory()) {
+          return {
+            root,
+            rejection: {
+              ...root,
+              code: "ADDITIONAL_ROOT_NOT_DIRECTORY" as const,
+              message: `Additional root must be a directory: ${root.path}`,
+            },
+          };
+        }
+        return {
+          root,
+          effective: { path: canonicalPath, access: root.access },
+        };
+      }),
+    );
+
+    const rejectedAdditionalRoots: AdditionalRootRejection[] = resolved.flatMap(
+      (result) => (result.rejection ? [result.rejection] : []),
+    );
+    const candidates = resolved.flatMap((result) =>
+      result.effective ? [result.effective] : [],
+    );
+    const accessByPath = new Map<string, AdditionalRoot["access"]>();
+    for (const candidate of candidates) {
+      const previousAccess = accessByPath.get(candidate.path);
+      if (previousAccess && previousAccess !== candidate.access) {
+        for (const requested of resolved.flatMap((result) =>
+          result.effective?.path === candidate.path ? [result.root] : [],
+        )) {
+          rejectedAdditionalRoots.push({
+            ...requested,
+            code: "ADDITIONAL_ROOT_ACCESS_CONFLICT",
+            message: `Additional root was requested with conflicting access modes: ${requested.path}`,
+          });
+        }
+        continue;
+      }
+      accessByPath.set(candidate.path, candidate.access);
+    }
+
+    if (rejectedAdditionalRoots.length > 0) {
+      return {
+        requestedAdditionalRoots,
+        effectiveAdditionalRoots: currentEffectiveRoots.map((root) => ({
+          ...root,
+        })),
+        rejectedAdditionalRoots: dedupeAdditionalRootRejections(
+          rejectedAdditionalRoots,
+        ),
+        additionalRootsScope: "in_memory_session",
+        additionalRootsPersisted: false,
+      };
+    }
+
+    return {
+      requestedAdditionalRoots,
+      effectiveAdditionalRoots: Array.from(accessByPath, ([path, access]) => ({
+        path,
+        access,
+      })),
+      rejectedAdditionalRoots: [],
+      additionalRootsScope: "in_memory_session",
+      additionalRootsPersisted: false,
+    };
   }
 
   private loadSkillsForWorkspace(
@@ -539,6 +715,28 @@ export class WorkspaceRegistry {
   getApprovedTasks(workspaceId: string): ApprovedTasks | undefined {
     return this.getWorkspace(workspaceId).approvedTasks;
   }
+}
+
+function emptyAdditionalRootsAuthorization(): AdditionalRootsAuthorization {
+  return {
+    requestedAdditionalRoots: [],
+    effectiveAdditionalRoots: [],
+    rejectedAdditionalRoots: [],
+    additionalRootsScope: "in_memory_session",
+    additionalRootsPersisted: false,
+  };
+}
+
+function dedupeAdditionalRootRejections(
+  rejections: AdditionalRootRejection[],
+): AdditionalRootRejection[] {
+  const seen = new Set<string>();
+  return rejections.filter((rejection) => {
+    const key = `${rejection.path}\0${rejection.access}\0${rejection.code}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 const CONTEXT_FILE_NAMES = new Set([

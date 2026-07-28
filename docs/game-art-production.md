@@ -71,7 +71,13 @@ After restart:
 
 - `list_workspaces` exposes only sessions still allowed by the current root
   policy;
-- `resume_workspace` restores the original opaque Workspace ID;
+- `resume_workspace` restores the original opaque Workspace ID and probes the
+  managed worktree's current Git branch/detached state instead of replaying its
+  creation-time state;
+- additional-root grants are intentionally in-memory only. `open_workspace`,
+  `resume_workspace`, and `list_workspaces` report requested, effective, and
+  rejected roots together with `additionalRootsPersisted=false`; callers must
+  supply the grants again after a service restart;
 - `poll_job` and `list_artifacts` recover finished records and relationships;
 - a Job persisted as running/cancelling becomes `interrupted`, never
   `succeeded`;

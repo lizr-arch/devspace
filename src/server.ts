@@ -137,6 +137,7 @@ import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import {
   formatAgentsPath,
+  refreshWorkspaceGitAttachment,
   WorkspaceRegistry,
   type Workspace,
   type WorkspaceContext,
@@ -157,7 +158,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-v1.2026-07-28";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-v1.2026-07-28";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -743,6 +744,28 @@ const projectMemoryPreflightOutputSchema = z.object({
   error: z.string().optional(),
 });
 
+const additionalRootOutputSchema = z.object({
+  path: z.string(),
+  access: z.enum(["read_only", "read_write"]),
+});
+
+const rejectedAdditionalRootOutputSchema = additionalRootOutputSchema.extend({
+  code: z.enum([
+    "ADDITIONAL_ROOT_NOT_FOUND",
+    "ADDITIONAL_ROOT_NOT_DIRECTORY",
+    "ADDITIONAL_ROOT_ACCESS_CONFLICT",
+  ]),
+  message: z.string(),
+});
+
+const additionalRootsAuthorizationOutputSchema: z.ZodRawShape = {
+  requestedAdditionalRoots: z.array(additionalRootOutputSchema),
+  effectiveAdditionalRoots: z.array(additionalRootOutputSchema),
+  rejectedAdditionalRoots: z.array(rejectedAdditionalRootOutputSchema),
+  additionalRootsScope: z.literal("in_memory_session"),
+  additionalRootsPersisted: z.literal(false),
+};
+
 const workspaceContextOutputSchema: z.ZodRawShape = {
   workspaceId: z.string(),
   root: z.string(),
@@ -764,6 +787,7 @@ const workspaceContextOutputSchema: z.ZodRawShape = {
   skills: z.array(workspaceSkillOutputSchema),
   skillDiagnostics: z.array(z.unknown()),
   projectMemory: projectMemoryPreflightOutputSchema.optional(),
+  ...additionalRootsAuthorizationOutputSchema,
   instruction: z.string(),
 };
 
@@ -772,7 +796,11 @@ const workspaceSessionOutputSchema = z.object({
   root: z.string(),
   mode: z.enum(["checkout", "worktree"]),
   sourceRoot: z.string().optional(),
+  additionalRoots: z.array(additionalRootOutputSchema),
+  ...additionalRootsAuthorizationOutputSchema,
   managed: z.boolean(),
+  detached: z.boolean().optional(),
+  branch: z.string().optional(),
   status: z.string(),
   createdAt: z.string(),
   lastUsedAt: z.string(),
@@ -1103,7 +1131,9 @@ function gitRemotePolicyForWorkspace(
   };
 }
 
-function assertManagedAttachedGitWorkspace(workspace: Workspace): void {
+async function assertManagedAttachedGitWorkspace(
+  workspace: Workspace,
+): Promise<void> {
   if (
     workspace.mode !== "worktree" ||
     workspace.worktree?.managed !== true ||
@@ -1113,6 +1143,7 @@ function assertManagedAttachedGitWorkspace(workspace: Workspace): void {
       "GIT_MANAGED_WORKTREE_REQUIRED: Operation requires a DevSpace-managed worktree.",
     );
   }
+  await refreshWorkspaceGitAttachment(workspace);
   if (workspace.worktree.detached || !workspace.worktree.branch) {
     throw new Error(
       "GIT_DETACHED_HEAD: Operation requires an attached managed worktree branch.",
@@ -1407,7 +1438,20 @@ function workspaceContextToolResponse(input: {
     : input.task
       ? " Project Memory did not issue a receipt. SHADOW does not block existing tools; call project_memory_preflight again when the task changes."
       : " For a new task in a configured repository, call project_memory_preflight before later workspace tools.";
-  const instruction = `${instructionPrefix}${instructionCore}${instructionSkills}${instructionReadOnly}${instructionProjectMemory}`;
+  const {
+    requestedAdditionalRoots,
+    effectiveAdditionalRoots,
+    rejectedAdditionalRoots,
+    additionalRootsScope,
+    additionalRootsPersisted,
+  } = input.context.additionalRootsAuthorization;
+  const instructionAdditionalRoots =
+    rejectedAdditionalRoots.length > 0
+      ? " One or more requested additional roots were rejected, so the requested set was not partially applied. Inspect rejectedAdditionalRoots and effectiveAdditionalRoots before accessing them."
+      : effectiveAdditionalRoots.length > 0
+        ? " Additional-root grants are effective only for this in-memory service session and must be supplied again after service restart."
+        : "";
+  const instruction = `${instructionPrefix}${instructionCore}${instructionSkills}${instructionReadOnly}${instructionProjectMemory}${instructionAdditionalRoots}`;
   const resultContent: ToolContent[] = [
     {
       type: "text",
@@ -1429,6 +1473,9 @@ function workspaceContextToolResponse(input: {
           : undefined,
         projectMemory?.bundle
           ? `Project Memory bundle (first delivery only):\n${JSON.stringify(projectMemory.bundle, null, 2)}`
+          : undefined,
+        requestedAdditionalRoots.length > 0
+          ? `Requested additional roots: ${requestedAdditionalRoots.length}; effective: ${effectiveAdditionalRoots.length}; rejected: ${rejectedAdditionalRoots.length}.`
           : undefined,
         instruction,
       ]
@@ -1471,6 +1518,11 @@ function workspaceContextToolResponse(input: {
       skills: visibleSkills,
       skillDiagnostics: workspace.skillDiagnostics,
       projectMemory,
+      requestedAdditionalRoots,
+      effectiveAdditionalRoots,
+      rejectedAdditionalRoots,
+      additionalRootsScope,
+      additionalRootsPersisted,
       instruction,
     },
   };
@@ -1926,7 +1978,7 @@ function createMcpServer(
     {
       title: "List workspaces",
       description:
-        "List recent persisted workspace sessions that remain inside the current filesystem policy. Use this after reconnecting or restarting, then pass a resumable workspaceId to resume_workspace. Missing managed worktrees are reported but never recreated.",
+        "List recent persisted workspace sessions that remain inside the current filesystem policy. Use this after reconnecting or restarting, then pass a resumable workspaceId to resume_workspace. Missing managed worktrees are reported but never recreated. Managed worktree branch/detached state is probed live. Additional-root grants are in-memory only; active grants are reported, while a restarted service reports an empty effective set.",
       inputSchema: {
         limit: z
           .number()
@@ -3862,7 +3914,7 @@ function createMcpServer(
           projectMemoryReceiptId,
         );
         try {
-          assertManagedAttachedGitWorkspace(workspace);
+          await assertManagedAttachedGitWorkspace(workspace);
           gitRemotePolicyForWorkspace(config, workspace);
           const merge = await mergeGit({
             workspaceRoot: workspace.root,
@@ -3943,7 +3995,7 @@ function createMcpServer(
             projectMemoryReceiptId,
           );
           try {
-            assertManagedAttachedGitWorkspace(workspace);
+            await assertManagedAttachedGitWorkspace(workspace);
             const policy = gitRemotePolicyForWorkspace(config, workspace);
             const push = await pushGit({
               workspaceRoot: workspace.root,
@@ -3981,7 +4033,7 @@ function createMcpServer(
     {
       title: "Resume workspace",
       description:
-        "Resume a persisted checkout or managed worktree using a workspaceId returned by list_workspaces. Revalidates current path policy and directory existence, reloads project instructions and skills, and optionally runs Project Memory preflight for the current task. This is the supported way to recover a managed worktree whose generated path is outside allowedRoots.",
+        "Resume a persisted checkout or managed worktree using a workspaceId returned by list_workspaces. Revalidates current path policy and directory existence, probes current Git attachment state, reloads project instructions and skills, and optionally runs Project Memory preflight for the current task. This is the supported way to recover a managed worktree whose generated path is outside allowedRoots.",
       inputSchema: {
         workspaceId: z
           .string()
@@ -3997,6 +4049,7 @@ function createMcpServer(
             z.object({
               path: z
                 .string()
+                .min(1)
                 .describe("Absolute path to an additional root directory."),
               access: z
                 .enum(["read_only", "read_write"])
@@ -4005,7 +4058,7 @@ function createMcpServer(
           )
           .optional()
           .describe(
-            "Additional root directories the workspace may read/write beyond the primary workspace root.",
+            "Replacement set of in-memory additional-root grants. An empty array clears current grants. If any root is rejected, the requested set is not partially applied; inspect requestedAdditionalRoots, effectiveAdditionalRoots, and rejectedAdditionalRoots.",
           ),
       },
       outputSchema: workspaceContextOutputSchema,
@@ -4074,6 +4127,7 @@ function createMcpServer(
             z.object({
               path: z
                 .string()
+                .min(1)
                 .describe("Absolute path to an additional root directory."),
               access: z
                 .enum(["read_only", "read_write"])
@@ -4082,7 +4136,7 @@ function createMcpServer(
           )
           .optional()
           .describe(
-            "Additional root directories the workspace may read/write beyond the primary workspace root. Each root must specify an access mode. Junction and symlink targets are resolved before access checks.",
+            "In-memory additional-root grants for this workspace. Each root must exist and specify an access mode. Junction and symlink targets are canonicalized. If any root is rejected, none of the requested grants take effect; inspect the requested/effective/rejected result fields.",
           ),
       },
       outputSchema: workspaceContextOutputSchema,

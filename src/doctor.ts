@@ -1083,7 +1083,8 @@ export async function probePublicExternalClientFlow(
         openWorkspaceCheck =
           openWorkspace.ok &&
           workspaceId &&
-          workspaceRoot === input.workspacePath
+          workspaceRoot === input.workspacePath &&
+          hasAdditionalRootsAuthorization(structuredContent)
             ? okCheck(
                 openWorkspace.status,
                 "External MCP open_workspace succeeded through the public tunnel.",
@@ -1093,7 +1094,7 @@ export async function probePublicExternalClientFlow(
                   ok: false,
                   status: openWorkspace.status,
                   detail:
-                    "MCP open_workspace responded, but the expected workspaceId or root was missing.",
+                    "MCP open_workspace responded, but the expected workspace identity or additional-root authorization state was missing.",
                 }
               : failedCheck(
                   openWorkspace,
@@ -1232,11 +1233,16 @@ export async function probePublicExternalClientFlow(
             : [];
           const expectedListedWorkspaceId =
             input.resumeWorkspaceId ?? workspaceId;
-          const containsWorkspace = listed.some(
-            (entry) =>
-              stringField(asRecord(entry), "workspaceId") ===
-              expectedListedWorkspaceId,
-          );
+          const listedWorkspace = listed
+            .map(asRecord)
+            .find(
+              (entry) =>
+                stringField(entry, "workspaceId") === expectedListedWorkspaceId,
+            );
+          const containsWorkspace =
+            Boolean(listedWorkspace) &&
+            hasAdditionalRootsAuthorization(listedWorkspace) &&
+            Array.isArray(listedWorkspace?.additionalRoots);
           listWorkspacesCheck =
             listWorkspaces.ok && containsWorkspace
               ? okCheck(
@@ -1248,7 +1254,7 @@ export async function probePublicExternalClientFlow(
                     ok: false,
                     status: listWorkspaces.status,
                     detail:
-                      "MCP list_workspaces responded, but the opened workspaceId was missing.",
+                      "MCP list_workspaces responded, but the workspace or additional-root authorization state was missing.",
                   }
                 : failedCheck(
                     listWorkspaces,
@@ -1282,7 +1288,8 @@ export async function probePublicExternalClientFlow(
             resumeWorkspace.ok &&
             stringField(resumeStructured, "workspaceId") ===
               resumeTargetWorkspaceId &&
-            stringField(resumeStructured, "root") === resumeTargetRoot
+            stringField(resumeStructured, "root") === resumeTargetRoot &&
+            hasAdditionalRootsAuthorization(resumeStructured)
               ? okCheck(
                   resumeWorkspace.status,
                   "MCP resume_workspace restored the persisted session.",
@@ -1292,7 +1299,7 @@ export async function probePublicExternalClientFlow(
                     ok: false,
                     status: resumeWorkspace.status,
                     detail:
-                      "MCP resume_workspace responded, but the workspace identity or root changed.",
+                      "MCP resume_workspace responded, but the workspace identity, root, or additional-root authorization state was invalid.",
                   }
                 : failedCheck(
                     resumeWorkspace,
@@ -1924,6 +1931,18 @@ function numberField(
   return typeof candidate === "number" && Number.isFinite(candidate)
     ? candidate
     : undefined;
+}
+
+function hasAdditionalRootsAuthorization(
+  value: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    Array.isArray(value?.requestedAdditionalRoots) &&
+    Array.isArray(value?.effectiveAdditionalRoots) &&
+    Array.isArray(value?.rejectedAdditionalRoots) &&
+    value?.additionalRootsScope === "in_memory_session" &&
+    value?.additionalRootsPersisted === false
+  );
 }
 
 function toolVisibility(value: unknown): string[] | undefined {
