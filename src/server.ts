@@ -169,7 +169,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-v1.2026-07-28";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-v1.2026-07-29";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 export const LEGACY_WORKSPACE_APP_RESOURCE_URI =
   "ui://devspace/workspace-app.html";
@@ -760,23 +760,29 @@ const projectMemoryPreflightOutputSchema = z.object({
   error: z.string().optional(),
 });
 
-const additionalRootOutputSchema = z.object({
+const requestedAdditionalRootOutputSchema = z.object({
+  path: z.string(),
+  access: z.enum(["inherit", "read_only", "read_write"]),
+});
+
+const effectiveAdditionalRootOutputSchema = z.object({
   path: z.string(),
   access: z.enum(["read_only", "read_write"]),
 });
 
-const rejectedAdditionalRootOutputSchema = additionalRootOutputSchema.extend({
-  code: z.enum([
-    "ADDITIONAL_ROOT_NOT_FOUND",
-    "ADDITIONAL_ROOT_NOT_DIRECTORY",
-    "ADDITIONAL_ROOT_ACCESS_CONFLICT",
-  ]),
-  message: z.string(),
-});
+const rejectedAdditionalRootOutputSchema =
+  requestedAdditionalRootOutputSchema.extend({
+    code: z.enum([
+      "ADDITIONAL_ROOT_NOT_FOUND",
+      "ADDITIONAL_ROOT_NOT_DIRECTORY",
+      "ADDITIONAL_ROOT_ACCESS_CONFLICT",
+    ]),
+    message: z.string(),
+  });
 
 const additionalRootsAuthorizationOutputSchema: z.ZodRawShape = {
-  requestedAdditionalRoots: z.array(additionalRootOutputSchema),
-  effectiveAdditionalRoots: z.array(additionalRootOutputSchema),
+  requestedAdditionalRoots: z.array(requestedAdditionalRootOutputSchema),
+  effectiveAdditionalRoots: z.array(effectiveAdditionalRootOutputSchema),
   rejectedAdditionalRoots: z.array(rejectedAdditionalRootOutputSchema),
   additionalRootsScope: z.literal("in_memory_session"),
   additionalRootsPersisted: z.literal(false),
@@ -812,7 +818,7 @@ const workspaceSessionOutputSchema = z.object({
   root: z.string(),
   mode: z.enum(["checkout", "worktree"]),
   sourceRoot: z.string().optional(),
-  additionalRoots: z.array(additionalRootOutputSchema),
+  additionalRoots: z.array(effectiveAdditionalRootOutputSchema),
   ...additionalRootsAuthorizationOutputSchema,
   managed: z.boolean(),
   detached: z.boolean().optional(),
@@ -3571,7 +3577,7 @@ function createMcpServer(
       {
         title: "Create directory",
         description:
-          "Create a real nested directory inside the workspace. Existing real directories are idempotent.",
+          "Create a real nested directory inside the workspace or a writable additional root. Relative paths use the workspace root.",
         inputSchema: {
           workspaceId: z.string(),
           path: z.string().max(512),
@@ -3593,7 +3599,11 @@ function createMcpServer(
           "mkdir",
           projectMemoryReceiptId,
         );
-        const operation = await createWorkspaceDirectory(workspace.root, path);
+        const destination = workspaces.resolveWritePath(workspace, path);
+        const operation = await createWorkspaceDirectory(
+          destination.rootPath,
+          destination.relativePath,
+        );
         const result = `${operation.created ? "Created" : "Exists"}: ${operation.path}`;
         return {
           content: [textBlock(result)],
@@ -3609,7 +3619,7 @@ function createMcpServer(
       {
         title: "Copy path",
         description:
-          "Copy a regular file or symlink-free directory tree inside the workspace. Directory merge and replacement are prohibited.",
+          "Copy a regular file or symlink-free directory tree between the workspace and authorized additional roots. The source requires read access and the destination requires write access.",
         inputSchema: {
           workspaceId: z.string(),
           sourcePath: z.string().max(512),
@@ -3639,12 +3649,23 @@ function createMcpServer(
           "copy",
           projectMemoryReceiptId,
         );
+        const source = workspaces.resolveWorkspacePath(
+          workspace,
+          sourcePath,
+          "read",
+        );
+        const destination = workspaces.resolveWritePath(
+          workspace,
+          destinationPath,
+        );
         const operation = await copyWorkspacePath({
           workspaceRoot: workspace.root,
+          sourceRoot: source.rootPath,
+          destinationRoot: destination.rootPath,
           stateDir: config.stateDir,
           workspaceId,
-          sourcePath,
-          destinationPath,
+          sourcePath: source.relativePath,
+          destinationPath: destination.relativePath,
           overwrite,
         });
         const result = `Copied ${operation.sourcePath} to ${operation.destinationPath}.`;
@@ -3662,7 +3683,7 @@ function createMcpServer(
       {
         title: "Move path",
         description:
-          "Atomically move a regular file or real directory inside the workspace. Cross-device moves and directory replacement are prohibited.",
+          "Atomically move a regular file or real directory between writable workspace roots. Cross-device moves and directory replacement are prohibited.",
         inputSchema: {
           workspaceId: z.string(),
           sourcePath: z.string().max(512),
@@ -3692,12 +3713,19 @@ function createMcpServer(
           "move",
           projectMemoryReceiptId,
         );
+        const source = workspaces.resolveWritePath(workspace, sourcePath);
+        const destination = workspaces.resolveWritePath(
+          workspace,
+          destinationPath,
+        );
         const operation = await moveWorkspacePath({
           workspaceRoot: workspace.root,
+          sourceRoot: source.rootPath,
+          destinationRoot: destination.rootPath,
           stateDir: config.stateDir,
           workspaceId,
-          sourcePath,
-          destinationPath,
+          sourcePath: source.relativePath,
+          destinationPath: destination.relativePath,
           overwrite,
         });
         const result = `Moved ${operation.sourcePath} to ${operation.destinationPath}.`;
@@ -3715,7 +3743,7 @@ function createMcpServer(
       {
         title: "Move to trash",
         description:
-          "Move a workspace-local file or directory into the private DevSpace quarantine. No permanent deletion is performed.",
+          "Move a file or directory from the workspace or a writable additional root into the private DevSpace quarantine. No permanent deletion is performed.",
         inputSchema: {
           workspaceId: z.string(),
           path: z.string().max(512),
@@ -3737,11 +3765,12 @@ function createMcpServer(
           "move_to_trash",
           projectMemoryReceiptId,
         );
+        const source = workspaces.resolveWritePath(workspace, path);
         const trash = await moveWorkspacePathToTrash({
-          workspaceRoot: workspace.root,
+          workspaceRoot: source.rootPath,
           stateDir: config.stateDir,
           workspaceId,
-          path,
+          path: source.relativePath,
         });
         const result = `Moved ${trash.originalPath} to quarantine as ${trash.trashId}.`;
         return {
@@ -4166,13 +4195,16 @@ function createMcpServer(
                 .min(1)
                 .describe("Absolute path to an additional root directory."),
               access: z
-                .enum(["read_only", "read_write"])
-                .describe("Access mode for this root."),
+                .enum(["inherit", "read_only", "read_write"])
+                .optional()
+                .describe(
+                  "Optional access override. Defaults to inherit, which uses the workspace root's effective access.",
+                ),
             }),
           )
           .optional()
           .describe(
-            "Replacement set of in-memory additional-root grants. An empty array clears current grants. If any root is rejected, the requested set is not partially applied; inspect requestedAdditionalRoots, effectiveAdditionalRoots, and rejectedAdditionalRoots.",
+            "Replacement set of in-memory additional-root grants. Roots inherit workspace access unless access overrides it. An empty array clears current grants. If any root is rejected, the requested set is not partially applied; inspect requestedAdditionalRoots, effectiveAdditionalRoots, and rejectedAdditionalRoots.",
           ),
       },
       outputSchema: workspaceContextOutputSchema,
@@ -4244,13 +4276,16 @@ function createMcpServer(
                 .min(1)
                 .describe("Absolute path to an additional root directory."),
               access: z
-                .enum(["read_only", "read_write"])
-                .describe("Access mode for this root."),
+                .enum(["inherit", "read_only", "read_write"])
+                .optional()
+                .describe(
+                  "Optional access override. Defaults to inherit, which uses the workspace root's effective access.",
+                ),
             }),
           )
           .optional()
           .describe(
-            "In-memory additional-root grants for this workspace. Each root must exist and specify an access mode. Junction and symlink targets are canonicalized. If any root is rejected, none of the requested grants take effect; inspect the requested/effective/rejected result fields.",
+            "In-memory additional-root grants for this workspace. Each root inherits workspace access unless access overrides it. Junction and symlink targets are canonicalized. If any root is rejected, none of the requested grants take effect; inspect the requested/effective/rejected result fields.",
           ),
       },
       outputSchema: workspaceContextOutputSchema,
@@ -4348,7 +4383,7 @@ function createMcpServer(
     {
       title: "Read file",
       description: [
-        "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId.",
+        "Read a file inside an open workspace or authorized additional root. Relative paths use the workspace root; absolute paths may select an additional root. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId.",
         "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
         config.skillsEnabled
           ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
@@ -4364,8 +4399,8 @@ function createMcpServer(
           .string()
           .describe(
             config.skillsEnabled
-              ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
-              : "File path to read, relative to the workspace root.",
+              ? "Workspace-relative path, absolute path inside an authorized additional root, or an advertised skill path from open_workspace skills."
+              : "Workspace-relative path, or an absolute path inside an authorized additional root.",
           ),
         offset: z
           .number()
@@ -4457,14 +4492,16 @@ function createMcpServer(
       toolNames.write,
       {
         title: "Write file",
-        description: `Create a file inside an open workspace. Existing files are rejected unless overwrite=true; prefer ${toolNames.edit} for targeted changes. Call open_workspace first and pass workspaceId.`,
+        description: `Create a file inside an open workspace or writable additional root. Existing files are rejected unless overwrite=true; prefer ${toolNames.edit} for targeted changes. Relative paths use the workspace root; absolute paths may select an authorized additional root.`,
         inputSchema: {
           workspaceId: z
             .string()
             .describe("Workspace identifier returned by open_workspace."),
           path: z
             .string()
-            .describe("File path to write, relative to the workspace root."),
+            .describe(
+              "Workspace-relative path, or an absolute path inside an authorized writable additional root.",
+            ),
           content: z.string().describe("Complete new file content."),
           overwrite: z
             .boolean()
@@ -4486,7 +4523,7 @@ function createMcpServer(
           toolNames.write,
           projectMemoryReceiptId,
         );
-        const destination = resolveWorkspacePath(workspace.root, input.path);
+        const destination = workspaces.resolveWritePath(workspace, input.path);
         if (existsSync(destination.absolutePath)) {
           const target = lstatSync(destination.absolutePath);
           if (target.isSymbolicLink() || !target.isFile()) {
@@ -4500,16 +4537,20 @@ function createMcpServer(
             );
           }
           await moveWorkspacePathToTrash({
-            workspaceRoot: workspace.root,
+            workspaceRoot: destination.rootPath,
             stateDir: config.stateDir,
             workspaceId,
             path: destination.relativePath,
           });
         }
-        const response = await writeFileTool(input, {
-          cwd: workspace.root,
-          root: workspace.root,
-        });
+        const response = await writeFileTool(
+          { ...input, path: destination.absolutePath },
+          {
+            cwd: workspace.root,
+            root: workspace.root,
+            writeRoots: [destination.rootPath],
+          },
+        );
 
         if (response.isError) {
           logFailedToolResponse(
@@ -4817,14 +4858,16 @@ function createMcpServer(
       toolNames.edit,
       {
         title: "Edit file",
-        description: `Edit one file inside an open workspace by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.`,
+        description: `Edit one file inside an open workspace or writable additional root by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file. Relative paths use the workspace root; absolute paths may select an authorized additional root.`,
         inputSchema: {
           workspaceId: z
             .string()
             .describe("Workspace identifier returned by open_workspace."),
           path: z
             .string()
-            .describe("File path to edit, relative to the workspace root."),
+            .describe(
+              "Workspace-relative path, or an absolute path inside an authorized writable additional root.",
+            ),
           edits: z
             .array(
               z.object({
@@ -4853,11 +4896,15 @@ function createMcpServer(
           toolNames.edit,
           projectMemoryReceiptId,
         );
-        workspaces.resolvePath(workspace, input.path);
-        const response = await editFileTool(input, {
-          cwd: workspace.root,
-          root: workspace.root,
-        });
+        const editPath = workspaces.resolveWritePath(workspace, input.path);
+        const response = await editFileTool(
+          { ...input, path: editPath.absolutePath },
+          {
+            cwd: workspace.root,
+            root: workspace.root,
+            writeRoots: [editPath.rootPath],
+          },
+        );
 
         if (response.isError) {
           logFailedToolResponse(
@@ -5007,7 +5054,7 @@ function createMcpServer(
             .string()
             .optional()
             .describe(
-              "Optional path or glob scope relative to the workspace root.",
+              "Optional workspace-relative scope, or an absolute path inside an authorized additional root.",
             ),
           include: z.string().optional().describe("Optional include glob."),
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
@@ -5024,11 +5071,20 @@ function createMcpServer(
           toolNames.grep,
           projectMemoryReceiptId,
         );
-        if (input.path) workspaces.resolvePath(workspace, input.path);
-        const response = await grepFilesTool(input, {
-          cwd: workspace.root,
-          root: workspace.root,
-        });
+        const grepPath = input.path
+          ? workspaces.resolveReadPath(workspace, input.path)
+          : undefined;
+        const response = await grepFilesTool(
+          {
+            ...input,
+            path: grepPath?.absolutePath,
+          },
+          {
+            cwd: workspace.root,
+            root: workspace.root,
+            readRoots: grepPath?.readRoots,
+          },
+        );
 
         if (response.isError) {
           logFailedToolResponse(
@@ -5092,7 +5148,9 @@ function createMcpServer(
           path: z
             .string()
             .optional()
-            .describe("Optional path scope relative to the workspace root."),
+            .describe(
+              "Optional workspace-relative scope, or an absolute path inside an authorized additional root.",
+            ),
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
         outputSchema: resultOutputSchema(),
@@ -5107,11 +5165,20 @@ function createMcpServer(
           toolNames.glob,
           projectMemoryReceiptId,
         );
-        if (input.path) workspaces.resolvePath(workspace, input.path);
-        const response = await findFilesTool(input, {
-          cwd: workspace.root,
-          root: workspace.root,
-        });
+        const findPath = input.path
+          ? workspaces.resolveReadPath(workspace, input.path)
+          : undefined;
+        const response = await findFilesTool(
+          {
+            ...input,
+            path: findPath?.absolutePath,
+          },
+          {
+            cwd: workspace.root,
+            root: workspace.root,
+            readRoots: findPath?.readRoots,
+          },
+        );
 
         if (response.isError) {
           logFailedToolResponse(
@@ -5174,7 +5241,7 @@ function createMcpServer(
           path: z
             .string()
             .describe(
-              "Directory path to list, relative to the workspace root.",
+              "Workspace-relative directory, or an absolute directory inside an authorized additional root.",
             ),
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
@@ -5190,11 +5257,15 @@ function createMcpServer(
           toolNames.ls,
           projectMemoryReceiptId,
         );
-        workspaces.resolvePath(workspace, input.path);
-        const response = await listDirectoryTool(input, {
-          cwd: workspace.root,
-          root: workspace.root,
-        });
+        const listPath = workspaces.resolveReadPath(workspace, input.path);
+        const response = await listDirectoryTool(
+          { ...input, path: listPath.absolutePath },
+          {
+            cwd: workspace.root,
+            root: workspace.root,
+            readRoots: listPath.readRoots,
+          },
+        );
 
         if (response.isError) {
           logFailedToolResponse(

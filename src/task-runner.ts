@@ -1,4 +1,9 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import {
+  execFileSync,
+  spawn,
+  spawnSync,
+  type ChildProcess,
+} from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -91,6 +96,36 @@ const DEPENDENCY_LOCK_CANDIDATES = [
   "requirements-lock.txt",
   "requirements.txt",
 ];
+
+export function terminateProcessTree(proc: ChildProcess): boolean {
+  const pid = proc.pid;
+  if (!pid || proc.exitCode !== null) return false;
+
+  if (process.platform === "win32") {
+    const result = spawnSync(
+      "taskkill.exe",
+      ["/PID", String(pid), "/T", "/F"],
+      {
+        stdio: "ignore",
+        windowsHide: true,
+      },
+    );
+    if (!result.error && result.status === 0) return true;
+  } else {
+    try {
+      process.kill(-pid, "SIGKILL");
+      return true;
+    } catch {
+      // Fall back to the direct child when process-group termination fails.
+    }
+  }
+
+  try {
+    return proc.kill("SIGKILL");
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Environment diagnostics types
@@ -310,8 +345,14 @@ export class TaskRunner {
 
     // Validate params
     const allRoots = [
-      input.workspaceRoot,
-      ...input.additionalRoots.map((r) => r.path),
+      { path: input.workspaceRoot, access: "read_write" as const },
+      ...input.additionalRoots.map((root) => ({
+        path: root.path,
+        access:
+          root.access === "read_only"
+            ? ("read_only" as const)
+            : ("read_write" as const),
+      })),
     ];
     const { command, errors } = validateAndSubstitute(
       task,
@@ -418,6 +459,7 @@ export class TaskRunner {
         env: childEnv as Record<string, string>,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        detached: process.platform !== "win32",
       });
 
       session.pid = proc.pid!;
@@ -431,9 +473,12 @@ export class TaskRunner {
         session.stderr += d.toString();
       });
       proc.on("exit", (code) => {
-        session.status = code === 0 ? "succeeded" : "failed";
+        if (session.status === "running") {
+          session.status = code === 0 ? "succeeded" : "failed";
+        }
         session.exitCode = code ?? undefined;
         session.finishedAt = new Date().toISOString();
+        this.processes.delete(sessionId);
         // Clean up secret values — they are no longer needed after exit
         this.sessionSecretValues.delete(sessionId);
       });
@@ -630,19 +675,13 @@ export class TaskRunner {
   stopSession(sessionId: string): boolean {
     const proc = this.processes.get(sessionId);
     if (!proc) return false;
-    try {
-      proc.kill("SIGTERM");
-      setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          /* already dead */
-        }
-      }, 5000);
-    } catch {
-      return false;
+    const stopped = terminateProcessTree(proc);
+    if (!stopped) return false;
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.status = "stopped";
+      session.finishedAt = new Date().toISOString();
     }
-    // Clean up secret values
     this.sessionSecretValues.delete(sessionId);
     return true;
   }
@@ -853,6 +892,7 @@ export class TaskRunner {
         env: { ...process.env, ...env },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        detached: process.platform !== "win32",
       });
 
       let stdout = "";
@@ -862,7 +902,7 @@ export class TaskRunner {
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          proc.kill("SIGKILL");
+          terminateProcessTree(proc);
           resolvePromise({
             stdout,
             stderr: stderr + "\n[TASK TIMED OUT]",

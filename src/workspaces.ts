@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
 import { mkdir, opendir, realpath, stat } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
@@ -13,15 +14,21 @@ import type {
 } from "./project-memory.js";
 import {
   type AdditionalRoot,
+  type EffectiveAdditionalRoot,
   AccessDeniedError,
   assertAllowedPath,
   assertWriteAllowed,
+  effectiveAdditionalRootAccess,
   expandHomePath,
   isPathInsideAnyRoot,
   isPathInsideRoot,
   normalizeAdditionalRoots,
   resolveAllowedPath,
 } from "./roots.js";
+import {
+  type ResolvedWorkspacePath,
+  resolveWorkspacePath,
+} from "./workspace-paths.js";
 import { ProjectMemoryController } from "./project-memory.js";
 import {
   type ApprovedTasks,
@@ -65,7 +72,7 @@ export interface AdditionalRootRejection extends AdditionalRoot {
 
 export interface AdditionalRootsAuthorization {
   requestedAdditionalRoots: AdditionalRoot[];
-  effectiveAdditionalRoots: AdditionalRoot[];
+  effectiveAdditionalRoots: EffectiveAdditionalRoot[];
   rejectedAdditionalRoots: AdditionalRootRejection[];
   additionalRootsScope: "in_memory_session";
   additionalRootsPersisted: false;
@@ -77,7 +84,7 @@ export interface Workspace {
   mode: WorkspaceMode;
   sourceRoot?: string;
   worktree?: WorkspaceWorktree;
-  additionalRoots: AdditionalRoot[];
+  additionalRoots: EffectiveAdditionalRoot[];
   additionalRootsAuthorization: AdditionalRootsAuthorization;
   approvedTasks?: ApprovedTasks;
   skills: LoadedSkills["skills"];
@@ -99,9 +106,9 @@ export interface WorkspaceSessionSummary {
   root: string;
   mode: WorkspaceMode;
   sourceRoot?: string;
-  additionalRoots: AdditionalRoot[];
+  additionalRoots: EffectiveAdditionalRoot[];
   requestedAdditionalRoots: AdditionalRoot[];
-  effectiveAdditionalRoots: AdditionalRoot[];
+  effectiveAdditionalRoots: EffectiveAdditionalRoot[];
   rejectedAdditionalRoots: AdditionalRootRejection[];
   additionalRootsScope: "in_memory_session";
   additionalRootsPersisted: false;
@@ -118,8 +125,18 @@ export interface WorkspaceSessionSummary {
 export interface WorkspaceReadPath {
   absolutePath: string;
   readRoots: string[];
+  rootPath: string;
+  rootKind: "workspace" | "additional";
+  access: "read_only" | "read_write";
+  relativePath: string;
   skillRead?: SkillReadResolution;
 }
+
+export type WorkspaceResolvedPath = ResolvedWorkspacePath & {
+  rootPath: string;
+  rootKind: "workspace" | "additional";
+  access: "read_only" | "read_write";
+};
 
 export interface OpenWorkspaceInput {
   path: string;
@@ -343,16 +360,75 @@ export class WorkspaceRegistry {
   }
 
   resolvePath(workspace: Workspace, inputPath: string): string {
-    const allRoots = [
-      workspace.root,
-      ...workspace.additionalRoots.map((r) => r.path),
-    ];
-    const absolutePath = resolveAllowedPath(
-      expandHomePath(inputPath),
-      workspace.root,
-      allRoots,
+    return this.resolveWorkspacePath(workspace, inputPath, "read").absolutePath;
+  }
+
+  resolveWritePath(
+    workspace: Workspace,
+    inputPath: string,
+  ): WorkspaceResolvedPath {
+    return this.resolveWorkspacePath(workspace, inputPath, "write");
+  }
+
+  resolveWorkspacePath(
+    workspace: Workspace,
+    inputPath: string,
+    requiredAccess: "read" | "write",
+  ): WorkspaceResolvedPath {
+    const expanded = expandHomePath(inputPath);
+    const primaryRoot = canonicalizePathWithExistingAncestor(
+      resolve(workspace.root),
     );
-    return absolutePath;
+    const roots = [
+      {
+        path: primaryRoot,
+        access: (this.config.readOnly ? "read_only" : "read_write") as
+          "read_only" | "read_write",
+        rootKind: "workspace" as const,
+      },
+      ...workspace.additionalRoots.map((root) => ({
+        path: root.path,
+        access:
+          root.access === "read_only"
+            ? ("read_only" as const)
+            : ("read_write" as const),
+        rootKind: "additional" as const,
+      })),
+    ];
+    const unresolvedInput = isAbsolute(expanded)
+      ? resolve(expanded)
+      : resolve(primaryRoot, expanded);
+    const absoluteInput = canonicalizePathWithExistingAncestor(unresolvedInput);
+    const owningRoot = roots
+      .filter((root) => isPathInsideRoot(absoluteInput, root.path))
+      .sort((left, right) => right.path.length - left.path.length)[0];
+    if (!owningRoot) {
+      throw new AccessDeniedError(
+        `Path is outside allowed roots: ${inputPath}`,
+      );
+    }
+    if (requiredAccess === "write" && owningRoot.access !== "read_write") {
+      throw new AccessDeniedError(
+        `Write denied: path is in a read-only additional root: ${inputPath}`,
+      );
+    }
+    const rootRelative = relative(owningRoot.path, absoluteInput)
+      .split("\\")
+      .join("/");
+    const resolved =
+      rootRelative === ""
+        ? {
+            relativePath: ".",
+            absolutePath: owningRoot.path,
+            canonicalWorkspaceRoot: owningRoot.path,
+          }
+        : resolveWorkspacePath(owningRoot.path, rootRelative);
+    return {
+      ...resolved,
+      rootPath: owningRoot.path,
+      rootKind: owningRoot.rootKind,
+      access: owningRoot.access,
+    };
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
@@ -369,13 +445,20 @@ export class WorkspaceRegistry {
       return {
         absolutePath: skillRead.absolutePath,
         readRoots: [workspace.root, skillRead.skill.baseDir],
+        rootPath: skillRead.skill.baseDir,
+        rootKind: "additional",
+        access: "read_only",
+        relativePath: relative(skillRead.skill.baseDir, skillRead.absolutePath)
+          .split("\\")
+          .join("/"),
         skillRead,
       };
     }
 
     try {
+      const resolved = this.resolveWorkspacePath(workspace, inputPath, "read");
       return {
-        absolutePath: this.resolvePath(workspace, inputPath),
+        ...resolved,
         readRoots: allRoots,
       };
     } catch (workspaceError) {
@@ -534,11 +617,11 @@ export class WorkspaceRegistry {
 
   private async resolveAdditionalRootsAuthorization(
     requestedRoots: AdditionalRoot[],
-    currentEffectiveRoots: AdditionalRoot[],
+    currentEffectiveRoots: EffectiveAdditionalRoot[],
   ): Promise<AdditionalRootsAuthorization> {
     const requestedAdditionalRoots = requestedRoots.map((root) => ({
       path: resolve(expandHomePath(root.path)),
-      access: root.access,
+      access: root.access ?? "inherit",
     }));
     const resolved = await Promise.all(
       requestedAdditionalRoots.map(async (root) => {
@@ -568,7 +651,13 @@ export class WorkspaceRegistry {
         }
         return {
           root,
-          effective: { path: canonicalPath, access: root.access },
+          effective: {
+            path: canonicalPath,
+            access: effectiveAdditionalRootAccess(
+              root.access,
+              !this.config.readOnly,
+            ),
+          },
         };
       }),
     );
@@ -579,7 +668,7 @@ export class WorkspaceRegistry {
     const candidates = resolved.flatMap((result) =>
       result.effective ? [result.effective] : [],
     );
-    const accessByPath = new Map<string, AdditionalRoot["access"]>();
+    const accessByPath = new Map<string, EffectiveAdditionalRoot["access"]>();
     for (const candidate of candidates) {
       const previousAccess = accessByPath.get(candidate.path);
       if (previousAccess && previousAccess !== candidate.access) {
@@ -725,6 +814,18 @@ function emptyAdditionalRootsAuthorization(): AdditionalRootsAuthorization {
     additionalRootsScope: "in_memory_session",
     additionalRootsPersisted: false,
   };
+}
+
+function canonicalizePathWithExistingAncestor(path: string): string {
+  let existing = path;
+  const missingParts: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) return resolve(path);
+    missingParts.unshift(existing.slice(parent.length + 1));
+    existing = parent;
+  }
+  return resolve(realpathSync.native(existing), ...missingParts);
 }
 
 function dedupeAdditionalRootRejections(

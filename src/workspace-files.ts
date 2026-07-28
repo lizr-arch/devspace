@@ -16,6 +16,7 @@ import {
   resolveExistingWorkspacePath,
   resolveWorkspacePath,
 } from "./workspace-paths.js";
+import { isPathInsideRoot } from "./roots.js";
 
 export interface FileOperationSummary {
   sourcePath?: string;
@@ -60,6 +61,8 @@ export async function createWorkspaceDirectory(
 
 export async function copyWorkspacePath(input: {
   workspaceRoot: string;
+  sourceRoot?: string;
+  destinationRoot?: string;
   stateDir: string;
   workspaceId: string;
   sourcePath: string;
@@ -67,11 +70,11 @@ export async function copyWorkspacePath(input: {
   overwrite?: boolean;
 }): Promise<FileOperationSummary & { displacedTrashId?: string }> {
   const source = resolveExistingWorkspacePath(
-    input.workspaceRoot,
+    input.sourceRoot ?? input.workspaceRoot,
     input.sourcePath,
   );
   const destination = resolveWorkspacePath(
-    input.workspaceRoot,
+    input.destinationRoot ?? input.workspaceRoot,
     input.destinationPath,
   );
   const summary = await summarizePath(source.absolutePath);
@@ -110,7 +113,7 @@ export async function copyWorkspacePath(input: {
     }
     if (destinationExists) {
       const trashed = await moveWorkspacePathToTrash({
-        workspaceRoot: input.workspaceRoot,
+        workspaceRoot: input.destinationRoot ?? input.workspaceRoot,
         stateDir: input.stateDir,
         workspaceId: input.workspaceId,
         path: destination.relativePath,
@@ -134,6 +137,8 @@ export async function copyWorkspacePath(input: {
 
 export async function moveWorkspacePath(input: {
   workspaceRoot: string;
+  sourceRoot?: string;
+  destinationRoot?: string;
   stateDir: string;
   workspaceId: string;
   sourcePath: string;
@@ -141,14 +146,17 @@ export async function moveWorkspacePath(input: {
   overwrite?: boolean;
 }): Promise<FileOperationSummary & { displacedTrashId?: string }> {
   const source = resolveExistingWorkspacePath(
-    input.workspaceRoot,
+    input.sourceRoot ?? input.workspaceRoot,
     input.sourcePath,
   );
   const destination = resolveWorkspacePath(
-    input.workspaceRoot,
+    input.destinationRoot ?? input.workspaceRoot,
     input.destinationPath,
   );
-  if (destination.absolutePath.startsWith(`${source.absolutePath}/`)) {
+  if (
+    destination.absolutePath !== source.absolutePath &&
+    isPathInsideRoot(destination.absolutePath, source.absolutePath)
+  ) {
     throw new Error("PATH_INVALID: Cannot move a directory inside itself.");
   }
   const summary = await summarizePath(source.absolutePath);
@@ -167,7 +175,7 @@ export async function moveWorkspacePath(input: {
       );
     }
     const trashed = await moveWorkspacePathToTrash({
-      workspaceRoot: input.workspaceRoot,
+      workspaceRoot: input.destinationRoot ?? input.workspaceRoot,
       stateDir: input.stateDir,
       workspaceId: input.workspaceId,
       path: destination.relativePath,
@@ -366,7 +374,7 @@ export async function restoreWorkspaceFileFromTrash(input: {
   const temporary = `${destination.absolutePath}.devspace-${randomUUID()}.restore`;
   try {
     await copyFile(payloadPath, temporary);
-    const handle = await open(temporary, "r");
+    const handle = await open(temporary, "r+");
     try {
       await handle.sync();
     } finally {

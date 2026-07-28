@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { isPathInsideRoot } from "./roots.js";
 import { TaskError, type TaskErrorCode } from "./task-errors.js";
+import { resolveWorkspacePath } from "./workspace-paths.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,10 +23,16 @@ export interface TaskSecretBinding {
 
 export interface TaskParameter {
   type: "string" | "path" | "sha256" | "int";
+  access?: "read" | "write";
   required?: boolean;
   pattern?: string;
   min?: number;
   max?: number;
+}
+
+export interface TaskPathGrant {
+  path: string;
+  access: "read_only" | "read_write";
 }
 
 export interface TaskDefinition {
@@ -240,6 +247,22 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest {
           });
         }
         const param: TaskParameter = { type: ptype };
+        if (pd.access !== undefined) {
+          if (
+            ptype !== "path" ||
+            (pd.access !== "read" && pd.access !== "write")
+          ) {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.access`,
+              message: `Task ${id}: parameter ${pname} access is only valid for path parameters and must be read or write.`,
+              recoverable: true,
+            });
+          }
+          param.access = pd.access;
+        }
         if (pd.required !== undefined) {
           if (typeof pd.required !== "boolean") {
             throw new TaskError({
@@ -479,7 +502,7 @@ export function validateAndSubstitute(
   task: TaskDefinition,
   params: Record<string, string>,
   workspaceRoot: string,
-  allowedRoots: string[],
+  allowedRoots: Array<string | TaskPathGrant>,
 ): { command: string[]; errors: ParamValidationError[] } {
   const errors: ParamValidationError[] = [];
   const subst = new Map<string, string>();
@@ -496,13 +519,13 @@ export function validateAndSubstitute(
         subst.set(name, value);
         break;
       case "path":
-        if (
-          !isPathInsideRoot(value, workspaceRoot) &&
-          !allowedRoots.some((r) => isPathInsideRoot(value, r))
-        ) {
+        if (!validateTaskPath(value, workspaceRoot, allowedRoots, def.access)) {
           errors.push({
             param: name,
-            message: `Path parameter ${name} is outside allowed roots: ${value}`,
+            message:
+              def.access === "write"
+                ? `Path parameter ${name} is outside writable roots: ${value}`
+                : `Path parameter ${name} is outside allowed roots: ${value}`,
           });
         } else {
           subst.set(name, value);
@@ -562,4 +585,58 @@ export function validateAndSubstitute(
   });
 
   return { command, errors };
+}
+
+function validateTaskPath(
+  value: string,
+  workspaceRoot: string,
+  allowedRoots: Array<string | TaskPathGrant>,
+  requiredAccess: "read" | "write" = "read",
+): boolean {
+  const absoluteValue = canonicalizeTaskPath(
+    isAbsolute(value) ? resolve(value) : resolve(workspaceRoot, value),
+  );
+  const grants: TaskPathGrant[] = [
+    { path: canonicalizeTaskPath(workspaceRoot), access: "read_write" },
+    ...allowedRoots.map((root) =>
+      typeof root === "string"
+        ? {
+            path: canonicalizeTaskPath(root),
+            access: "read_write" as const,
+          }
+        : { path: canonicalizeTaskPath(root.path), access: root.access },
+    ),
+  ];
+  const owningGrant = grants
+    .filter((grant) => isPathInsideRoot(absoluteValue, grant.path))
+    .sort((left, right) => right.path.length - left.path.length)[0];
+  if (
+    !owningGrant ||
+    (requiredAccess === "write" && owningGrant.access !== "read_write")
+  ) {
+    return false;
+  }
+
+  const relativePath = relative(owningGrant.path, absoluteValue)
+    .split("\\")
+    .join("/");
+  if (!relativePath || relativePath === ".") return true;
+  try {
+    resolveWorkspacePath(owningGrant.path, relativePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function canonicalizeTaskPath(path: string): string {
+  let existing = resolve(path);
+  const missingParts: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) return resolve(path);
+    missingParts.unshift(existing.slice(parent.length + 1));
+    existing = parent;
+  }
+  return resolve(realpathSync.native(existing), ...missingParts);
 }

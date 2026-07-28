@@ -3,7 +3,9 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   assertAllowedPath,
+  effectiveAdditionalRootAccess,
   expandHomePath,
+  normalizeAdditionalRoots,
   resolveAllowedPath,
 } from "./roots.js";
 
@@ -31,3 +33,10 @@ assert.equal(
   resolveAllowedPath("~/file.txt", "/workspace", ["/workspace"]),
   resolve("/workspace", "~/file.txt"),
 );
+
+assert.deepEqual(normalizeAdditionalRoots([{ path: "/reference" }]), [
+  { path: resolve("/reference"), access: "inherit" },
+]);
+assert.equal(effectiveAdditionalRootAccess("inherit", true), "read_write");
+assert.equal(effectiveAdditionalRootAccess("read_write", false), "read_only");
+assert.equal(effectiveAdditionalRootAccess("read_only", true), "read_only");

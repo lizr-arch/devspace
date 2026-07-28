@@ -202,6 +202,47 @@ reported by `devspace_info` without preventing the service from starting. See
 [Runner Registry](runner-registry.md) and
 [Houdini runners](houdini-runners.md) for the policy and containment contract.
 
+## Additional Roots And System Tasks
+
+`open_workspace` and `resume_workspace` accept session-only additional roots.
+Their access defaults to `inherit`, which follows the workspace's effective
+read/write mode. `read_only` and `read_write` are explicit overrides, but the
+service-wide read-only mode remains the upper permission limit.
+
+Normal file tools accept workspace-relative paths for the primary root and
+absolute paths for authorized additional roots. Reads, searches, listings,
+writes, edits, directory creation, copies, moves, and quarantine operations all
+use the same root-aware resolver. Cross-root copies are supported; cross-device
+moves remain unsupported.
+
+Repository-owned tools such as Unreal build or launch scripts should use an
+approved `runtime: system` task rather than a DevSpace engine-specific runner:
+
+```yaml
+version: 1
+tasks:
+  ue-runtime:
+    mode: run
+    runtime: system
+    command:
+      - pwsh.exe
+      - -NoProfile
+      - -NonInteractive
+      - -File
+      - scripts/ue-runtime.ps1
+      - -Project
+      - "${UE_PROJECT}"
+    parameters:
+      UE_PROJECT:
+        type: path
+        access: write
+        required: true
+```
+
+Path parameters default to `access: read`. A task must declare
+`access: write` before an additional-root path with write side effects can be
+passed to it. Task timeout and stop operations terminate the whole process tree.
+
 ## Workspace Python Bootstrap
 
 Ordinary `project_task` entries with `runtime: workspace-python` require an

@@ -31,6 +31,7 @@ interface ToolContext {
   cwd: string;
   root: string;
   readRoots?: string[];
+  writeRoots?: string[];
 }
 
 function toMcpContent(result: AgentToolResult<unknown>): McpContent[] {
@@ -94,7 +95,11 @@ export async function writeFileTool(
   input: WriteToolInput,
   context: ToolContext,
 ): Promise<ToolResponse> {
-  const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = resolveAllowedPath(
+    input.path,
+    context.cwd,
+    context.writeRoots ?? [context.root],
+  );
   const tool = createWriteTool(context.cwd);
 
   return runTool(
@@ -111,7 +116,11 @@ export async function editFileTool(
   input: EditToolInput,
   context: ToolContext,
 ): Promise<ToolResponse<EditToolDetails>> {
-  const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = resolveAllowedPath(
+    input.path,
+    context.cwd,
+    context.writeRoots ?? [context.root],
+  );
   const tool = createEditTool(context.cwd);
 
   return runTool(
@@ -128,12 +137,18 @@ export async function grepFilesTool(
   input: GrepToolInput,
   context: ToolContext,
 ): Promise<ToolResponse> {
-  if (input.path) resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = input.path
+    ? resolveAllowedPath(
+        input.path,
+        context.cwd,
+        context.readRoots ?? [context.root],
+      )
+    : undefined;
   const tool = createGrepTool(context.cwd);
 
   return runTool(
     (params) => tool.execute("grep_files", params),
-    input,
+    { ...input, path },
     context,
   );
 }
@@ -142,12 +157,18 @@ export async function findFilesTool(
   input: FindToolInput,
   context: ToolContext,
 ): Promise<ToolResponse> {
-  if (input.path) resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = input.path
+    ? resolveAllowedPath(
+        input.path,
+        context.cwd,
+        context.readRoots ?? [context.root],
+      )
+    : undefined;
   const tool = createFindTool(context.cwd);
 
   return runTool(
     (params) => tool.execute("find_files", params),
-    input,
+    { ...input, path },
     context,
   );
 }
@@ -156,12 +177,18 @@ export async function listDirectoryTool(
   input: LsToolInput,
   context: ToolContext,
 ): Promise<ToolResponse> {
-  if (input.path) resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = input.path
+    ? resolveAllowedPath(
+        input.path,
+        context.cwd,
+        context.readRoots ?? [context.root],
+      )
+    : undefined;
   const tool = createLsTool(context.cwd);
 
   return runTool(
     (params) => tool.execute("list_directory", params),
-    input,
+    { ...input, path },
     context,
   );
 }

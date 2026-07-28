@@ -9,11 +9,25 @@ export class AccessDeniedError extends Error {
   }
 }
 
-export type AdditionalRootAccess = "read_only" | "read_write";
+export type AdditionalRootAccess = "inherit" | "read_only" | "read_write";
+export type EffectiveRootAccess = Exclude<AdditionalRootAccess, "inherit">;
 
 export interface AdditionalRoot {
   path: string;
   access: AdditionalRootAccess;
+}
+
+export interface EffectiveAdditionalRoot {
+  path: string;
+  access: EffectiveRootAccess;
+}
+
+export function effectiveAdditionalRootAccess(
+  access: AdditionalRootAccess,
+  workspaceWritable: boolean,
+): EffectiveRootAccess {
+  if (!workspaceWritable) return "read_only";
+  return access === "read_only" ? "read_only" : "read_write";
 }
 
 export function expandHomePath(path: string): string {
@@ -128,8 +142,14 @@ export function normalizeAdditionalRoots(
     if (typeof item !== "object" || item === null) return undefined;
     const obj = item as Record<string, unknown>;
     if (typeof obj.path !== "string" || !obj.path) return undefined;
-    const access = obj.access;
-    if (access !== "read_only" && access !== "read_write") return undefined;
+    const access = obj.access ?? "inherit";
+    if (
+      access !== "inherit" &&
+      access !== "read_only" &&
+      access !== "read_write"
+    ) {
+      return undefined;
+    }
     result.push({
       path: resolve(expandHomePath(obj.path)),
       access,

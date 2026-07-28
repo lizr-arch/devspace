@@ -498,6 +498,91 @@ tasks:
   );
 }
 
+async function test21_pathAccessHonorsRootGrant() {
+  const dir = await setupFixture(`version: 1
+tasks:
+  read-path:
+    mode: run
+    command: ["node", "-e", "process.exit(0)", "\${TARGET}"]
+    runtime: system
+    parameters:
+      TARGET:
+        type: path
+        required: true
+  write-path:
+    mode: run
+    command: ["node", "-e", "process.exit(0)", "\${TARGET}"]
+    runtime: system
+    parameters:
+      TARGET:
+        type: path
+        access: write
+        required: true
+`);
+  const readOnlyRoot = await mkdtemp(join(tmpdir(), "devspace-task-ro-"));
+  const readWriteRoot = await mkdtemp(join(tmpdir(), "devspace-task-rw-"));
+  try {
+    const manifest = loadTaskManifest(dir);
+    const task = manifest.tasks["write-path"];
+    assert.deepEqual(
+      validateAndSubstitute(
+        manifest.tasks["read-path"],
+        { TARGET: join(readOnlyRoot, "input.txt") },
+        dir,
+        [{ path: readOnlyRoot, access: "read_only" }],
+      ).errors,
+      [],
+    );
+    assert.equal(
+      validateAndSubstitute(
+        task,
+        { TARGET: join(readOnlyRoot, "output.txt") },
+        dir,
+        [{ path: readOnlyRoot, access: "read_only" }],
+      ).errors[0]?.message.includes("outside writable roots"),
+      true,
+    );
+    assert.deepEqual(
+      validateAndSubstitute(
+        task,
+        { TARGET: join(readWriteRoot, "output.txt") },
+        dir,
+        [{ path: readWriteRoot, access: "read_write" }],
+      ).errors,
+      [],
+    );
+    assert.deepEqual(
+      validateAndSubstitute(task, { TARGET: "workspace-output.txt" }, dir, [])
+        .errors,
+      [],
+    );
+    await assert.rejects(
+      () =>
+        new TaskRunner().runTask({
+          workspaceId: "ws_path_access",
+          workspaceRoot: dir,
+          taskId: "write-path",
+          params: { TARGET: join(readOnlyRoot, "output.txt") },
+          additionalRoots: [{ path: readOnlyRoot, access: "read_only" }],
+        }),
+      /outside writable roots/,
+    );
+    const allowed = await new TaskRunner().runTask({
+      workspaceId: "ws_path_access",
+      workspaceRoot: dir,
+      taskId: "write-path",
+      params: { TARGET: join(readWriteRoot, "output.txt") },
+      additionalRoots: [{ path: readWriteRoot, access: "read_write" }],
+    });
+    assert.equal(allowed.status, "succeeded");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(readOnlyRoot, { recursive: true, force: true });
+    await rm(readWriteRoot, { recursive: true, force: true });
+  }
+  console.log("PASS: test21 - path access honors effective root grants");
+}
+
 // ---------------------------------------------------------------------------
 // Run all
 // ---------------------------------------------------------------------------
@@ -526,6 +611,7 @@ async function main() {
     test18_noManifestAtAll,
     test19_paramsDontExpandShell,
     test20_executorUnsupported,
+    test21_pathAccessHonorsRootGrant,
   ];
 
   let passed = 0;

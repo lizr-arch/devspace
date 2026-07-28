@@ -20,6 +20,9 @@ import {
 } from "./workspace-files.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-files-"));
+const additionalRoot = await mkdtemp(
+  join(tmpdir(), "devspace-files-additional-"),
+);
 const stateDir = await mkdtemp(join(tmpdir(), "devspace-files-state-"));
 try {
   assert.equal(
@@ -40,6 +43,33 @@ try {
   });
   assert.equal(copied.bytes, 5);
   assert.equal(await readFile(join(root, "assets/copy.txt"), "utf8"), "alpha");
+  await copyWorkspacePath({
+    workspaceRoot: root,
+    sourceRoot: root,
+    destinationRoot: additionalRoot,
+    stateDir,
+    workspaceId: "ws_files",
+    sourcePath: "assets/raw/a.txt",
+    destinationPath: "from-workspace.txt",
+  });
+  assert.equal(
+    await readFile(join(additionalRoot, "from-workspace.txt"), "utf8"),
+    "alpha",
+  );
+  await writeFile(join(additionalRoot, "from-additional.txt"), "beta");
+  await copyWorkspacePath({
+    workspaceRoot: root,
+    sourceRoot: additionalRoot,
+    destinationRoot: root,
+    stateDir,
+    workspaceId: "ws_files",
+    sourcePath: "from-additional.txt",
+    destinationPath: "assets/from-additional.txt",
+  });
+  assert.equal(
+    await readFile(join(root, "assets/from-additional.txt"), "utf8"),
+    "beta",
+  );
   await assert.rejects(
     copyWorkspacePath({
       workspaceRoot: root,
@@ -131,6 +161,16 @@ try {
   assert.equal(await readFile(join(root, "snapshot.txt"), "utf8"), "before");
   await mkdir(join(root, "tree"), { recursive: true });
   await writeFile(join(root, "tree", "x.txt"), "x");
+  await assert.rejects(
+    moveWorkspacePath({
+      workspaceRoot: root,
+      stateDir,
+      workspaceId: "ws_files",
+      sourcePath: "tree",
+      destinationPath: "tree/nested",
+    }),
+    /Cannot move a directory inside itself/,
+  );
   await symlink(join(root, "tree", "x.txt"), join(root, "tree", "link.txt"));
   await assert.rejects(
     copyWorkspacePath({
@@ -145,5 +185,6 @@ try {
   console.log("workspace file tests passed");
 } finally {
   await rm(root, { recursive: true, force: true });
+  await rm(additionalRoot, { recursive: true, force: true });
   await rm(stateDir, { recursive: true, force: true });
 }

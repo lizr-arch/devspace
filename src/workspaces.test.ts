@@ -57,10 +57,12 @@ try {
 
   const firstAdditionalRoot = join(root, "additional-read");
   const secondAdditionalRoot = join(root, "additional-write");
+  const inheritedAdditionalRoot = join(root, "additional-inherited");
   const additionalRootFile = join(root, "additional-root-file");
   const additionalRootsWorkspace = join(root, "additional-roots-workspace");
   await mkdir(firstAdditionalRoot);
   await mkdir(secondAdditionalRoot);
+  await mkdir(inheritedAdditionalRoot);
   await mkdir(additionalRootsWorkspace);
   await writeFile(join(firstAdditionalRoot, "reference.txt"), "reference\n");
   await writeFile(additionalRootFile, "not a directory\n");
@@ -69,6 +71,7 @@ try {
     additionalRoots: [
       { path: firstAdditionalRoot, access: "read_only" },
       { path: secondAdditionalRoot, access: "read_write" },
+      { path: inheritedAdditionalRoot, access: "inherit" },
     ],
   });
   assert.deepEqual(
@@ -76,6 +79,7 @@ try {
     [
       { path: firstAdditionalRoot, access: "read_only" },
       { path: secondAdditionalRoot, access: "read_write" },
+      { path: inheritedAdditionalRoot, access: "inherit" },
     ],
   );
   assert.deepEqual(
@@ -83,6 +87,7 @@ try {
     [
       { path: await realpath(firstAdditionalRoot), access: "read_only" },
       { path: await realpath(secondAdditionalRoot), access: "read_write" },
+      { path: await realpath(inheritedAdditionalRoot), access: "read_write" },
     ],
   );
   assert.deepEqual(
@@ -102,7 +107,7 @@ try {
       authorizedWorkspace.workspace,
       join(firstAdditionalRoot, "reference.txt"),
     ),
-    join(firstAdditionalRoot, "reference.txt"),
+    await realpath(join(firstAdditionalRoot, "reference.txt")),
   );
   const effectiveWritableRoot =
     authorizedWorkspace.additionalRootsAuthorization.effectiveAdditionalRoots[1]
@@ -114,6 +119,32 @@ try {
       join(effectiveWritableRoot, "new-output.txt"),
     ),
     join(effectiveWritableRoot, "new-output.txt"),
+  );
+  assert.throws(() =>
+    registry.resolveWritePath(
+      authorizedWorkspace.workspace,
+      join(firstAdditionalRoot, "denied.txt"),
+    ),
+  );
+  assert.equal(
+    registry.resolveWritePath(
+      authorizedWorkspace.workspace,
+      join(inheritedAdditionalRoot, "inherited-output.txt"),
+    ).rootPath,
+    await realpath(inheritedAdditionalRoot),
+  );
+  assert.equal(
+    registry.resolveWritePath(
+      authorizedWorkspace.workspace,
+      "workspace-output.txt",
+    ).rootKind,
+    "workspace",
+  );
+  assert.throws(() =>
+    registry.resolveReadPath(
+      authorizedWorkspace.workspace,
+      join(root, "..", "outside.txt"),
+    ),
   );
   const authorizedList = await registry.listWorkspaces();
   assert.deepEqual(
@@ -143,6 +174,7 @@ try {
   assert.deepEqual(rejectedUpdate.workspace.additionalRoots, [
     { path: await realpath(firstAdditionalRoot), access: "read_only" },
     { path: await realpath(secondAdditionalRoot), access: "read_write" },
+    { path: await realpath(inheritedAdditionalRoot), access: "read_write" },
   ]);
 
   const clearedAuthorization = await registry.resumeWorkspace(
@@ -154,6 +186,29 @@ try {
   assert.deepEqual(
     clearedAuthorization.additionalRootsAuthorization.effectiveAdditionalRoots,
     [],
+  );
+
+  const readOnlyRegistry = new WorkspaceRegistry(
+    loadConfig({
+      DEVSPACE_CONFIG_DIR: join(root, ".devspace", "readonly-config"),
+      DEVSPACE_ALLOWED_ROOTS: root,
+      DEVSPACE_WORKTREE_ROOT: join(root, ".devspace", "readonly-worktrees"),
+      DEVSPACE_AGENT_DIR: agentDir,
+      DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+      DEVSPACE_READ_ONLY: "1",
+      PORT: "1",
+    }),
+  );
+  const readOnlyWorkspace = await readOnlyRegistry.openWorkspace({
+    path: additionalRootsWorkspace,
+    additionalRoots: [
+      { path: inheritedAdditionalRoot, access: "inherit" },
+      { path: secondAdditionalRoot, access: "read_write" },
+    ],
+  });
+  assert.deepEqual(
+    readOnlyWorkspace.workspace.additionalRoots.map((item) => item.access),
+    ["read_only", "read_only"],
   );
 
   const missingWorkspaceRoot = join(root, "missing", "workspace");
@@ -209,7 +264,9 @@ try {
     "README.md",
   );
   assert.equal(
-    worktreeReadmePath.startsWith(worktreeWorkspace.workspace.root),
+    worktreeReadmePath.startsWith(
+      await realpath(worktreeWorkspace.workspace.root),
+    ),
     true,
   );
 
