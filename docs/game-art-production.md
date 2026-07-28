@@ -22,10 +22,12 @@ flowchart LR
     PUB --> GPT
 ```
 
-The existing `start_job`, `poll_job`, and `cancel_job` tools remain authoritative
-for process state. Blender is one registered runner, not a separate process
-manager. `start_capture` is a small profile-loading front end that starts the
-same Job model with an approved Godot runner.
+The `start_job`, `wait_job`, `list_jobs`, `poll_job`, and `cancel_job` tools
+remain authoritative for process state. `wait_job` is the normal completion
+path; `poll_job` is retained for explicit paginated log reads. Blender is one
+registered runner, not a separate process manager. `start_capture` is a small
+profile-loading front end that starts the same Job model with an approved Godot
+runner.
 
 ## Web GPT workflow
 
@@ -35,11 +37,12 @@ same Job model with an approved Godot runner.
    tools.
 3. Call `start_job` with `runner: "blender"`, a conservative background
    argument array, and narrow `artifactRoots`.
-4. Poll until the Job and artifact state are terminal.
+4. Call `wait_job` with the opaque cursor from `start_job` until the Job and
+   artifact state are terminal.
 5. Use `list_artifacts` to inspect versioned SHA-256 records.
 6. Call `start_capture` with a project-owned
    `.devspace/captures/<profile>.json`.
-7. Poll, list the screenshot/manifest, then call `publish_artifact` for the
+7. Wait, list the screenshot/manifest, then call `publish_artifact` for the
    specific registered version needed for review.
 8. Inspect the short-lived image URL and iterate by editing project scripts.
 
@@ -78,7 +81,11 @@ After restart:
   `resume_workspace`, and `list_workspaces` report requested, effective, and
   rejected roots together with `additionalRootsPersisted=false`; callers must
   supply the grants again after a service restart;
-- `poll_job` and `list_artifacts` recover finished records and relationships;
+- `list_jobs` recovers recent Job IDs after a client interruption;
+- `wait_job` returns only bounded incremental output and waits locally instead
+  of requiring rapid model-side polling;
+- `poll_job` and `list_artifacts` recover explicit log ranges, finished records,
+  and relationships;
 - a Job persisted as running/cancelling becomes `interrupted`, never
   `succeeded`;
 - private PID/PGID and random process-identity metadata lets a restarted POSIX

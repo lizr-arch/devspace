@@ -173,7 +173,7 @@ const coverageGroups: CoverageGroup[] = [
     visualContract: "sandbox_fixture",
   },
   {
-    tools: ["start_job", "poll_job", "cancel_job"],
+    tools: ["start_job", "wait_job", "list_jobs", "poll_job", "cancel_job"],
     subsystem: "background jobs",
     functionalTests: [
       "src/background-jobs.test.ts",

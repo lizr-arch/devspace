@@ -1456,7 +1456,8 @@ export async function probePublicExternalClientFlow(
           operationWorkspaceId &&
           requestedJob &&
           toolNames.includes(startToolName) &&
-          toolNames.includes("poll_job")
+          toolNames.includes("wait_job") &&
+          toolNames.includes("list_jobs")
         ) {
           const startedJob = await postMcpJsonRpc(
             info.publicMcpUrl,
@@ -1491,16 +1492,34 @@ export async function probePublicExternalClientFlow(
           );
           const startedJobSnapshot = asRecord(startedJobStructured?.job);
           const jobId = stringField(startedJobSnapshot, "jobId");
+          let outputCursor = stringField(startedJobSnapshot, "outputCursor");
           backgroundJobId = jobId;
 
           if (startedJob.ok && jobId) {
+            await postMcpJsonRpc(
+              info.publicMcpUrl,
+              accessToken,
+              {
+                jsonrpc: "2.0",
+                id: 21,
+                method: "tools/call",
+                params: {
+                  name: "list_jobs",
+                  arguments: {
+                    workspaceId: operationWorkspaceId,
+                    limit: 10,
+                  },
+                },
+              },
+              sessionId,
+            );
             if (input.backgroundJob?.cancel) {
               await postMcpJsonRpc(
                 info.publicMcpUrl,
                 accessToken,
                 {
                   jsonrpc: "2.0",
-                  id: 21,
+                  id: 22,
                   method: "tools/call",
                   params: {
                     name: "cancel_job",
@@ -1513,44 +1532,53 @@ export async function probePublicExternalClientFlow(
                 sessionId,
               );
             }
-            const pollAttempts =
-              ((input.backgroundJob?.timeoutSeconds ?? 120) + 10) * 20;
-            for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
-              const polledJob = await postMcpJsonRpc(
+            const waitSeconds = 5;
+            const waitAttempts = Math.ceil(
+              ((input.backgroundJob?.timeoutSeconds ?? 120) + 10) / waitSeconds,
+            );
+            for (let attempt = 0; attempt < waitAttempts; attempt += 1) {
+              const waitedJob = await postMcpJsonRpc(
                 info.publicMcpUrl,
                 accessToken,
                 {
                   jsonrpc: "2.0",
-                  id: 22 + attempt,
+                  id: 23 + attempt,
                   method: "tools/call",
                   params: {
-                    name: "poll_job",
+                    name: "wait_job",
                     arguments: {
                       workspaceId: operationWorkspaceId,
                       jobId,
+                      outputCursor,
+                      waitSeconds,
                     },
                   },
                 },
                 sessionId,
               );
-              const polledResult = asRecord(
-                asRecord(parseMcpResponseJson(polledJob.text))?.result,
+              const waitedResult = asRecord(
+                asRecord(parseMcpResponseJson(waitedJob.text))?.result,
               );
-              const polledStructured = asRecord(
-                polledResult?.structuredContent,
+              const waitedStructured = asRecord(
+                waitedResult?.structuredContent,
               );
-              const polledSnapshot = asRecord(polledStructured?.job);
-              backgroundJobStatus = stringField(polledSnapshot, "status");
-              backgroundJobOutput = stringField(polledSnapshot, "output");
+              const waitedSnapshot = asRecord(waitedStructured?.job);
+              backgroundJobStatus = stringField(waitedSnapshot, "status");
+              const output = stringField(waitedSnapshot, "output");
+              if (output) {
+                backgroundJobOutput = `${backgroundJobOutput ?? ""}${output}`;
+              }
+              outputCursor =
+                stringField(waitedSnapshot, "outputCursor") ?? outputCursor;
               const artifactStatus = stringField(
-                polledSnapshot,
+                waitedSnapshot,
                 "artifactStatus",
               );
               backgroundArtifactStatus = artifactStatus;
               backgroundArtifactErrors = Array.isArray(
-                polledSnapshot?.artifactErrors,
+                waitedSnapshot?.artifactErrors,
               )
-                ? polledSnapshot.artifactErrors.filter(
+                ? waitedSnapshot.artifactErrors.filter(
                     (value): value is string => typeof value === "string",
                   )
                 : undefined;
@@ -1564,7 +1592,6 @@ export async function probePublicExternalClientFlow(
               ) {
                 break;
               }
-              await new Promise((resolve) => setTimeout(resolve, 50));
             }
           }
 
@@ -1584,10 +1611,10 @@ export async function probePublicExternalClientFlow(
               ? okCheck(
                   startedJob.status,
                   input.backgroundJob?.cancel
-                    ? "MCP background validation job started, cancelled, and was polled successfully."
+                    ? "MCP background validation job started, recovered, cancelled, and was awaited successfully."
                     : input.captureProfile
-                      ? "MCP capture profile started, completed, and was polled successfully."
-                      : "MCP background validation job started, completed, and was polled successfully.",
+                      ? "MCP capture profile started, recovered, completed, and was awaited successfully."
+                      : "MCP background validation job started, recovered, completed, and was awaited successfully.",
                 )
               : startedJob.ok
                 ? {

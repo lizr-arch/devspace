@@ -46,12 +46,18 @@ import {
 } from "./logger.js";
 import {
   BackgroundJobManager,
+  DEFAULT_LIST_JOBS_LIMIT,
   DEFAULT_JOB_TIMEOUT_SECONDS,
+  DEFAULT_WAIT_OUTPUT_BYTES,
+  DEFAULT_WAIT_SECONDS,
   JOB_RUNNERS,
   MAX_CONCURRENT_JOBS,
   MAX_JOB_OUTPUT_BYTES,
   MAX_JOB_TIMEOUT_SECONDS,
+  MAX_LIST_JOBS_LIMIT,
   MAX_POLL_BYTES,
+  MAX_WAIT_OUTPUT_BYTES,
+  MAX_WAIT_SECONDS,
   type JobSnapshot,
 } from "./background-jobs.js";
 import { RunnerRegistry, type RunnerInspection } from "./runner-registry.js";
@@ -177,7 +183,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-v1.2026-07-28";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-job-wait-resume-p0-v1.2026-07-29";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 export const LEGACY_WORKSPACE_APP_RESOURCE_URI =
   "ui://devspace/workspace-app.html";
@@ -537,7 +543,14 @@ function exposedToolNames(
     tools.push(toolNames.grep, toolNames.glob, toolNames.ls);
   }
   if (!config.readOnly) {
-    tools.push("start_job", "start_capture", "poll_job", "cancel_job");
+    tools.push(
+      "start_job",
+      "start_capture",
+      "wait_job",
+      "list_jobs",
+      "poll_job",
+      "cancel_job",
+    );
   }
   return tools;
 }
@@ -657,6 +670,8 @@ function requiredCapabilityForTool(tool: string): ToolCapability {
     [
       "start_job",
       "start_capture",
+      "wait_job",
+      "list_jobs",
       "poll_job",
       "cancel_job",
       "project_task",
@@ -712,7 +727,7 @@ function serverInstructions(
     return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.${projectMemory}`;
   }
 
-  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, job, capture, artifact, and Git tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or explicit complete rewrites, import_asset for binary asset intake, start_job/poll_job/cancel_job for named validation runners, start_capture for a validated project capture profile, inspect_artifact and list_artifacts for evidence, and preview_artifact or publish_artifact for short-lived review URLs. Arbitrary shell command execution is not exposed.${showChanges}${projectMemory}`;
+  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, job, capture, artifact, and Git tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or explicit complete rewrites, import_asset for binary asset intake, start_job followed by wait_job for named validation runners, list_jobs to recover jobs after a client interruption, poll_job only for explicit paginated log reads, cancel_job to stop a job, start_capture for a validated project capture profile, inspect_artifact and list_artifacts for evidence, and preview_artifact or publish_artifact for short-lived review URLs. Arbitrary shell command execution is not exposed.${showChanges}${projectMemory}`;
 }
 
 export interface CreateServerOptions {
@@ -887,6 +902,10 @@ const jobSnapshotOutputSchema = z.object({
   output: z.string().optional(),
   outputOffsetBytes: z.number().int().optional(),
   nextOutputOffsetBytes: z.number().int().optional(),
+  outputCursor: z.string().optional(),
+  outputMode: z.enum(["range", "tail"]).optional(),
+  outputDiscardedBeforeBytes: z.number().int().nonnegative().optional(),
+  waitTimedOut: z.boolean().optional(),
 });
 
 const artifactTypeSchema = z.enum([
@@ -5456,7 +5475,7 @@ function createMcpServer(
           timeoutSeconds,
           artifactRoots,
         });
-        const result = `Started ${job.jobId}: ${runner} ${job.args.join(" ")}. Poll with poll_job.`;
+        const result = `Started ${job.jobId}: ${runner} ${job.args.join(" ")}. Wait with wait_job using outputCursor ${job.outputCursor}.`;
         logToolCall(config, {
           tool: "start_job",
           workspaceId,
@@ -5545,7 +5564,7 @@ function createMcpServer(
           timeoutSeconds: loaded.timeoutSeconds,
           capture: loaded.capture,
         };
-        const result = `Started capture ${loaded.name} as ${job.jobId}. Poll with poll_job, then use list_artifacts and publish_artifact.`;
+        const result = `Started capture ${loaded.name} as ${job.jobId}. Wait with wait_job using outputCursor ${job.outputCursor}, then use list_artifacts and publish_artifact.`;
         logToolCall(config, {
           tool: "start_capture",
           workspaceId,
@@ -5571,11 +5590,194 @@ function createMcpServer(
 
     registerAppTool(
       server,
+      "wait_job",
+      {
+        title: "Wait for background job",
+        description: `Wait up to ${DEFAULT_WAIT_SECONDS} seconds for a background job to settle, without model-side polling. Return only new output since the opaque outputCursor, capped to a small tail. Reuse the returned outputCursor if another wait is needed. If the client reconnects without a jobId, call list_jobs first.`,
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier that owns the job."),
+          jobId: z.string().describe("Job identifier returned by start_job."),
+          outputCursor: z
+            .string()
+            .optional()
+            .describe(
+              "Opaque cursor returned by start_job or a previous wait_job. Omit it after reconnecting if the latest output tail is needed.",
+            ),
+          waitSeconds: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_WAIT_SECONDS)
+            .optional()
+            .describe(
+              `Long-poll duration. Defaults to ${DEFAULT_WAIT_SECONDS} seconds and is capped at ${MAX_WAIT_SECONDS}.`,
+            ),
+          maxBytes: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_WAIT_OUTPUT_BYTES)
+            .optional()
+            .describe(
+              `Maximum new output bytes to return. Defaults to ${DEFAULT_WAIT_OUTPUT_BYTES}; capped at ${MAX_WAIT_OUTPUT_BYTES}.`,
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          job: jobSnapshotOutputSchema,
+        }),
+        ...widgetMeta("wait_job", "job"),
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        jobId,
+        outputCursor,
+        waitSeconds,
+        maxBytes,
+        projectMemoryReceiptId,
+      }) => {
+        const startedAt = performance.now();
+        workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "wait_job",
+          projectMemoryReceiptId,
+        );
+        const existing = jobs.poll(jobId, 0, 1);
+        assertJobWorkspace(existing, workspaceId);
+        const job = await jobs.wait(jobId, outputCursor, waitSeconds, maxBytes);
+        const result = [
+          `${job.jobId}: ${job.status}`,
+          job.waitTimedOut
+            ? `No terminal state within ${waitSeconds ?? DEFAULT_WAIT_SECONDS} seconds; reuse outputCursor with wait_job.`
+            : undefined,
+          `Output bytes: ${job.outputBytes}${job.outputTruncated ? " (truncated)" : ""}`,
+          job.outputDiscardedBeforeBytes
+            ? `Skipped ${job.outputDiscardedBeforeBytes} older output bytes to keep this response bounded.`
+            : undefined,
+          job.exitCode !== undefined ? `Exit code: ${job.exitCode}` : undefined,
+          job.signal ? `Signal: ${job.signal}` : undefined,
+          job.error ? `Error: ${job.error}` : undefined,
+          job.artifactStatus !== "none"
+            ? `Artifacts: ${job.artifactStatus} (${job.artifactCount})`
+            : undefined,
+          job.output ? `Latest output:\n${job.output}` : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        logToolCall(config, {
+          tool: "wait_job",
+          workspaceId,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "wait_job",
+            projectMemory,
+            card: { workspaceId, summary: job },
+          },
+          structuredContent: { result, job },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "list_jobs",
+      {
+        title: "List background jobs",
+        description:
+          "Recover recent background jobs for one workspace after a client interruption or lost jobId. Returns bounded metadata only; call wait_job without outputCursor to obtain the latest small output tail.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier whose jobs should be listed."),
+          activeOnly: z
+            .boolean()
+            .optional()
+            .describe("Return only running or cancelling jobs."),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_LIST_JOBS_LIMIT)
+            .optional()
+            .describe(
+              `Maximum jobs to return. Defaults to ${DEFAULT_LIST_JOBS_LIMIT}; capped at ${MAX_LIST_JOBS_LIMIT}.`,
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          jobs: z.array(jobSnapshotOutputSchema),
+        }),
+        ...widgetMeta("list_jobs", "job"),
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({ workspaceId, activeOnly, limit, projectMemoryReceiptId }) => {
+        const startedAt = performance.now();
+        workspaces.getWorkspace(workspaceId);
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "list_jobs",
+          projectMemoryReceiptId,
+        );
+        const listed = jobs.list(workspaceId, { activeOnly, limit });
+        const active = listed.filter(
+          (job) => job.status === "running" || job.status === "cancelling",
+        ).length;
+        const result =
+          listed.length === 0
+            ? "No background jobs found for this workspace."
+            : [
+                `Found ${listed.length} background job(s); ${active} active.`,
+                ...listed.map(
+                  (job) =>
+                    `${job.jobId}: ${job.status} · ${job.runner} · ${job.label ?? job.args.join(" ")}`,
+                ),
+              ].join("\n");
+        logToolCall(config, {
+          tool: "list_jobs",
+          workspaceId,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: {
+            tool: "list_jobs",
+            projectMemory,
+            card: {
+              workspaceId,
+              summary: { count: listed.length, active },
+            },
+          },
+          structuredContent: { result, jobs: listed },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
       "poll_job",
       {
         title: "Poll background job",
         description:
-          "Read the current status and a bounded byte range of output from a background validation job. Reuse nextOutputOffsetBytes to fetch only new output.",
+          "Compatibility and explicit log-reading tool. Read one bounded byte range from a background job, reusing nextOutputOffsetBytes. For normal completion waiting use wait_job instead, so the model does not create a rapid polling loop.",
         inputSchema: {
           workspaceId: z
             .string()

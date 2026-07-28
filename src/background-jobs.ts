@@ -117,6 +117,12 @@ export type JobErrorCode =
 
 export const DEFAULT_POLL_BYTES = 64 * 1024;
 export const MAX_POLL_BYTES = 256 * 1024;
+export const DEFAULT_WAIT_SECONDS = 20;
+export const MAX_WAIT_SECONDS = 30;
+export const DEFAULT_WAIT_OUTPUT_BYTES = 2 * 1024;
+export const MAX_WAIT_OUTPUT_BYTES = 8 * 1024;
+export const DEFAULT_LIST_JOBS_LIMIT = 10;
+export const MAX_LIST_JOBS_LIMIT = 50;
 
 interface PersistedJob {
   jobId: string;
@@ -177,6 +183,15 @@ export interface JobSnapshot extends PersistedJob {
   output?: string;
   outputOffsetBytes?: number;
   nextOutputOffsetBytes?: number;
+  outputCursor?: string;
+  outputMode?: "range" | "tail";
+  outputDiscardedBeforeBytes?: number;
+  waitTimedOut?: boolean;
+}
+
+export interface ListJobsOptions {
+  activeOnly?: boolean;
+  limit?: number;
 }
 
 export interface BackgroundJobMonitorSnapshot {
@@ -198,6 +213,7 @@ export interface BackgroundJobMonitorSnapshot {
 
 export class BackgroundJobManager {
   private readonly jobs = new Map<string, LiveJob>();
+  private readonly waiters = new Map<string, Set<() => void>>();
   private readonly jobsDir: string;
   private initialized = false;
 
@@ -343,6 +359,7 @@ export class BackgroundJobManager {
         job.timeoutRequested = true;
         job.status = "cancelling";
         this.persist(job);
+        this.notifyWaiters(job.jobId);
         this.terminate(job);
       }, timeoutSeconds * 1000);
     } catch (error) {
@@ -353,10 +370,11 @@ export class BackgroundJobManager {
       job.error = `${job.errorCode}: ${reason}`;
       this.persist(job);
       void this.finalizeArtifacts(job);
+      this.notifyWaiters(job.jobId);
       throw error;
     }
 
-    return publicSnapshot(job);
+    return snapshotWithCursor(job);
   }
 
   poll(
@@ -389,7 +407,64 @@ export class BackgroundJobManager {
       output: log.subarray(start, end).toString("utf8"),
       outputOffsetBytes: start,
       nextOutputOffsetBytes: end,
+      outputCursor: encodeOutputCursor(jobId, end),
+      outputMode: "range",
     };
+  }
+
+  async wait(
+    jobId: string,
+    outputCursor?: string,
+    waitSeconds = DEFAULT_WAIT_SECONDS,
+    maxBytes = DEFAULT_WAIT_OUTPUT_BYTES,
+  ): Promise<JobSnapshot> {
+    this.initialize();
+    validateJobId(jobId);
+    validateWaitArguments(waitSeconds, maxBytes);
+
+    const initialLogBytes = this.logBytes(jobId);
+    const cursorOffset =
+      outputCursor === undefined
+        ? 0
+        : decodeOutputCursor(outputCursor, jobId, initialLogBytes);
+    const deadline = Date.now() + waitSeconds * 1000;
+    let waitTimedOut = false;
+
+    while (!isSettled(this.getJob(jobId))) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        waitTimedOut = true;
+        break;
+      }
+      if (!(await this.waitForChange(jobId, remainingMs))) {
+        waitTimedOut = true;
+        break;
+      }
+    }
+
+    return this.tailSnapshot(
+      this.getJob(jobId),
+      cursorOffset,
+      maxBytes,
+      waitTimedOut,
+    );
+  }
+
+  list(workspaceId: string, options: ListJobsOptions = {}): JobSnapshot[] {
+    this.initialize();
+    const limit = options.limit ?? DEFAULT_LIST_JOBS_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST_JOBS_LIMIT) {
+      throw new Error(`limit must be between 1 and ${MAX_LIST_JOBS_LIMIT}.`);
+    }
+    return Array.from(this.jobs.values())
+      .filter(
+        (job) =>
+          job.workspaceId === workspaceId &&
+          (!options.activeOnly || !isTerminal(job.status)),
+      )
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+      .slice(0, limit)
+      .map((job) => snapshotWithCursor(job));
   }
 
   cancel(jobId: string): JobSnapshot {
@@ -406,8 +481,9 @@ export class BackgroundJobManager {
     job.cancelRequested = true;
     job.status = "cancelling";
     this.persist(job);
+    this.notifyWaiters(job.jobId);
     this.terminate(job);
-    return publicSnapshot(job);
+    return snapshotWithCursor(job);
   }
 
   monitorSnapshot(): BackgroundJobMonitorSnapshot {
@@ -479,6 +555,7 @@ export class BackgroundJobManager {
       }
       this.beginProcessCleanup(job);
       this.persist(job);
+      this.notifyWaiters(job.jobId);
     }
   }
 
@@ -664,6 +741,7 @@ export class BackgroundJobManager {
       this.completeProcessCleanup(job);
     }
     this.persist(job);
+    this.notifyWaiters(job.jobId);
     void this.finalizeArtifacts(job);
   }
 
@@ -733,7 +811,69 @@ export class BackgroundJobManager {
     } finally {
       job.artifactBaseline = undefined;
       this.persist(job);
+      this.notifyWaiters(job.jobId);
     }
+  }
+
+  private logBytes(jobId: string): number {
+    return existsSync(this.logPath(jobId))
+      ? statSync(this.logPath(jobId)).size
+      : 0;
+  }
+
+  private tailSnapshot(
+    job: LiveJob,
+    cursorOffset: number,
+    maxBytes: number,
+    waitTimedOut: boolean,
+  ): JobSnapshot {
+    const log = existsSync(this.logPath(job.jobId))
+      ? readFileSync(this.logPath(job.jobId))
+      : Buffer.alloc(0);
+    const requestedStart = Math.min(cursorOffset, log.length);
+    const start = Math.max(requestedStart, log.length - maxBytes);
+    return {
+      ...publicSnapshot(job),
+      output: log.subarray(start).toString("utf8"),
+      outputOffsetBytes: start,
+      nextOutputOffsetBytes: log.length,
+      outputCursor: encodeOutputCursor(job.jobId, log.length),
+      outputMode: "tail",
+      outputDiscardedBeforeBytes:
+        start > requestedStart ? start - requestedStart : undefined,
+      waitTimedOut,
+    };
+  }
+
+  private async waitForChange(
+    jobId: string,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    return await new Promise<boolean>((resolvePromise) => {
+      let settled = false;
+      const listeners = this.waiters.get(jobId) ?? new Set<() => void>();
+      let timeout: NodeJS.Timeout;
+      const finish = (changed: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        listeners.delete(onChange);
+        if (listeners.size === 0) this.waiters.delete(jobId);
+        resolvePromise(changed);
+      };
+      const onChange = () => finish(true);
+      listeners.add(onChange);
+      this.waiters.set(jobId, listeners);
+      timeout = setTimeout(() => finish(false), timeoutMs);
+      if (isSettled(this.getJob(jobId))) queueMicrotask(onChange);
+    });
+  }
+
+  private notifyWaiters(jobId: string): void {
+    const listeners = this.waiters.get(jobId);
+    if (!listeners) return;
+    this.waiters.delete(jobId);
+    for (const listener of listeners) listener();
   }
 }
 
@@ -767,6 +907,13 @@ function publicSnapshot(job: LiveJob): PersistedJob {
     artifactCount: job.artifactCount ?? 0,
     artifactErrors: job.artifactErrors ? [...job.artifactErrors] : undefined,
     captureProfile: job.captureProfile,
+  };
+}
+
+function snapshotWithCursor(job: LiveJob): JobSnapshot {
+  return {
+    ...publicSnapshot(job),
+    outputCursor: encodeOutputCursor(job.jobId, job.outputBytes),
   };
 }
 
@@ -808,6 +955,60 @@ function isTerminal(status: JobStatus): boolean {
     "timed_out",
     "interrupted",
   ].includes(status);
+}
+
+function isSettled(job: LiveJob): boolean {
+  return isTerminal(job.status) && job.artifactStatus !== "pending";
+}
+
+function validateWaitArguments(waitSeconds: number, maxBytes: number): void {
+  if (
+    !Number.isInteger(waitSeconds) ||
+    waitSeconds < 1 ||
+    waitSeconds > MAX_WAIT_SECONDS
+  ) {
+    throw new Error(`waitSeconds must be between 1 and ${MAX_WAIT_SECONDS}.`);
+  }
+  if (
+    !Number.isInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > MAX_WAIT_OUTPUT_BYTES
+  ) {
+    throw new Error(`maxBytes must be between 1 and ${MAX_WAIT_OUTPUT_BYTES}.`);
+  }
+}
+
+function encodeOutputCursor(jobId: string, offsetBytes: number): string {
+  return `jobc_${Buffer.from(
+    JSON.stringify({ jobId, offsetBytes }),
+    "utf8",
+  ).toString("base64url")}`;
+}
+
+function decodeOutputCursor(
+  cursor: string,
+  expectedJobId: string,
+  logBytes: number,
+): number {
+  if (!/^jobc_[A-Za-z0-9_-]{1,256}$/.test(cursor)) {
+    throw new Error("Invalid outputCursor.");
+  }
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(cursor.slice(5), "base64url").toString("utf8"),
+    ) as { jobId?: unknown; offsetBytes?: unknown };
+    if (
+      decoded.jobId !== expectedJobId ||
+      !Number.isSafeInteger(decoded.offsetBytes) ||
+      (decoded.offsetBytes as number) < 0 ||
+      (decoded.offsetBytes as number) > logBytes
+    ) {
+      throw new Error("mismatch");
+    }
+    return decoded.offsetBytes as number;
+  } catch {
+    throw new Error("Invalid outputCursor.");
+  }
 }
 
 function processSignalTarget(job: LiveJob): number | undefined {

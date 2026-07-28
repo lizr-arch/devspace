@@ -43,7 +43,7 @@ implementation and a sandboxed iframe for each View. The automated suite checks:
 9. host-context updates;
 10. declarative CSP/resource-failure detection;
 11. rejection of malformed template URIs;
-12. all 58 registered Workspace App tools, each with its own iframe handshake
+12. all 60 registered Workspace App tools, each with its own iframe handshake
     and non-empty card render;
 13. 1, 4, 8, or 16 concurrent sandbox cards;
 14. browser console, page-error, failed-request, and asset HTTP status gates;
@@ -80,8 +80,8 @@ Use the layers together; one passing layer does not prove the others.
 
 | Layer               | Command                                        | Proves                                                                                               |
 | ------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Source/unit         | `npm run test:unit`                            | URI resolver, result normalization, telemetry, server policies, 58-tool functional coverage contract |
-| Local browser host  | `npm run test:webgpt-local`                    | sandbox lifecycle, AppBridge, 58-tool rendering, CSP/network/console, concurrency                    |
+| Source/unit         | `npm run test:unit`                            | URI resolver, result normalization, telemetry, server policies, 60-tool functional coverage contract |
+| Local browser host  | `npm run test:webgpt-local`                    | sandbox lifecycle, AppBridge, 60-tool rendering, CSP/network/console, concurrency                    |
 | Local service/OAuth | `node dist/cli.js doctor --live`               | local HTTP, OAuth metadata and MCP transport                                                         |
 | Public full loop    | `node dist/cli.js doctor --public --full-loop` | Cloudflare, OAuth, tools/resources, public template/assets                                           |
 | Real Web GPT smoke  | one fresh tool call in ChatGPT                 | ChatGPT's private host, connector cache, conversation UI                                             |
@@ -95,7 +95,7 @@ bug. A real Web GPT smoke test therefore remains the final acceptance gate,
 but it should be short: reconnect/reload if required, call one card-producing
 tool, and confirm the card is visible without `Failed to fetch template`.
 
-The 58-tool matrix proves local protocol and visual compatibility. It does not
+The 60-tool matrix proves local protocol and visual compatibility. It does not
 claim that all destructive operations were replayed against a real project or
 remote service; those operations are deliberately tested only in disposable or
 mock environments.

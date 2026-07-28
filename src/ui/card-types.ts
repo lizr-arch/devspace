@@ -57,6 +57,8 @@ export const TOOL_NAMES = [
   "run_shell",
   "start_job",
   "start_capture",
+  "wait_job",
+  "list_jobs",
   "poll_job",
   "cancel_job",
 ] as const;
@@ -129,6 +131,8 @@ export function isJobTool(tool: string): boolean {
   return (
     tool === "start_job" ||
     tool === "start_capture" ||
+    tool === "wait_job" ||
+    tool === "list_jobs" ||
     tool === "poll_job" ||
     tool === "cancel_job"
   );
