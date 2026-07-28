@@ -43,25 +43,48 @@ implementation and a sandboxed iframe for each View. The automated suite checks:
 9. host-context updates;
 10. declarative CSP/resource-failure detection;
 11. rejection of malformed template URIs;
-12. 1, 4, 8, or 16 concurrent sandbox cards;
-13. browser console, page-error, failed-request, and asset HTTP status gates;
-14. local-only route enforcement.
+12. all 58 registered Workspace App tools, each with its own iframe handshake
+    and non-empty card render;
+13. 1, 4, 8, or 16 concurrent sandbox cards;
+14. browser console, page-error, failed-request, and asset HTTP status gates;
+15. local-only route enforcement.
 
 The fault-injection scenario intentionally requests a CSP-forbidden
 `example.invalid` script. The scenario passes only when the host observes that
 failure while the real Workspace App bundle still initializes and renders.
 
+The tool matrix uses synthetic local results. It exercises the real card
+dispatcher and rendering bundle without performing production writes, deletes,
+Git pushes, game input, or external application launches.
+
+## Functional coverage contract
+
+`src/tool-test-coverage.ts` maps every registered tool to its functional test
+files and one of four safety modes:
+
+- `isolated_read`: read-only checks that need no mutable fixture;
+- `temp_workspace`: changes are restricted to a disposable temporary root;
+- `local_bare_remote`: fetch, merge, and push use a local disposable Git remote;
+- `mock_runtime`: external applications, capture jobs, games, and file-provider
+  behavior use controlled test doubles.
+
+`src/tool-test-coverage.test.ts` fails when a tool is added without an explicit
+strategy, when a referenced functional test disappears, or when a dangerous
+operation is mislabeled as read-only. `src/pi-tools.test.ts` adds direct
+temporary-workspace coverage for the Pi-backed read, write, edit, grep, find,
+list, and shell primitives.
+
 ## Test layers
 
 Use the layers together; one passing layer does not prove the others.
 
-| Layer | Command | Proves |
-| --- | --- | --- |
-| Source/unit | `npm run test:unit` | URI resolver, result normalization, telemetry, server policies |
-| Local browser host | `npm run test:webgpt-local` | sandbox lifecycle, AppBridge, rendering, CSP/network/console, concurrency |
-| Local service/OAuth | `node dist/cli.js doctor --live` | local HTTP, OAuth metadata and MCP transport |
-| Public full loop | `node dist/cli.js doctor --public --full-loop` | Cloudflare, OAuth, tools/resources, public template/assets |
-| Real Web GPT smoke | one fresh tool call in ChatGPT | ChatGPT's private host, connector cache, conversation UI |
+| Layer               | Command                                        | Proves                                                                                               |
+| ------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Source/unit         | `npm run test:unit`                            | URI resolver, result normalization, telemetry, server policies, 58-tool functional coverage contract |
+| Local browser host  | `npm run test:webgpt-local`                    | sandbox lifecycle, AppBridge, 58-tool rendering, CSP/network/console, concurrency                    |
+| Local service/OAuth | `node dist/cli.js doctor --live`               | local HTTP, OAuth metadata and MCP transport                                                         |
+| Public full loop    | `node dist/cli.js doctor --public --full-loop` | Cloudflare, OAuth, tools/resources, public template/assets                                           |
+| Real Web GPT smoke  | one fresh tool call in ChatGPT                 | ChatGPT's private host, connector cache, conversation UI                                             |
 
 ## Honest boundary
 
@@ -71,6 +94,11 @@ connector caching, rollout flags, account state, or a ChatGPT-only rendering
 bug. A real Web GPT smoke test therefore remains the final acceptance gate,
 but it should be short: reconnect/reload if required, call one card-producing
 tool, and confirm the card is visible without `Failed to fetch template`.
+
+The 58-tool matrix proves local protocol and visual compatibility. It does not
+claim that all destructive operations were replayed against a real project or
+remote service; those operations are deliberately tested only in disposable or
+mock environments.
 
 ## Browser selection
 

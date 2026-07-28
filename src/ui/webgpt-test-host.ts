@@ -3,6 +3,7 @@ import {
   PostMessageTransport,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { TOOL_NAMES, type ToolName } from "./card-types.js";
 import "./webgpt-test-host.css";
 
 interface TestConfig {
@@ -32,6 +33,7 @@ interface ProbeState {
 
 interface ViewHandle {
   bridge: AppBridge;
+  container: HTMLElement;
   frame: HTMLIFrameElement;
   state: ProbeState;
   transport: PostMessageTransport;
@@ -44,6 +46,12 @@ interface ScenarioResult {
   durationMs: number;
 }
 
+interface ToolMatrixResult {
+  tool: ToolName;
+  passed: boolean;
+  detail: string;
+}
+
 interface SuiteReport {
   status: "idle" | "running" | "complete";
   passed: number;
@@ -51,6 +59,12 @@ interface SuiteReport {
   durationMs: number;
   results: ScenarioResult[];
   activeFrames: number;
+  toolMatrix: {
+    total: number;
+    passed: number;
+    failed: number;
+    results: ToolMatrixResult[];
+  };
 }
 
 declare global {
@@ -69,6 +83,7 @@ const runButton = byId<HTMLButtonElement>("run-suite");
 const themeButton = byId<HTMLButtonElement>("toggle-theme");
 const concurrencySelect = byId<HTMLSelectElement>("concurrency");
 const resultsList = byId<HTMLOListElement>("results");
+const toolMatrix = byId<HTMLDivElement>("tool-matrix");
 const frames = byId<HTMLDivElement>("frames");
 const events = byId<HTMLPreElement>("events");
 const suiteDot = byId<HTMLSpanElement>("suite-dot");
@@ -79,6 +94,7 @@ const eventLines: string[] = [];
 let config: TestConfig;
 let hostTheme: "light" | "dark" = "dark";
 let running = false;
+let toolMatrixResults: ToolMatrixResult[] = [];
 
 window.addEventListener("message", (event) => {
   if (
@@ -154,6 +170,9 @@ async function runSuite(): Promise<void> {
   running = true;
   runButton.disabled = true;
   resultsList.replaceChildren();
+  toolMatrix.replaceChildren();
+  toolMatrixResults = [];
+  byId("matrix-passed").textContent = "0";
   await disposeViews();
   frames.replaceChildren();
   const results: ScenarioResult[] = [];
@@ -306,6 +325,19 @@ async function runSuite(): Promise<void> {
     return "无效 URI 返回 HTTP 404，不会错误回落到当前模板";
   });
 
+  await run("58 工具逐项 Workspace App 卡片矩阵", async () => {
+    toolMatrixResults = await runToolContractMatrix();
+    const failedTools = toolMatrixResults.filter((result) => !result.passed);
+    if (failedTools.length > 0) {
+      throw new Error(
+        failedTools
+          .map((result) => `${result.tool}: ${result.detail}`)
+          .join("; "),
+      );
+    }
+    return `${toolMatrixResults.length} 个工具全部完成独立 iframe 握手与非空卡片渲染`;
+  });
+
   await run("多卡并发沙箱", async () => {
     const count = Number.parseInt(concurrencySelect.value, 10);
     const concurrent = Array.from({ length: count }, (_, index) => {
@@ -335,7 +367,7 @@ async function createView(
   title: string,
   resourceUri: string,
   result: CallToolResult,
-  expectedText: string,
+  expectedText?: string,
   injectFailure = false,
 ): Promise<ViewHandle> {
   const resource = await fetchJson<TestResource>(
@@ -396,7 +428,7 @@ async function createView(
   const contentWindow = frame.contentWindow;
   if (!contentWindow) throw new Error("iframe contentWindow unavailable");
   const transport = new PostMessageTransport(contentWindow, contentWindow);
-  const view = { bridge, frame, state, transport };
+  const view = { bridge, container: frameCard, frame, state, transport };
   views.push(view);
   byId("active-frames").textContent = String(views.length);
 
@@ -406,7 +438,13 @@ async function createView(
   await bridge.sendToolInput({ arguments: { localTest: title } });
   await bridge.sendToolResult(result);
   try {
-    await waitFor(() => state.text.includes(expectedText), 6_000);
+    await waitFor(
+      () =>
+        expectedText
+          ? state.text.includes(expectedText)
+          : isRenderedCardSnapshot(state.text),
+      6_000,
+    );
   } catch {
     throw new Error(
       `result text not observed; iframe snapshot=${JSON.stringify(
@@ -424,6 +462,94 @@ async function createView(
 
   status.textContent = "已渲染";
   return view;
+}
+
+async function runToolContractMatrix(): Promise<ToolMatrixResult[]> {
+  const results = await mapWithConcurrency(
+    [...TOOL_NAMES],
+    6,
+    async (tool): Promise<ToolMatrixResult> => {
+      let view: ViewHandle | undefined;
+      try {
+        view = await createView(
+          `tool matrix: ${tool}`,
+          config.currentResourceUri,
+          matrixResultFixture(tool),
+        );
+        const detail = compactSnapshot(view.state.text);
+        await disposeView(view);
+        return { tool, passed: true, detail };
+      } catch (error) {
+        if (view) await disposeView(view);
+        return {
+          tool,
+          passed: false,
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+  for (const result of results) renderToolMatrixResult(result);
+  const passed = results.filter((result) => result.passed).length;
+  byId("matrix-passed").textContent = String(passed);
+  byId("matrix-total").textContent = String(results.length);
+  return results;
+}
+
+function matrixResultFixture(tool: ToolName): CallToolResult {
+  const marker = `fixtures/matrix/${tool}.txt`;
+  const text = `MATRIX_${tool}\nSynthetic local contract fixture.`;
+  return {
+    content: [{ type: "text", text }],
+    _meta: { tool },
+    structuredContent: {
+      status: "success",
+      workspaceId: "workspace-tool-matrix",
+      root: "/tmp/devspace-tool-matrix",
+      path: marker,
+      outcome: "verified",
+      readyForPipeline: true,
+      indexed: 1,
+      count: 1,
+      summary: {
+        source: "webgpt-local-tool-matrix",
+        lines: 2,
+        count: 1,
+        indexed: 1,
+        files: 1,
+        pattern: tool,
+        command: `fixture:${tool}`,
+        jobId: `job-${tool}`,
+        status: "completed",
+        agentsFiles: 0,
+        skills: 0,
+        skillDiagnostics: 0,
+      },
+      files: [
+        {
+          path: marker,
+          type: "modified",
+          additions: 1,
+          removals: 0,
+        },
+      ],
+      agentsFiles: [],
+      availableAgentsFiles: [],
+      skills: [],
+      skillDiagnostics: [],
+      payload: {
+        content: [{ type: "text", text }],
+        patch: [
+          `diff --git a/${marker} b/${marker}`,
+          `--- a/${marker}`,
+          `+++ b/${marker}`,
+          "@@ -1 +1 @@",
+          "-before",
+          `+MATRIX_${tool}`,
+        ].join("\n"),
+      },
+    },
+  };
 }
 
 function resultFixture(
@@ -454,6 +580,21 @@ function resultFixture(
       },
     },
   };
+}
+
+function isRenderedCardSnapshot(text: string): boolean {
+  const normalized = text.trim();
+  return (
+    normalized.length > 0 &&
+    !normalized.includes("Connecting to host") &&
+    !normalized.includes("Waiting for a tool result") &&
+    !normalized.includes("Unable to render this tool result") &&
+    !normalized.includes("Workspace App unavailable")
+  );
+}
+
+function compactSnapshot(text: string): string {
+  return text.replace(/\s+/gu, " ").trim().slice(0, 120) || "rendered";
 }
 
 function instrumentResource(html: string, injectFailure: boolean): string {
@@ -547,17 +688,39 @@ function delay(ms: number): Promise<void> {
 }
 
 async function disposeViews(): Promise<void> {
+  await Promise.all([...views].map((view) => disposeView(view)));
+  byId("active-frames").textContent = "0";
+}
+
+async function disposeView(view: ViewHandle): Promise<void> {
+  const index = views.indexOf(view);
+  if (index >= 0) views.splice(index, 1);
+  try {
+    await view.bridge.teardownResource({});
+  } catch {
+    // A partially initialized view is safe to discard in the local harness.
+  }
+  await view.transport.close();
+  view.container.remove();
+  byId("active-frames").textContent = String(views.length);
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  inputs: TInput[],
+  limit: number,
+  operation: (input: TInput) => Promise<TOutput>,
+): Promise<TOutput[]> {
+  const outputs = new Array<TOutput>(inputs.length);
+  let cursor = 0;
   await Promise.all(
-    views.splice(0).map(async (view) => {
-      try {
-        await view.bridge.teardownResource({});
-      } catch {
-        // A partially initialized view is safe to discard in the local harness.
+    Array.from({ length: Math.min(limit, inputs.length) }, async () => {
+      while (cursor < inputs.length) {
+        const index = cursor++;
+        outputs[index] = await operation(inputs[index]);
       }
-      await view.transport.close();
     }),
   );
-  byId("active-frames").textContent = "0";
+  return outputs;
 }
 
 function renderResult(result: ScenarioResult): void {
@@ -575,6 +738,20 @@ function renderResult(result: ScenarioResult): void {
   time.textContent = `${result.durationMs} ms`;
   item.append(mark, name, detail, time);
   resultsList.append(item);
+}
+
+function renderToolMatrixResult(result: ToolMatrixResult): void {
+  const item = document.createElement("article");
+  item.className = `tool-contract ${result.passed ? "passed" : "failed"}`;
+  const mark = document.createElement("span");
+  mark.className = "mark";
+  mark.textContent = result.passed ? "✓" : "×";
+  const tool = document.createElement("strong");
+  tool.textContent = result.tool;
+  const detail = document.createElement("span");
+  detail.textContent = result.detail;
+  item.append(mark, tool, detail);
+  toolMatrix.append(item);
 }
 
 function setSuiteStatus(
@@ -603,6 +780,12 @@ function updateReport(
     durationMs,
     results: [...results],
     activeFrames: views.length,
+    toolMatrix: {
+      total: toolMatrixResults.length,
+      passed: toolMatrixResults.filter((result) => result.passed).length,
+      failed: toolMatrixResults.filter((result) => !result.passed).length,
+      results: [...toolMatrixResults],
+    },
   };
   window.__DEVSPACE_WEBGPT_TEST_REPORT__ = report;
   document.body.dataset.suiteStatus = status;

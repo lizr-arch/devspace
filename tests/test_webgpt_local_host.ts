@@ -18,6 +18,16 @@ interface SuiteReport {
   durationMs: number;
   results: ScenarioResult[];
   activeFrames: number;
+  toolMatrix: {
+    total: number;
+    passed: number;
+    failed: number;
+    results: Array<{
+      tool: string;
+      passed: boolean;
+      detail: string;
+    }>;
+  };
 }
 
 const server = await startLocalWebGptTestServer();
@@ -113,14 +123,26 @@ try {
 
   assert.ok(report, "browser host did not publish a suite report");
   assert.equal(report.status, "complete");
-  assert.equal(report.results.length, 10);
+  assert.equal(report.results.length, 11);
   assert.equal(
     report.failed,
     0,
     `${formatFailures(report.results)}\n\nHost events:\n${hostEvents}\n\nConsole errors:\n${unexpectedConsoleErrors.join("\n")}`,
   );
-  assert.equal(report.passed, 10);
+  assert.equal(report.passed, 11);
   assert.equal(report.activeFrames, 16);
+  assert.equal(report.toolMatrix.total, 58);
+  assert.equal(report.toolMatrix.passed, 58);
+  assert.equal(
+    report.toolMatrix.failed,
+    0,
+    report.toolMatrix.results
+      .filter((result) => !result.passed)
+      .map((result) => `${result.tool}: ${result.detail}`)
+      .join("\n"),
+  );
+  assert.equal(report.toolMatrix.results.length, 58);
+  assert.ok(report.toolMatrix.results.every((result) => result.passed));
   assert.deepEqual(unexpectedConsoleErrors, []);
   assert.deepEqual(unexpectedRequestFailures, []);
   assert.deepEqual(badLocalResponses, []);
@@ -133,6 +155,9 @@ try {
   }
   console.log(
     `\n  Results: ${report.passed}/${report.results.length} passed in ${report.durationMs} ms`,
+  );
+  console.log(
+    `  Workspace App tool matrix: ${report.toolMatrix.passed}/${report.toolMatrix.total} passed`,
   );
   console.log("  Local-only route boundary: PASS");
   console.log("  Browser console/network gate: PASS\n");

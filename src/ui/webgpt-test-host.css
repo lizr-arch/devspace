@@ -121,6 +121,7 @@ h2 {
 
 .controls,
 .results-panel,
+.matrix-panel,
 .frames-panel,
 .events-panel {
   border: 1px solid var(--line);
@@ -217,6 +218,7 @@ button.small {
 }
 
 .results-panel,
+.matrix-panel,
 .frames-panel,
 .events-panel {
   margin-top: 14px;
@@ -269,6 +271,47 @@ button.small {
 .result time {
   color: var(--muted);
   font-size: 12px;
+}
+
+.tool-matrix {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 7px;
+}
+
+.tool-contract {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 2px 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(5, 14, 11, 0.55);
+}
+
+.tool-contract .mark {
+  grid-row: span 2;
+  color: var(--green);
+  font-weight: 800;
+}
+
+.tool-contract.failed .mark {
+  color: var(--red);
+}
+
+.tool-contract strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-contract span:last-child {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .frames {
