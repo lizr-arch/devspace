@@ -1082,14 +1082,7 @@ function logFailedToolResponse(
     durationMs: Math.round(performance.now() - startedAt),
     error: errorPreview,
   });
-  monitorEvents.record({
-    source: "tool",
-    severity: "error",
-    code:
-      /^([A-Z][A-Z0-9_]{2,63})(?::|\b)/.exec(errorPreview ?? "")?.[1] ??
-      "TOOL_CALL_FAILED",
-    message: `${fields.tool} tool failed`,
-  });
+  monitorEvents.recordToolFailure(fields.tool, errorPreview);
 }
 
 function textBlock(text: string): ToolContent {
@@ -2762,6 +2755,10 @@ function createMcpServer(
             durationMs: Math.round(performance.now() - startedAt),
             error: message,
           });
+          runtime.monitorEvents.recordToolFailure(
+            "archive_approved_image",
+            message,
+          );
           return { content: [textBlock(message)], isError: true };
         }
       },
@@ -3204,6 +3201,10 @@ function createMcpServer(
             durationMs: Math.round(performance.now() - startedAt),
             error: message,
           });
+          runtime.monitorEvents.recordToolFailure(
+            "recover_approved_asset",
+            message,
+          );
           return { content: [textBlock(message)], isError: true };
         }
       },
@@ -4707,6 +4708,7 @@ function createMcpServer(
             durationMs: Math.round(performance.now() - startedAt),
             error: message,
           });
+          runtime.monitorEvents.recordToolFailure("import_png", message);
           return {
             content: [textBlock(message)],
             isError: true,

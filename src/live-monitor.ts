@@ -559,9 +559,9 @@ export function liveMonitorHtml(): string {
     .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.value{font-size:29px;font-weight:700;margin:10px 0 3px;letter-spacing:-.04em}.unit{font-size:14px;color:var(--muted);font-weight:400}.detail{color:var(--muted);font-size:12px}
     .wide{grid-column:span 2}.full{grid-column:1/-1}.chart{height:122px;display:flex;align-items:flex-end;gap:3px;margin-top:18px;border-bottom:1px solid var(--line);padding-bottom:1px}.bar{flex:1;min-width:2px;background:var(--blue);border-radius:2px 2px 0 0;opacity:.78;transition:height .2s ease}.bar.zero{height:2px!important;background:#27313a}.resource-chart{width:100%;height:150px;display:block;margin-top:12px}.legend{display:flex;gap:16px;color:var(--muted);font-size:11px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}.legend .cpu{background:var(--blue)}.legend .memory{background:var(--amber)}
     .section-title{font-size:14px;margin:25px 0 10px;color:#cbd4dc}.diagnostics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.row{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid var(--line)}.row:last-child{border:0}.row span:last-child{text-align:right}
-    .events{background:linear-gradient(145deg,#14191f,#101419);border:1px solid var(--line);border-radius:14px;padding:4px 17px}.event{display:grid;grid-template-columns:150px 120px 1fr;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.event:last-child{border:0}.event-time{color:var(--muted);font-size:12px}.event-code{font-size:11px;border:1px solid #5b3b3b;color:#ffaaa3;border-radius:999px;padding:3px 8px;width:max-content;max-width:120px;overflow:hidden;text-overflow:ellipsis}.event.warning .event-code{border-color:#5c4b2e;color:var(--amber)}.empty{color:var(--muted);padding:16px 0}
+    .event-groups{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.event-group{background:linear-gradient(145deg,#14191f,#101419);border:1px solid var(--line);border-radius:14px;padding:15px 17px;min-width:0}.event-group-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}.event-group-title{font-weight:700}.event-group-help{color:var(--muted);font-size:11px;margin-top:3px}.event-count{border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;line-height:1;padding:5px 7px}.events{min-height:66px}.event{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 8px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}.event:last-child{border:0}.event-time{color:var(--muted);font-size:11px}.event-code{font-size:10px;border:1px solid #5b3b3b;color:#ffaaa3;border-radius:999px;padding:3px 7px;max-width:155px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event.warning .event-code{border-color:#5c4b2e;color:var(--amber)}.event-message{grid-column:1/-1;overflow-wrap:anywhere}.empty{color:var(--muted);padding:16px 0}
     footer{display:flex;justify-content:space-between;gap:16px;color:var(--muted);font-size:12px;margin-top:18px}.warning{color:var(--amber)}
-    @media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.diagnostics{grid-template-columns:1fr}.wide{grid-column:span 2}.components{grid-template-columns:repeat(3,1fr)}}
+    @media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.diagnostics,.event-groups{grid-template-columns:1fr}.wide{grid-column:span 2}.components{grid-template-columns:repeat(3,1fr)}}
     @media(max-width:520px){main{width:min(100% - 20px,1180px);padding-top:22px}header{display:block}.status{margin-top:15px;width:max-content}.load-hero{grid-template-columns:1fr}.score-ring{width:96px;height:96px}.components{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:span 1}.value{font-size:27px}.event{grid-template-columns:1fr;gap:5px}.event-code{max-width:100%}footer{display:block}}
   </style>
 </head>
@@ -608,7 +608,11 @@ export function liveMonitorHtml(): string {
     <article class="card"><div class="row"><span class="muted">未知 Session</span><span id="unknown">—</span></div><div class="row"><span class="muted">任务失败 / 超时</span><span><span id="job-failed">—</span> / <span id="job-timeout">—</span></span></div><div class="row"><span class="muted">关闭错误</span><span id="close-errors">—</span></div></article>
   </section>
   <h2 class="section-title">最近错误 <span class="muted" id="error-retention">· 本机脱敏记录，最多保留 200 条</span></h2>
-  <section class="events" id="events"><div class="empty">最近没有错误</div></section>
+  <section class="event-groups">
+    <article class="event-group"><div class="event-group-head"><div><div class="event-group-title">调用参数</div><div class="event-group-help">路径、正则、编辑定位与请求问题</div></div><span class="event-count" id="error-count-invocation">0</span></div><div class="events" id="events-invocation"><div class="empty">最近没有错误</div></div></article>
+    <article class="event-group"><div class="event-group-head"><div><div class="event-group-title">项目门禁</div><div class="event-group-help">构建、测试、Blender 与验收任务</div></div><span class="event-count" id="error-count-project_gate">0</span></div><div class="events" id="events-project_gate"><div class="empty">最近没有错误</div></div></article>
+    <article class="event-group"><div class="event-group-head"><div><div class="event-group-title">服务故障</div><div class="event-group-help">MCP、进程、网络与超时问题</div></div><span class="event-count" id="error-count-service">0</span></div><div class="events" id="events-service"><div class="empty">最近没有错误</div></div></article>
+  </section>
   <footer><span>每秒自动刷新 · 监控轮询不计入请求统计</span><span id="updated">尚未更新</span></footer>
   <footer><span class="warning">负载分数是保守的启发式信号，不代表精确的 Web GPT 数量上限；stateless 模式无法把内存归属到单个对话。</span></footer>
 </main>
@@ -640,16 +644,20 @@ function renderEvents(data){
   set("error-retention",data.errors.persisted?"· 本机脱敏记录，最多保留 200 条":"· 当前仅内存记录，磁盘写入不可用");
   const events=[
     ...data.errors.recent,
-    ...data.jobs.recentFailures.map(item=>({timestamp:item.endedAt,source:"job",severity:item.status==="failed"||item.status==="timed_out"?"error":"warning",code:item.errorCode||("JOB_"+item.status.toUpperCase()),message:item.runner+" job "+item.status}))
-  ].sort((left,right)=>right.timestamp.localeCompare(left.timestamp)).slice(0,20);
-  const container=byId("events");container.replaceChildren();
-  if(events.length===0){const empty=document.createElement("div");empty.className="empty";empty.textContent="最近没有错误";container.appendChild(empty);return}
-  for(const event of events){
-    const row=document.createElement("div");row.className="event "+event.severity;
-    const time=document.createElement("span");time.className="event-time";time.textContent=new Date(event.timestamp).toLocaleString();
-    const code=document.createElement("span");code.className="event-code";code.textContent=event.source.toUpperCase()+" · "+event.code;
-    const message=document.createElement("span");message.textContent=event.message+(event.statusCode?" · HTTP "+event.statusCode:"");
-    row.append(time,code,message);container.appendChild(row);
+    ...data.jobs.recentFailures.map(item=>({timestamp:item.endedAt,source:"job",severity:item.status==="failed"||item.status==="timed_out"?"error":"warning",category:"project_gate",code:item.errorCode||("JOB_"+item.status.toUpperCase()),message:item.runner+" job "+item.status}))
+  ].map(event=>({...event,category:event.category||(event.source==="job"?"project_gate":event.source==="mcp"||event.source==="web_app"?"service":"invocation")})).sort((left,right)=>right.timestamp.localeCompare(left.timestamp));
+  for(const category of ["invocation","project_gate","service"]){
+    const matching=events.filter(event=>event.category===category);
+    set("error-count-"+category,matching.length);
+    const container=byId("events-"+category);container.replaceChildren();
+    if(matching.length===0){const empty=document.createElement("div");empty.className="empty";empty.textContent="最近没有错误";container.appendChild(empty);continue}
+    for(const event of matching.slice(0,8)){
+      const row=document.createElement("div");row.className="event "+event.severity;
+      const time=document.createElement("span");time.className="event-time";time.textContent=new Date(event.timestamp).toLocaleString();
+      const code=document.createElement("span");code.className="event-code";code.textContent=event.source.toUpperCase()+" · "+event.code;
+      const message=document.createElement("span");message.className="event-message";message.textContent=event.message+(event.statusCode?" · HTTP "+event.statusCode:"");
+      row.append(time,code,message);container.appendChild(row);
+    }
   }
 }
 function render(data){

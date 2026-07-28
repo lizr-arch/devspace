@@ -17,6 +17,7 @@ const WEB_APP_EVENT_DEDUPE_MS = 30_000;
 
 export type MonitorEventSource = "http" | "mcp" | "tool" | "web_app";
 export type MonitorEventSeverity = "warning" | "error";
+export type MonitorEventCategory = "invocation" | "project_gate" | "service";
 export type WorkspaceAppErrorKind =
   | "script_error"
   | "unhandled_rejection"
@@ -37,6 +38,7 @@ export interface MonitorEvent {
   timestamp: string;
   source: MonitorEventSource;
   severity: MonitorEventSeverity;
+  category: MonitorEventCategory;
   code: string;
   message: string;
   statusCode?: number;
@@ -46,6 +48,7 @@ export interface MonitorEvent {
 export interface MonitorEventInput {
   source: MonitorEventSource;
   severity: MonitorEventSeverity;
+  category?: MonitorEventCategory;
   code: string;
   message: string;
   statusCode?: number;
@@ -84,6 +87,7 @@ export class MonitorEventStore {
       timestamp: new Date().toISOString(),
       source: input.source,
       severity: input.severity,
+      category: input.category ?? defaultEventCategory(input),
       code: sanitizeCode(input.code),
       message: sanitizeMessage(input.message),
       ...(validStatusCode(input.statusCode)
@@ -107,6 +111,18 @@ export class MonitorEventStore {
       this.persistenceAvailable = false;
     }
     return event;
+  }
+
+  recordToolFailure(tool: string, error?: string): MonitorEvent {
+    return this.record({
+      source: "tool",
+      severity: "error",
+      category: classifyToolFailureCategory(error),
+      code:
+        /^([A-Z][A-Z0-9_]{2,63})(?::|\b)/.exec(error ?? "")?.[1] ??
+        "TOOL_CALL_FAILED",
+      message: `${sanitizeToolName(tool)} tool failed`,
+    });
   }
 
   recordWorkspaceAppError(
@@ -245,6 +261,15 @@ function parseEvent(line: string): MonitorEvent | undefined {
       timestamp: value.timestamp,
       source: value.source as MonitorEventSource,
       severity: value.severity as MonitorEventSeverity,
+      category: isMonitorEventCategory(value.category)
+        ? value.category
+        : defaultEventCategory({
+            source: value.source as MonitorEventSource,
+            severity: value.severity as MonitorEventSeverity,
+            code: value.code,
+            message: value.message,
+            statusCode: value.statusCode,
+          }),
       code: sanitizeCode(value.code),
       message: sanitizeMessage(value.message),
       ...(validStatusCode(value.statusCode)
@@ -257,6 +282,37 @@ function parseEvent(line: string): MonitorEvent | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function classifyToolFailureCategory(
+  error: string | undefined,
+): MonitorEventCategory {
+  const value = error?.trim() ?? "";
+  if (
+    /\b(?:INTERNAL_ERROR|ERR_INTERNAL|ENOMEM|EPIPE|ECONN(?:ABORTED|REFUSED|RESET)|ENETUNREACH|EHOSTUNREACH)\b|heap out of memory|fetch failed|socket hang up|network error|timed? out|timeout|aborted due to timeout/i.test(
+      value,
+    )
+  ) {
+    return "service";
+  }
+  return "invocation";
+}
+
+function defaultEventCategory(input: MonitorEventInput): MonitorEventCategory {
+  if (input.source === "http") {
+    return (input.statusCode ?? 0) >= 500 ? "service" : "invocation";
+  }
+  if (input.source === "mcp" || input.source === "web_app") return "service";
+  return "invocation";
+}
+
+function isMonitorEventCategory(value: unknown): value is MonitorEventCategory {
+  return ["invocation", "project_gate", "service"].includes(String(value));
+}
+
+function sanitizeToolName(value: string): string {
+  const normalized = value.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64);
+  return normalized || "unknown";
 }
 
 function sanitizeCode(value: string): string {

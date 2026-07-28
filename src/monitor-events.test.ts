@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MonitorEventStore, safeMonitorPath } from "./monitor-events.js";
@@ -25,7 +31,9 @@ try {
   assert.equal(store.isPersistent(), true);
   assert.equal(events.length, 2);
   assert.equal(events[0]?.code, "READ_FAILED");
+  assert.equal(events[0]?.category, "invocation");
   assert.equal(events[1]?.code, "HTTP_404");
+  assert.equal(events[1]?.category, "invocation");
   assert.equal(events[1]?.message, "GET /missing failed");
   assert.equal(events[1]?.statusCode, 404);
 
@@ -38,6 +46,43 @@ try {
 
   const reloaded = new MonitorEventStore(stateDir);
   assert.deepEqual(reloaded.snapshot(), events);
+
+  const legacyDir = mkdtempSync(
+    join(tmpdir(), "devspace-monitor-events-legacy-test-"),
+  );
+  try {
+    writeFileSync(
+      join(legacyDir, "monitor-events.jsonl"),
+      `${JSON.stringify({
+        timestamp: "2026-07-27T12:00:00.000Z",
+        source: "http",
+        severity: "error",
+        code: "HTTP_503",
+        message: "POST /mcp returned 503",
+        statusCode: 503,
+      })}\n`,
+    );
+    const legacyEvent = new MonitorEventStore(legacyDir).snapshot()[0];
+    assert.equal(legacyEvent?.category, "service");
+  } finally {
+    rmSync(legacyDir, { recursive: true, force: true });
+  }
+
+  const timeoutEvent = store.recordToolFailure(
+    "import_png",
+    "The operation was aborted due to timeout at /private/secret.png",
+  );
+  assert.equal(timeoutEvent.category, "service");
+  assert.equal(timeoutEvent.code, "TOOL_CALL_FAILED");
+  assert.equal(timeoutEvent.message, "import_png tool failed");
+  assert.doesNotMatch(readFileSync(eventPath, "utf8"), /secret\.png/);
+
+  const editEvent = store.recordToolFailure(
+    "edit",
+    "Could not find exact text in /private/project/file.ts",
+  );
+  assert.equal(editEvent.category, "invocation");
+  assert.equal(editEvent.message, "edit tool failed");
 
   assert.equal(safeMonitorPath("/artifacts/secret-token"), "/artifacts/:token");
   assert.equal(
@@ -73,6 +118,7 @@ try {
   );
   const webAppEvent = store.snapshot()[0];
   assert.equal(webAppEvent?.source, "web_app");
+  assert.equal(webAppEvent?.category, "service");
   assert.equal(webAppEvent?.code, "WEB_APP_SCRIPT_ERROR");
   assert.equal(
     webAppEvent?.message,
