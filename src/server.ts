@@ -183,7 +183,7 @@ const PACKAGE_VERSION = (
   ) as { version: string }
 ).version;
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-job-wait-resume-p0-v1.2026-07-29";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-job-wait-resume-p0.1-v1.2026-07-29";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 export const LEGACY_WORKSPACE_APP_RESOURCE_URI =
   "ui://devspace/workspace-app.html";
@@ -5388,7 +5388,7 @@ function createMcpServer(
       {
         title: "Start background job",
         description:
-          "Start a bounded background validation job inside an open workspace. Select an approved build/test/check runner and pass an argument array; arbitrary executables and shell command strings are not accepted. The process is spawned without a shell, its working directory is workspace-scoped, and runtime/output/concurrency are capped. Use poll_job to read progress and cancel_job to stop it.",
+          "Start a bounded background validation job inside an open workspace. Select an approved build/test/check runner and pass an argument array; arbitrary executables and shell command strings are not accepted. The process is spawned without a shell, its working directory is workspace-scoped, and runtime/output/concurrency are capped. Use wait_job for normal completion waiting, list_jobs after a client interruption, poll_job only for explicit paginated log reads, and cancel_job to stop it.",
         inputSchema: {
           workspaceId: z
             .string()
