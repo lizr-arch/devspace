@@ -10,8 +10,9 @@ scene, camera, or art standard. An approved workspace may define:
 The MCP client calls `start_capture(workspaceId, profile)`. DevSpace loads the
 strict profile, resolves the named Godot runner from the local Runner Registry,
 validates every argument and output root, then starts the existing persistent
-Job lifecycle. The client continues with `poll_job`, `list_artifacts`, and
-optionally `publish_artifact`.
+Job lifecycle. The client continues with `wait_job`, `list_artifacts`, and
+optionally `publish_artifact`. After a client interruption, use `list_jobs` to
+recover the Job. `poll_job` remains available for explicit paginated log reads.
 
 ## Schema
 
