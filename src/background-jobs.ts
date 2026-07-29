@@ -1,6 +1,7 @@
 import {
   execFileSync,
   spawn,
+  spawnSync,
   type ChildProcessByStdio,
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -19,6 +20,7 @@ import {
 import { join, dirname, delimiter } from "node:path";
 import type { Readable } from "node:stream";
 import {
+  createRunnerSpawnSpec,
   DEFAULT_JOB_TIMEOUT_SECONDS,
   MAX_CONCURRENT_JOBS,
   MAX_JOB_OUTPUT_BYTES,
@@ -216,6 +218,7 @@ export class BackgroundJobManager {
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly jobsDir: string;
   private initialized = false;
+  private closed = false;
 
   constructor(
     private readonly stateDir: string,
@@ -324,11 +327,12 @@ export class BackgroundJobManager {
         );
       }
 
-      const child = spawn(executable, args, {
+      const invocation = createRunnerSpawnSpec(executable, args);
+      const child = spawn(invocation.command, invocation.args, {
         cwd: input.workingDirectory,
         env,
         detached: process.platform !== "win32",
-        shell: false,
+        shell: invocation.shell,
         stdio: ["ignore", "pipe", "pipe"],
       });
       job.child = child;
@@ -350,6 +354,9 @@ export class BackgroundJobManager {
       child.once("error", (error) => {
         job.errorCode = failureCode(job);
         job.error = `${job.errorCode}: ${error.message}`;
+        if (!child.pid && !isTerminal(job.status)) {
+          this.finalizeSpawnFailure(job);
+        }
       });
       child.once("exit", (code, signal) => {
         this.finalize(job, code, signal);
@@ -543,6 +550,7 @@ export class BackgroundJobManager {
 
   close(): void {
     this.initialize();
+    this.closed = true;
     for (const job of this.jobs.values()) {
       if (isTerminal(job.status) && !job.processCleanupPending) continue;
       if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
@@ -621,6 +629,7 @@ export class BackgroundJobManager {
   }
 
   private appendOutput(job: LiveJob, chunk: Buffer | string): void {
+    if (this.closed) return;
     const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     const remaining =
       (job.maxOutputBytes ?? MAX_JOB_OUTPUT_BYTES) - job.outputBytes;
@@ -685,6 +694,17 @@ export class BackgroundJobManager {
   ): boolean {
     const target = processSignalTarget(job);
     if (target === undefined) return false;
+    if (process.platform === "win32") {
+      const result = spawnSync(
+        "taskkill.exe",
+        ["/PID", String(target), "/T", "/F"],
+        {
+          stdio: "ignore",
+          windowsHide: true,
+        },
+      );
+      return !result.error && result.status === 0;
+    }
     try {
       process.kill(target, signal);
       return true;
@@ -735,11 +755,28 @@ export class BackgroundJobManager {
       }
     }
     job.child = undefined;
+    if (this.closed && job.status === "interrupted") {
+      this.completeProcessCleanup(job);
+      this.notifyWaiters(job.jobId);
+      return;
+    }
     if (this.persistedProcessAlive(job)) {
       this.beginProcessCleanup(job);
     } else {
       this.completeProcessCleanup(job);
     }
+    this.persist(job);
+    this.notifyWaiters(job.jobId);
+    void this.finalizeArtifacts(job);
+  }
+
+  private finalizeSpawnFailure(job: LiveJob): void {
+    if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
+    job.timeoutHandle = undefined;
+    job.status = "failed";
+    job.endedAt = new Date().toISOString();
+    job.child = undefined;
+    this.completeProcessCleanup(job);
     this.persist(job);
     this.notifyWaiters(job.jobId);
     void this.finalizeArtifacts(job);

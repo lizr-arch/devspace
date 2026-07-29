@@ -269,6 +269,22 @@ try {
       cachedLaunchdResolved.environment.PATH?.split(delimiter)[0],
       launchdBin,
     );
+  } else {
+    const windowsBin = join(root, "windows-bin");
+    mkdirSync(windowsBin);
+    const windowsNpm = join(windowsBin, "npm.cmd");
+    writeFileSync(
+      windowsNpm,
+      `@echo off\r\n"${process.execPath}" -e "console.log('10.9.8-windows-test')"\r\n`,
+    );
+    const windowsRegistry = new RunnerRegistry({}, process.platform, {
+      ...process.env,
+      PATH: windowsBin,
+      PATHEXT: ".CMD",
+    });
+    const windowsResolved = await windowsRegistry.resolve("npm");
+    assert.equal(windowsResolved.executable, windowsNpm);
+    assert.equal(windowsResolved.version, "10.9.8-windows-test");
   }
 
   const invalid = new RunnerRegistry({

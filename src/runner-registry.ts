@@ -94,6 +94,12 @@ export interface ResolvedRunner {
   version?: string;
 }
 
+export interface RunnerSpawnSpec {
+  command: string;
+  args: string[];
+  shell: false | string;
+}
+
 export interface RunnerValidationContext {
   workspaceRoot: string;
   workingDirectory: string;
@@ -210,6 +216,7 @@ export class RunnerRegistry {
       executable,
       definition.versionArgs,
       environment,
+      this.platform,
     ).catch(() => undefined);
     const version = normalizeRunnerVersion(name, executable, probedVersion);
     const resolved = { definition, executable, environment, version };
@@ -245,6 +252,7 @@ export class RunnerRegistry {
       executable,
       versionArgs ?? definition.versionArgs,
       environment,
+      this.platform,
     ).catch(() => undefined);
     return {
       definition,
@@ -914,11 +922,33 @@ function executableCandidates(
     hython: houdiniExecutableCandidates("hython", platform),
     hbatch: houdiniExecutableCandidates("hbatch", platform),
   };
-  const fromPath = (env.PATH ?? "")
+  const pathValue =
+    env.PATH ??
+    Object.entries(env).find(([key]) => key.toLowerCase() === "path")?.[1] ??
+    "";
+  const executableNames =
+    platform === "win32" ? windowsExecutableNames(runner, env) : [runner];
+  const fromPath = pathValue
     .split(delimiter)
     .filter(Boolean)
-    .map((directory) => join(directory, runner));
+    .flatMap((directory) =>
+      executableNames.map((executable) => join(directory, executable)),
+    );
   return Array.from(new Set([...(fixed[runner] ?? []), ...fromPath]));
+}
+
+function windowsExecutableNames(
+  runner: RunnerName,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const pathExt =
+    Object.entries(env).find(([key]) => key.toLowerCase() === "pathext")?.[1] ??
+    ".COM;.EXE;.BAT;.CMD";
+  return pathExt
+    .split(";")
+    .map((extension) => extension.trim())
+    .filter((extension) => /^\.[A-Za-z0-9]+$/.test(extension))
+    .map((extension) => `${runner}${extension.toLowerCase()}`);
 }
 
 function houdiniExecutableCandidates(
@@ -1030,11 +1060,13 @@ async function probeVersion(
   executable: string,
   args: string[],
   env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
 ): Promise<string | undefined> {
   return new Promise((resolvePromise) => {
-    const child = spawn(executable, args, {
+    const invocation = createRunnerSpawnSpec(executable, args, platform, env);
+    const child = spawn(invocation.command, invocation.args, {
       env,
-      shell: false,
+      shell: invocation.shell,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -1069,6 +1101,36 @@ async function probeVersion(
       finish(undefined);
     }, VERSION_PROBE_TIMEOUT_MS);
   });
+}
+
+export function createRunnerSpawnSpec(
+  executable: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): RunnerSpawnSpec {
+  if (platform !== "win32" || !/\.(?:cmd|bat)$/i.test(executable)) {
+    return { command: executable, args, shell: false };
+  }
+  const shell =
+    Object.entries(env).find(([key]) => key.toLowerCase() === "comspec")?.[1] ??
+    "cmd.exe";
+  return {
+    command: `call ${[executable, ...args]
+      .map(quoteWindowsCommandToken)
+      .join(" ")}`,
+    args: [],
+    shell,
+  };
+}
+
+function quoteWindowsCommandToken(value: string): string {
+  if (/["\r\n\0%!^]/.test(value)) {
+    throw new Error(
+      "RUNNER_ARGUMENT_REJECTED: Windows command-shim arguments contain unsafe shell characters.",
+    );
+  }
+  return `"${value.replace(/(\\+)$/, "$1$1")}"`;
 }
 
 function normalizeRunnerVersion(

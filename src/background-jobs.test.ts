@@ -18,12 +18,17 @@ import {
   MAX_JOB_OUTPUT_BYTES,
   validateJobArguments,
 } from "./background-jobs.js";
-import { RunnerRegistry } from "./runner-registry.js";
+import {
+  RunnerRegistry,
+  type ResolvedRunner,
+  type RunnerName,
+} from "./runner-registry.js";
 import { ArtifactLedger } from "./artifact-ledger.js";
 
 const root = mkdtempSync(join(tmpdir(), "devspace-background-jobs-"));
 const stateDir = join(root, "state");
 const workspaceRoot = join(root, "workspace");
+const fixtureJobTimeoutSeconds = process.platform === "win32" ? 10 : 2;
 mkdirSync(workspaceRoot, { recursive: true });
 writeFileSync(
   join(workspaceRoot, "package.json"),
@@ -65,6 +70,35 @@ try {
   assert.match(completed.output ?? "", /job-ok/);
   assert.equal(completed.exitCode, 0);
 
+  const missingExecutable = join(root, "missing-after-resolution.exe");
+  const failingRegistry = new (class extends RunnerRegistry {
+    override async resolve(name: RunnerName): Promise<ResolvedRunner> {
+      const resolved = await this.resolveExecutable(name, process.execPath, [
+        "--version",
+      ]);
+      return { ...resolved, executable: missingExecutable };
+    }
+  })();
+  const failingManager = new BackgroundJobManager(
+    join(root, "spawn-failure-state"),
+    failingRegistry,
+  );
+  const spawnFailure = await failingManager.start({
+    workspaceId: "ws_spawn_failure",
+    workspaceRoot,
+    workingDirectory: workspaceRoot,
+    runner: "npm",
+    args: ["run", "verify"],
+    timeoutSeconds: 30,
+  });
+  const failed = await failingManager.wait(
+    spawnFailure.jobId,
+    spawnFailure.outputCursor,
+    2,
+  );
+  assert.equal(failed.status, "failed");
+  assert.match(failed.error ?? "", /ENOENT|not found/i);
+
   const slowStarted = await manager.start({
     workspaceId: "ws_test",
     workspaceRoot,
@@ -74,11 +108,12 @@ try {
     timeoutSeconds: 30,
   });
   assert.match(slowStarted.outputCursor ?? "", /^jobc_/);
+  const completionWaitSeconds = process.platform === "win32" ? 10 : 2;
   const waitStartedAt = performance.now();
   const slowCompleted = await manager.wait(
     slowStarted.jobId,
     slowStarted.outputCursor,
-    2,
+    completionWaitSeconds,
   );
   assert.equal(slowCompleted.status, "succeeded");
   assert.equal(slowCompleted.waitTimedOut, false);
@@ -104,7 +139,7 @@ try {
   const burstCompleted = await manager.wait(
     burstStarted.jobId,
     burstStarted.outputCursor,
-    2,
+    completionWaitSeconds,
   );
   assert.equal(burstCompleted.status, "succeeded");
   assert.ok(Buffer.byteLength(burstCompleted.output ?? "") <= 2 * 1024);
@@ -291,9 +326,8 @@ if (process.argv.includes("--version")) {
   assert.match(restored.output ?? "", /job-ok/);
   restoredManager.close();
 
-  const fakeBlenderPath = join(root, "fake-blender");
-  writeFileSync(
-    fakeBlenderPath,
+  const fakeBlenderPath = writeNodeRunnerFixture(
+    join(root, "fake-blender"),
     `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -317,7 +351,6 @@ if (script === "wait.py") {
 }
 `,
   );
-  chmodSync(fakeBlenderPath, 0o755);
   for (const script of ["create_asset.py", "fail.py", "wait.py"]) {
     writeFileSync(join(workspaceRoot, script), "# fake blender fixture");
   }
@@ -329,7 +362,7 @@ if (script === "wait.py") {
       blender: {
         executable: fakeBlenderPath,
         maxConcurrent: 1,
-        maxTimeoutSeconds: 2,
+        maxTimeoutSeconds: 10,
       },
     }),
     blenderArtifacts,
@@ -350,7 +383,7 @@ if (script === "wait.py") {
       "create_asset.py",
     ],
     artifactRoots: ["artifacts/blender"],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   const blenderCompleted = await waitForArtifacts(
     blenderManager,
@@ -375,7 +408,7 @@ if (script === "wait.py") {
     runner: "blender",
     args: ["--background", "--python-exit-code", "23", "--python", "fail.py"],
     artifactRoots: ["artifacts/blender"],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   const blenderFailed = await waitForArtifacts(
     blenderManager,
@@ -412,7 +445,7 @@ if (script === "wait.py") {
     runner: "blender",
     args: ["--background", "--python-exit-code", "23", "--python", "wait.py"],
     artifactRoots: ["artifacts/blender"],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   blenderManager.cancel(blenderCancel.jobId);
   const blenderCancelled = await waitForArtifacts(
@@ -424,9 +457,8 @@ if (script === "wait.py") {
   assert.equal(blenderCancelled.artifactStatus, "incomplete");
   blenderManager.close();
 
-  const fakeHoudiniPath = join(root, "fake-houdini");
-  writeFileSync(
-    fakeHoudiniPath,
+  const fakeHoudiniPath = writeNodeRunnerFixture(
+    join(root, "fake-houdini"),
     `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -453,7 +485,6 @@ if (script === "houdini_wait.py") {
 }
 `,
   );
-  chmodSync(fakeHoudiniPath, 0o755);
   for (const script of [
     "houdini_job.py",
     "houdini_wait.py",
@@ -475,12 +506,12 @@ if (script === "houdini_wait.py") {
       hython: {
         executable: fakeHoudiniPath,
         maxConcurrent: 1,
-        maxTimeoutSeconds: 2,
+        maxTimeoutSeconds: 10,
       },
       hbatch: {
         executable: fakeHoudiniPath,
         maxConcurrent: 1,
-        maxTimeoutSeconds: 2,
+        maxTimeoutSeconds: 10,
       },
     }),
     houdiniArtifacts,
@@ -492,7 +523,7 @@ if (script === "houdini_wait.py") {
     runner: "hython",
     args: ["houdini_job.py"],
     artifactRoots: ["artifacts/houdini"],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   const hythonCompleted = await waitForArtifacts(
     houdiniManager,
@@ -515,7 +546,7 @@ if (script === "houdini_wait.py") {
       "source houdini_build.hscript",
       "houdini_scene.hip",
     ],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   assert.equal(
     (await waitForTerminal(houdiniManager, hbatchSuccess.jobId)).status,
@@ -528,7 +559,7 @@ if (script === "houdini_wait.py") {
     workingDirectory: workspaceRoot,
     runner: "hython",
     args: ["houdini_fail.py"],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   const houdiniFailed = await waitForTerminal(
     houdiniManager,
@@ -543,7 +574,7 @@ if (script === "houdini_wait.py") {
     workingDirectory: workspaceRoot,
     runner: "hython",
     args: ["houdini_output.py"],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   const outputCapped = await waitForTerminal(
     houdiniManager,
@@ -559,7 +590,7 @@ if (script === "houdini_wait.py") {
     workingDirectory: workspaceRoot,
     runner: "hython",
     args: ["houdini_wait.py"],
-    timeoutSeconds: 2,
+    timeoutSeconds: fixtureJobTimeoutSeconds,
   });
   await assert.rejects(
     () =>
@@ -569,7 +600,7 @@ if (script === "houdini_wait.py") {
         workingDirectory: workspaceRoot,
         runner: "hython",
         args: ["houdini_job.py"],
-        timeoutSeconds: 2,
+        timeoutSeconds: fixtureJobTimeoutSeconds,
       }),
     /At most 1 hython job/,
   );
@@ -603,9 +634,8 @@ if (script === "houdini_wait.py") {
   });
   assert.ok(restoredBlenderList.length >= 4);
 
-  const fakeGodotPath = join(root, "fake-godot");
-  writeFileSync(
-    fakeGodotPath,
+  const fakeGodotPath = writeNodeRunnerFixture(
+    join(root, "fake-godot"),
     `#!/usr/bin/env node
 if (process.argv.includes("--version")) {
   console.log("4.7.1.stable.mono");
@@ -614,7 +644,6 @@ if (process.argv.includes("--version")) {
 process.exit(9);
 `,
   );
-  chmodSync(fakeGodotPath, 0o755);
   const captureManager = new BackgroundJobManager(
     join(root, "capture-state"),
     new RunnerRegistry({
@@ -680,7 +709,28 @@ process.exit(9);
   console.log("background job tests passed");
 } finally {
   manager.close();
-  rmSync(root, { recursive: true, force: true });
+  rmSync(root, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === "win32" ? 20 : 0,
+    retryDelay: 50,
+  });
+}
+
+function writeNodeRunnerFixture(basePath: string, source: string): string {
+  if (process.platform !== "win32") {
+    writeFileSync(basePath, source);
+    chmodSync(basePath, 0o755);
+    return basePath;
+  }
+  const scriptPath = `${basePath}.cjs`;
+  const commandPath = `${basePath}.cmd`;
+  writeFileSync(scriptPath, source.replace(/^#![^\n]*\n/, ""));
+  writeFileSync(
+    commandPath,
+    `@echo off\r\n"${process.execPath}" "${scriptPath}" %*\r\n`,
+  );
+  return commandPath;
 }
 
 async function waitForArtifacts(manager: BackgroundJobManager, jobId: string) {
