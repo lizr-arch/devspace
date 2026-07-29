@@ -546,6 +546,11 @@ export class TaskRunner {
       bootstrapContext = prepared.context;
     }
 
+    this.sessions.set(sessionId, session);
+    if (secretValuesForRedaction.length > 0) {
+      this.sessionSecretValues.set(sessionId, secretValuesForRedaction);
+    }
+
     try {
       const result = await this.runAndWait(
         fullCommand[0],
@@ -553,6 +558,21 @@ export class TaskRunner {
         input.workspaceRoot,
         runEnv as Record<string, string>,
         timeoutMs,
+        {
+          onSpawn: (proc) => {
+            session.pid = proc.pid;
+            this.processes.set(sessionId, proc);
+          },
+          onStdout: (output) => {
+            session.stdout += output;
+          },
+          onStderr: (output) => {
+            session.stderr += output;
+          },
+          onSettled: () => {
+            this.processes.delete(sessionId);
+          },
+        },
       );
       let effectiveExitCode = result.exitCode;
       let bootstrapDiagnostic = "";
@@ -601,11 +621,13 @@ export class TaskRunner {
       );
 
       const durationMs = Math.round(performance.now() - startTime);
-      session.status = result.timedOut
-        ? "timed_out"
-        : effectiveExitCode === 0
-          ? "succeeded"
-          : "failed";
+      if (session.status !== "stopped") {
+        session.status = result.timedOut
+          ? "timed_out"
+          : effectiveExitCode === 0
+            ? "succeeded"
+            : "failed";
+      }
       session.exitCode = effectiveExitCode ?? undefined;
       session.stdout = redactedStdout;
       session.stderr = redactedStderr;
@@ -651,6 +673,8 @@ export class TaskRunner {
         errors: [],
       };
     } finally {
+      this.processes.delete(sessionId);
+      this.sessionSecretValues.delete(sessionId);
       if (bootstrapContext) {
         this.bootstrapLocks.delete(bootstrapContext.key);
       }
@@ -668,6 +692,31 @@ export class TaskRunner {
         stdout: redactSecrets(session.stdout, secretValues),
         stderr: redactSecrets(session.stderr, secretValues),
       };
+    }
+    return session;
+  }
+
+  listSessions(workspaceId: string, limit = 20): TaskSession[] {
+    const boundedLimit = Math.max(1, Math.min(limit, 100));
+    return Array.from(this.sessions.values())
+      .filter((session) => session.workspaceId === workspaceId)
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+      .slice(0, boundedLimit)
+      .map((session) => this.getSession(session.sessionId)!)
+      .filter(Boolean);
+  }
+
+  async waitSession(
+    sessionId: string,
+    waitMs: number,
+  ): Promise<TaskSession | undefined> {
+    const deadline = Date.now() + Math.max(0, waitMs);
+    let session = this.getSession(sessionId);
+    while (session?.status === "running" && Date.now() < deadline) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))),
+      );
+      session = this.getSession(sessionId);
     }
     return session;
   }
@@ -880,6 +929,12 @@ export class TaskRunner {
     cwd: string,
     env: Record<string, string>,
     timeoutMs: number,
+    lifecycle?: {
+      onSpawn?: (proc: ChildProcess) => void;
+      onStdout?: (output: string) => void;
+      onStderr?: (output: string) => void;
+      onSettled?: () => void;
+    },
   ): Promise<{
     stdout: string;
     stderr: string;
@@ -894,6 +949,7 @@ export class TaskRunner {
         windowsHide: true,
         detached: process.platform !== "win32",
       });
+      lifecycle?.onSpawn?.(proc);
 
       let stdout = "";
       let stderr = "";
@@ -903,6 +959,7 @@ export class TaskRunner {
         if (!settled) {
           settled = true;
           terminateProcessTree(proc);
+          lifecycle?.onSettled?.();
           resolvePromise({
             stdout,
             stderr: stderr + "\n[TASK TIMED OUT]",
@@ -913,15 +970,20 @@ export class TaskRunner {
       }, timeoutMs);
 
       proc.stdout?.on("data", (d: Buffer) => {
-        stdout += d.toString();
+        const output = d.toString();
+        stdout += output;
+        lifecycle?.onStdout?.(output);
       });
       proc.stderr?.on("data", (d: Buffer) => {
-        stderr += d.toString();
+        const output = d.toString();
+        stderr += output;
+        lifecycle?.onStderr?.(output);
       });
       proc.on("exit", (code) => {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
+          lifecycle?.onSettled?.();
           resolvePromise({ stdout, stderr, exitCode: code, timedOut: false });
         }
       });
@@ -929,6 +991,7 @@ export class TaskRunner {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
+          lifecycle?.onSettled?.();
           resolvePromise({
             stdout,
             stderr: stderr + `\n[TASK ERROR: ${err.message}]`,
