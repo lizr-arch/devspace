@@ -230,7 +230,40 @@ export const approvedAssetSupersessions = sqliteTable(
   },
 );
 
+export const operations = sqliteTable(
+  "operations",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id"),
+    toolName: text("tool_name").notNull(),
+    requestHash: text("request_hash").notNull(),
+    status: text("status", {
+      enum: ["running", "succeeded", "failed"],
+    }).notNull(),
+    sideEffectApplied: integer("side_effect_applied", {
+      mode: "boolean",
+    })
+      .notNull()
+      .default(false),
+    resultJson: text("result_json"),
+    errorJson: text("error_json"),
+    createdAt: text("created_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("operations_workspace_tool_hash_idx").on(
+      table.workspaceId,
+      table.toolName,
+      table.requestHash,
+    ),
+    index("operations_created_at_idx").on(table.createdAt),
+  ],
+);
+
 export type WorkspaceSessionRow = typeof workspaceSessions.$inferSelect;
 export type NewWorkspaceSessionRow = typeof workspaceSessions.$inferInsert;
 export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;
 export type NewLoadedAgentFileRow = typeof loadedAgentFiles.$inferInsert;
+export type OperationRow = typeof operations.$inferSelect;
+export type NewOperationRow = typeof operations.$inferInsert;
+

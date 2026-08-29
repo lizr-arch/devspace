@@ -444,6 +444,8 @@ export const reviewSummaryOutputSchema = z.object({
   removals: z.number(),
 });
 
+import type { OperationRegistry } from "../operation-registry.js";
+
 export interface ServerContext {
   config: ServerConfig;
   workspaces: WorkspaceRegistry;
@@ -455,6 +457,7 @@ export interface ServerContext {
   artifacts: ArtifactLedger;
   assetReceipts: AssetReceiptStore;
   publisher: ArtifactPublisher;
+  operations: OperationRegistry;
   runtime: ServiceRuntime;
   workspaceApp: WorkspaceAppBuild | undefined;
   tasks: TaskRunner;

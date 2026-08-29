@@ -406,7 +406,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionConcurrentCalls, 20);
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
-    assert.equal(probe.toolNames?.length, 58);
+    assert.equal(probe.toolNames?.length, 59);
     assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
     assert.equal(probe.workspaceAppTelemetryTool.ok, true);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
@@ -619,6 +619,7 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "devspace_info",
       "houdini_info",
       "list_workspaces",
+      "query_operation",
       "list_artifacts",
       "inspect_artifact",
       "git_status",

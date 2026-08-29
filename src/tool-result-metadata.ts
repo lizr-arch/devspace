@@ -1,6 +1,14 @@
+export interface ToolMetadataExtra {
+  bootId?: string;
+  schemaFingerprint?: string;
+  schemaRevision?: number;
+  [key: string]: unknown;
+}
+
 export function attachRegisteredToolName(
   toolName: string,
   result: unknown,
+  extra?: ToolMetadataExtra,
 ): unknown {
   if (!result || typeof result !== "object") return result;
 
@@ -15,6 +23,7 @@ export function attachRegisteredToolName(
     _meta: {
       ...existingMeta,
       tool: toolName,
+      ...(extra ?? {}),
     },
   };
 }

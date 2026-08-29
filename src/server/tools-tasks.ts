@@ -5,12 +5,15 @@ import { checkManifestIntegrity, isTaskApproved } from "../task-manifest.js";
 import {
   resultOutputSchema,
   type ServerContext,
+  type ToolContent,
 } from "./server-types.js";
 import {
   registerAppTool,
   logToolCall,
   textBlock,
 } from "./server-helpers.js";
+
+import { computeRequestHash } from "../operation-registry.js";
 
 function projectMemoryReceiptInputSchema() {
   return z
@@ -44,13 +47,27 @@ export function registerProjectTaskTool(
           .record(z.string(), z.string())
           .optional()
           .describe("Parameter values."),
+        operationId: z
+          .string()
+          .min(1)
+          .max(256)
+          .optional()
+          .describe(
+            "Optional unique operation ID for idempotency and interruption recovery.",
+          ),
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema({ task: z.unknown() }),
       _meta: {},
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ workspaceId, task: taskId, params, projectMemoryReceiptId }) => {
+    async ({
+      workspaceId,
+      task: taskId,
+      params,
+      operationId,
+      projectMemoryReceiptId,
+    }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
@@ -58,6 +75,21 @@ export function registerProjectTaskTool(
         "project_task",
         projectMemoryReceiptId,
       );
+
+      if (operationId) {
+        const start = ctx.operations.recordStart(operationId, {
+          workspaceId,
+          toolName: "project_task",
+          requestHash: computeRequestHash("project_task", {
+            taskId,
+            params: params ?? {},
+          }),
+        });
+        if (start.status === "replay") {
+          return start.result as { content: ToolContent[]; [key: string]: unknown };
+        }
+      }
+
       const approved = workspace.approvedTasks;
       if (!approved)
         throw new Error("TASK_NOT_APPROVED: No manifest approved.");
@@ -83,11 +115,18 @@ export function registerProjectTaskTool(
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
-      return {
+
+      const responsePayload = {
         content: [textBlock(text)],
         _meta: { tool: "project_task", projectMemory },
         structuredContent: { result: text, task: result },
       };
+
+      if (operationId) {
+        ctx.operations.recordSuccess(operationId, responsePayload, true);
+      }
+
+      return responsePayload;
     },
   );
 }

@@ -71,6 +71,77 @@ export function registerWorkspaceListTools(
       };
     },
   );
+
+  registerAppTool(
+    server,
+    "query_operation",
+    {
+      title: "Query operation status",
+      description:
+        "Check the execution and idempotency status of a previously initiated operation by its operationId. Use this when recovering from client disconnections or timeouts before retrying mutations.",
+      inputSchema: {
+        operationId: z
+          .string()
+          .min(1)
+          .max(256)
+          .describe("The unique operation ID supplied when starting a mutating tool call."),
+      },
+      outputSchema: resultOutputSchema({
+        operation: z.object({
+          operationId: z.string(),
+          status: z.enum(["running", "succeeded", "failed", "unknown"]),
+          workspaceId: z.string().nullable().optional(),
+          toolName: z.string().optional(),
+          sideEffectApplied: z.boolean().optional(),
+          createdAt: z.string().optional(),
+          completedAt: z.string().nullable().optional(),
+          result: z.unknown().optional(),
+          error: z.unknown().optional(),
+        }),
+      }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ operationId }) => {
+      const startedAt = performance.now();
+      const op = ctx.operations.getOperation(operationId);
+      if (!op) {
+        const notFound = {
+          operationId,
+          status: "unknown" as const,
+        };
+        const text = `Operation ${operationId} not found in operation registry.`;
+        return {
+          content: [textBlock(text)],
+          _meta: { tool: "query_operation" },
+          structuredContent: {
+            result: text,
+            operation: notFound,
+          },
+        };
+      }
+
+      const text = `Operation ${op.operationId}: ${op.status} (tool=${op.toolName}, sideEffectApplied=${op.sideEffectApplied}, started=${op.createdAt}).`;
+      logToolCall(config, {
+        tool: "query_operation",
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        content: [textBlock(text)],
+        _meta: { tool: "query_operation" },
+        structuredContent: {
+          result: text,
+          operation: op,
+        },
+      };
+    },
+  );
 }
 
 export function registerWorkspaceCoreTools(

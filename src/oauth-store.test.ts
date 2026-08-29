@@ -59,6 +59,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 5, name: "asset-import-receipts" },
       { version: 6, name: "approved-asset-receipts" },
       { version: 7, name: "rebuildable-approved-asset-index" },
+      { version: 8, name: "operations-idempotency" },
     ]);
   } finally {
     database.close();

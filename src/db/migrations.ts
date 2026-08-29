@@ -42,6 +42,11 @@ const migrations: Migration[] = [
     name: "rebuildable-approved-asset-index",
     up: migrateRebuildableApprovedAssetIndex,
   },
+  {
+    version: 8,
+    name: "operations-idempotency",
+    up: migrateOperationsIdempotency,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -396,6 +401,29 @@ function migrateRebuildableApprovedAssetIndex(sqlite: Database.Database): void {
     insert into approved_asset_supersessions
       select * from approved_asset_supersessions_backup;
     drop table approved_asset_supersessions_backup;
+  `);
+}
+
+function migrateOperationsIdempotency(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists operations (
+      id text primary key,
+      workspace_id text,
+      tool_name text not null,
+      request_hash text not null,
+      status text not null,
+      side_effect_applied integer not null default 0,
+      result_json text,
+      error_json text,
+      created_at text not null,
+      completed_at text
+    );
+
+    create index if not exists operations_workspace_tool_hash_idx
+      on operations(workspace_id, tool_name, request_hash);
+
+    create index if not exists operations_created_at_idx
+      on operations(created_at desc);
   `);
 }
 

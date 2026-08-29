@@ -32,6 +32,8 @@ import {
   type WorkspaceAppBuild,
 } from "./server-types.js";
 
+import { formatErrorRemedy } from "../errors.js";
+
 export async function rollbackImportedAsset(input: {
   workspaceRoot: string;
   stateDir: string;
@@ -84,12 +86,28 @@ export const registerAppTool: typeof registerMcpAppTool = ((
       },
     },
     (async (...args: unknown[]) => {
-      const result = await Reflect.apply(
-        handler as (...handlerArgs: unknown[]) => unknown,
-        undefined,
-        args,
-      );
-      return attachRegisteredToolName(String(name), result);
+      try {
+        const result = await Reflect.apply(
+          handler as (...handlerArgs: unknown[]) => unknown,
+          undefined,
+          args,
+        );
+        return attachRegisteredToolName(String(name), result);
+      } catch (error) {
+        const { message, errorPayload } = formatErrorRemedy(error);
+        return {
+          content: [{ type: "text" as const, text: message }],
+          isError: true,
+          _meta: {
+            tool: String(name),
+            error: errorPayload,
+          },
+          structuredContent: {
+            error: errorPayload,
+            result: message,
+          },
+        };
+      }
     }) as typeof handler,
   );
 }) as typeof registerMcpAppTool;
@@ -130,6 +148,7 @@ export function exposedToolNames(
     "devspace_info",
     "houdini_info",
     "list_workspaces",
+    "query_operation",
     "list_artifacts",
     "inspect_artifact",
     "git_status",

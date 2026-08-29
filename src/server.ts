@@ -72,6 +72,7 @@ import {
   registerTaskSessionMutationTools,
 } from "./server/tools-tasks.js";
 import { setupExpressRoutes } from "./server/express-routes.js";
+import { OperationRegistry } from "./operation-registry.js";
 import { MonitorEventStore } from "./monitor-events.js";
 import { McpSessionRegistry } from "./mcp-session-registry.js";
 import { logEvent, sessionIdPrefix } from "./logger.js";
@@ -263,6 +264,7 @@ export function createServer(
   const reviewCheckpoints = createReviewCheckpointManager();
   const artifacts = new ArtifactLedger(config.stateDir);
   const assetReceipts = new AssetReceiptStore(config.stateDir);
+  const operations = new OperationRegistry(config.stateDir);
   const publisher = new ArtifactPublisher(config.publicBaseUrl, artifacts, {
     audit: (event) =>
       logEvent(config.logging, "info", event.event, {
@@ -312,6 +314,7 @@ export function createServer(
     artifacts,
     assetReceipts,
     publisher,
+    operations,
     runtime,
     workspaceApp,
     tasks,
@@ -344,6 +347,7 @@ export function createServer(
       jobs.close();
       games.close();
       publisher.close();
+      operations.close();
       oauthProvider.close();
       projectMemory.close();
       workspaceStore.close?.();

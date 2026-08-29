@@ -7,11 +7,13 @@ import {
   writeFileTool,
 } from "../pi-tools.js";
 import { moveWorkspacePathToTrash } from "../workspace-files.js";
+import { computeRequestHash } from "../operation-registry.js";
 import {
   resultOutputSchema,
   WRITE_TOOL_ANNOTATIONS,
   EDIT_TOOL_ANNOTATIONS,
   type ServerContext,
+  type ToolContent,
 } from "./server-types.js";
 import {
   registerAppTool,
@@ -193,13 +195,21 @@ export function registerFsWriteTool(
           .describe(
             "Defaults to false. Set true only for an intentional complete rewrite.",
           ),
+        operationId: z
+          .string()
+          .min(1)
+          .max(256)
+          .optional()
+          .describe(
+            "Optional unique idempotency token to prevent duplicate file modifications on network retry.",
+          ),
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema(),
       ...widgetMeta(toolNames.write, "write"),
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
+    async ({ workspaceId, projectMemoryReceiptId, operationId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
@@ -207,6 +217,22 @@ export function registerFsWriteTool(
         toolNames.write,
         projectMemoryReceiptId,
       );
+
+      if (operationId) {
+        const start = ctx.operations.recordStart(operationId, {
+          workspaceId,
+          toolName: toolNames.write,
+          requestHash: computeRequestHash(toolNames.write, {
+            path: input.path,
+            content: input.content,
+            overwrite: input.overwrite,
+          }),
+        });
+        if (start.status === "replay") {
+          return start.result as { content: ToolContent[]; [key: string]: unknown };
+        }
+      }
+
       const destination = workspaces.resolveWritePath(workspace, input.path);
       if (existsSync(destination.absolutePath)) {
         const target = lstatSync(destination.absolutePath);
@@ -237,6 +263,9 @@ export function registerFsWriteTool(
       );
 
       if (response.isError) {
+        if (operationId) {
+          ctx.operations.recordFailure(operationId, response.content);
+        }
         logFailedToolResponse(
           config,
           {
@@ -266,7 +295,7 @@ export function registerFsWriteTool(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return {
+      const responsePayload = {
         ...response,
         _meta: {
           tool: toolNames.write,
@@ -285,6 +314,12 @@ export function registerFsWriteTool(
           result: contentText(response.content),
         },
       };
+
+      if (operationId) {
+        ctx.operations.recordSuccess(operationId, responsePayload, true);
+      }
+
+      return responsePayload;
     },
   );
 }
@@ -330,6 +365,14 @@ export function registerFsEditTool(
             }),
           )
           .min(1),
+        operationId: z
+          .string()
+          .min(1)
+          .max(256)
+          .optional()
+          .describe(
+            "Optional unique idempotency token to prevent duplicate file modifications on network retry.",
+          ),
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema({
@@ -338,7 +381,7 @@ export function registerFsEditTool(
       ...widgetMeta(toolNames.edit, "edit"),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, projectMemoryReceiptId, ...input }) => {
+    async ({ workspaceId, projectMemoryReceiptId, operationId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
@@ -346,6 +389,21 @@ export function registerFsEditTool(
         toolNames.edit,
         projectMemoryReceiptId,
       );
+
+      if (operationId) {
+        const start = ctx.operations.recordStart(operationId, {
+          workspaceId,
+          toolName: toolNames.edit,
+          requestHash: computeRequestHash(toolNames.edit, {
+            path: input.path,
+            edits: input.edits,
+          }),
+        });
+        if (start.status === "replay") {
+          return start.result as { content: ToolContent[]; [key: string]: unknown };
+        }
+      }
+
       const editPath = workspaces.resolveWritePath(workspace, input.path);
       const response = await editFileTool(
         { ...input, path: editPath.absolutePath },
@@ -357,6 +415,9 @@ export function registerFsEditTool(
       );
 
       if (response.isError) {
+        if (operationId) {
+          ctx.operations.recordFailure(operationId, response.content);
+        }
         logFailedToolResponse(
           config,
           {
@@ -388,7 +449,7 @@ export function registerFsEditTool(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return {
+      const responsePayload = {
         content: editContent,
         _meta: {
           tool: toolNames.edit,
@@ -404,10 +465,16 @@ export function registerFsEditTool(
           },
         },
         structuredContent: {
-          status: "applied",
+          status: "applied" as const,
           result: contentText(editContent),
         },
       };
+
+      if (operationId) {
+        ctx.operations.recordSuccess(operationId, responsePayload, true);
+      }
+
+      return responsePayload;
     },
   );
 }
@@ -497,4 +564,11 @@ export function registerFsReviewTool(
       };
     },
   );
+}
+
+export function registerFsTools(server: McpServer, ctx: ServerContext): void {
+  registerFsReadTool(server, ctx);
+  registerFsWriteTool(server, ctx);
+  registerFsEditTool(server, ctx);
+  registerFsReviewTool(server, ctx);
 }
