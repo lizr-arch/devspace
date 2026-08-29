@@ -720,7 +720,9 @@ export function workspaceContextToolResponse(input: {
     {
       type: "text",
       text: [
-        `${input.actionLabel} workspace ${workspace.id}`,
+        input.context.reused
+          ? `${input.actionLabel} workspace ${workspace.id} (session reused)`
+          : `${input.actionLabel} workspace ${workspace.id}`,
         `Root: ${workspace.root}`,
         `Mode: ${workspace.mode}`,
         loadedAgentsFiles.length > 0
@@ -787,6 +789,7 @@ export function workspaceContextToolResponse(input: {
       rejectedAdditionalRoots,
       additionalRootsScope,
       additionalRootsPersisted,
+      reused: input.context.reused,
       instruction,
     },
   };

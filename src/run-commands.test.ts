@@ -176,6 +176,16 @@ P1
   );
   assert.match(reportCommand.stdout, /Latest Run:/);
   assert.match(reportCommand.stdout, /Execution Report:/);
+
+  const doctorJsonCommand = await execFileAsync(
+    process.execPath,
+    [tsxCliPath, cliPath, "doctor", "--json"],
+    { cwd: root },
+  );
+  const parsedDoctorJson = JSON.parse(doctorJsonCommand.stdout);
+  assert.ok(parsedDoctorJson.system);
+  assert.ok(parsedDoctorJson.config);
+  assert.equal(parsedDoctorJson.system.sqlite, "ok");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

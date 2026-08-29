@@ -55,6 +55,10 @@ try {
     [join(root, "nested", "AGENTS.md")],
   );
 
+  const reopened = await registry.openWorkspace(root);
+  assert.equal(reopened.workspace.id, workspace.id);
+  assert.equal(reopened.reused, true);
+
   const firstAdditionalRoot = join(root, "additional-read");
   const secondAdditionalRoot = join(root, "additional-write");
   const inheritedAdditionalRoot = join(root, "additional-inherited");

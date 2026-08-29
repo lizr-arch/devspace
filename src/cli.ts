@@ -317,21 +317,25 @@ async function serve(): Promise<void> {
 }
 
 async function runDoctor(args: string[] = []): Promise<void> {
+  const isJson = args.includes("--json");
   const live = args.includes("--live");
   const fullLoop = args.includes("--full-loop");
   const publicProbe = args.includes("--public") || fullLoop;
   const files = loadDevspaceFiles();
-  console.log(`Config dir: ${files.dir}`);
-  console.log(
-    `Config file: ${files.configExists ? files.configPath : "missing"}`,
-  );
-  console.log(`Auth file: ${files.authExists ? files.authPath : "missing"}`);
-  console.log(`Node: ${process.version} (${nodeVersionStatus()})`);
-  console.log(`Node ABI: ${process.versions.modules}`);
-  console.log(`Platform: ${process.platform} ${process.arch}`);
-  console.log(`Git: ${checkGitAvailable()}`);
-  console.log(`Bash shell: ${checkBashShell()}`);
-  console.log(`SQLite native dependency: ${checkSqliteNative()}`);
+
+  if (!isJson) {
+    console.log(`Config dir: ${files.dir}`);
+    console.log(
+      `Config file: ${files.configExists ? files.configPath : "missing"}`,
+    );
+    console.log(`Auth file: ${files.authExists ? files.authPath : "missing"}`);
+    console.log(`Node: ${process.version} (${nodeVersionStatus()})`);
+    console.log(`Node ABI: ${process.versions.modules}`);
+    console.log(`Platform: ${process.platform} ${process.arch}`);
+    console.log(`Git: ${checkGitAvailable()}`);
+    console.log(`Bash shell: ${checkBashShell()}`);
+    console.log(`SQLite native dependency: ${checkSqliteNative()}`);
+  }
 
   try {
     const config = loadConfig();
@@ -341,158 +345,208 @@ async function runDoctor(args: string[] = []): Promise<void> {
         ? args[workspaceArgIndex + 1]
         : config.allowedRoots[0];
     const chatgpt = deriveChatGptWebInfo(config);
-    console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
-    console.log(
-      `Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`,
-    );
-    console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
-    console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
-    console.log("");
-    console.log("ChatGPT Web:");
-    console.log(`  Public base URL: ${chatgpt.publicBaseUrl}`);
-    console.log(`  Public MCP URL: ${chatgpt.publicMcpUrl}`);
-    console.log(`  OAuth issuer: ${chatgpt.oauthIssuer}`);
-    console.log(
-      `  OAuth protected-resource metadata: ${chatgpt.protectedResourceMetadataUrl}`,
-    );
-    console.log(
-      `  OAuth authorization-server metadata: ${chatgpt.authorizationServerMetadataUrl}`,
-    );
-    console.log(`  OAuth authorize endpoint: ${chatgpt.authorizationEndpoint}`);
-    console.log(`  OAuth token endpoint: ${chatgpt.tokenEndpoint}`);
-    console.log(
-      `  ChatGPT redirect allowed: ${chatgpt.chatgptRedirectAllowed ? "yes" : "no"}`,
-    );
-    console.log(`  Reasoning control: ${chatgpt.reasoningNote}`);
-    console.log(`  Plan requirement: ${chatgpt.planRequirementNote}`);
+
+    const jsonReport: Record<string, unknown> = {
+      system: {
+        configDir: files.dir,
+        configFile: files.configExists ? files.configPath : null,
+        authFile: files.authExists ? files.authPath : null,
+        node: process.version,
+        nodeStatus: nodeVersionStatus(),
+        nodeAbi: process.versions.modules,
+        platform: `${process.platform} ${process.arch}`,
+        git: checkGitAvailable(),
+        shell: checkBashShell(),
+        sqlite: checkSqliteNative(),
+      },
+      config: {
+        localMcpUrl: `http://${config.host}:${config.port}/mcp`,
+        publicMcpUrl: new URL("/mcp", config.publicBaseUrl).toString(),
+        allowedRoots: config.allowedRoots,
+        allowedHosts: config.allowedHosts,
+        chatgpt,
+      },
+    };
+
+    if (!isJson) {
+      console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
+      console.log(
+        `Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`,
+      );
+      console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
+      console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+      console.log("");
+      console.log("ChatGPT Web:");
+      console.log(`  Public base URL: ${chatgpt.publicBaseUrl}`);
+      console.log(`  Public MCP URL: ${chatgpt.publicMcpUrl}`);
+      console.log(`  OAuth issuer: ${chatgpt.oauthIssuer}`);
+      console.log(
+        `  OAuth protected-resource metadata: ${chatgpt.protectedResourceMetadataUrl}`,
+      );
+      console.log(
+        `  OAuth authorization-server metadata: ${chatgpt.authorizationServerMetadataUrl}`,
+      );
+      console.log(`  OAuth authorize endpoint: ${chatgpt.authorizationEndpoint}`);
+      console.log(`  OAuth token endpoint: ${chatgpt.tokenEndpoint}`);
+      console.log(
+        `  ChatGPT redirect allowed: ${chatgpt.chatgptRedirectAllowed ? "yes" : "no"}`,
+      );
+      console.log(`  Reasoning control: ${chatgpt.reasoningNote}`);
+      console.log(`  Plan requirement: ${chatgpt.planRequirementNote}`);
+    }
     if (live) {
       const probe = await probeLocalChatGptFlow(config);
-      console.log(
-        `  Local live probe: ${probe.ready ? "ready" : "attention needed"}`,
-      );
-      console.log(`    Local base URL: ${probe.localBaseUrl}`);
-      console.log(
-        `    /healthz: ${probe.healthz.ok ? "OK" : "FAIL"}${probe.healthz.status ? ` (${probe.healthz.status})` : ""} - ${probe.healthz.detail}`,
-      );
-      console.log(
-        `    protected resource metadata: ${probe.protectedResourceMetadata.ok ? "OK" : "FAIL"}${probe.protectedResourceMetadata.status ? ` (${probe.protectedResourceMetadata.status})` : ""} - ${probe.protectedResourceMetadata.detail}`,
-      );
-      console.log(
-        `    authorization server metadata: ${probe.authorizationServerMetadata.ok ? "OK" : "FAIL"}${probe.authorizationServerMetadata.status ? ` (${probe.authorizationServerMetadata.status})` : ""} - ${probe.authorizationServerMetadata.detail}`,
-      );
-      console.log(
-        `    dynamic client registration: ${probe.clientRegistration.ok ? "OK" : "FAIL"}${probe.clientRegistration.status ? ` (${probe.clientRegistration.status})` : ""} - ${probe.clientRegistration.detail}`,
-      );
-      console.log(
-        `    owner password page: ${probe.authorizationPage.ok ? "OK" : "FAIL"}${probe.authorizationPage.status ? ` (${probe.authorizationPage.status})` : ""} - ${probe.authorizationPage.detail}`,
-      );
-    } else {
+      jsonReport.liveProbe = probe;
+      if (!isJson) {
+        console.log(
+          `  Local live probe: ${probe.ready ? "ready" : "attention needed"}`,
+        );
+        console.log(`    Local base URL: ${probe.localBaseUrl}`);
+        console.log(
+          `    /healthz: ${probe.healthz.ok ? "OK" : "FAIL"}${probe.healthz.status ? ` (${probe.healthz.status})` : ""} - ${probe.healthz.detail}`,
+        );
+        console.log(
+          `    protected resource metadata: ${probe.protectedResourceMetadata.ok ? "OK" : "FAIL"}${probe.protectedResourceMetadata.status ? ` (${probe.protectedResourceMetadata.status})` : ""} - ${probe.protectedResourceMetadata.detail}`,
+        );
+        console.log(
+          `    authorization server metadata: ${probe.authorizationServerMetadata.ok ? "OK" : "FAIL"}${probe.authorizationServerMetadata.status ? ` (${probe.authorizationServerMetadata.status})` : ""} - ${probe.authorizationServerMetadata.detail}`,
+        );
+        console.log(
+          `    dynamic client registration: ${probe.clientRegistration.ok ? "OK" : "FAIL"}${probe.clientRegistration.status ? ` (${probe.clientRegistration.status})` : ""} - ${probe.clientRegistration.detail}`,
+        );
+        console.log(
+          `    owner password page: ${probe.authorizationPage.ok ? "OK" : "FAIL"}${probe.authorizationPage.status ? ` (${probe.authorizationPage.status})` : ""} - ${probe.authorizationPage.detail}`,
+        );
+      }
+    } else if (!isJson) {
       console.log(
         "  Local live probe: run `devspace doctor --live` while `devspace serve` is running.",
       );
     }
     if (publicProbe) {
       const probe = await probePublicChatGptFlow(config);
-      console.log(
-        `  Public probe: ${probe.ready ? "ready" : "attention needed"}`,
-      );
-      if (probe.transportNote) {
-        console.log(`    Transport note: ${probe.transportNote}`);
+      jsonReport.publicProbe = probe;
+      if (!isJson) {
+        console.log(
+          `  Public probe: ${probe.ready ? "ready" : "attention needed"}`,
+        );
+        if (probe.transportNote) {
+          console.log(`    Transport note: ${probe.transportNote}`);
+        }
+        console.log(
+          `    /healthz: ${probe.healthz.ok ? "OK" : "FAIL"}${probe.healthz.status ? ` (${probe.healthz.status})` : ""} - ${probe.healthz.detail}`,
+        );
+        console.log(
+          `    protected resource metadata: ${probe.protectedResourceMetadata.ok ? "OK" : "FAIL"}${probe.protectedResourceMetadata.status ? ` (${probe.protectedResourceMetadata.status})` : ""} - ${probe.protectedResourceMetadata.detail}`,
+        );
+        console.log(
+          `    authorization server metadata: ${probe.authorizationServerMetadata.ok ? "OK" : "FAIL"}${probe.authorizationServerMetadata.status ? ` (${probe.authorizationServerMetadata.status})` : ""} - ${probe.authorizationServerMetadata.detail}`,
+        );
+        console.log(
+          `    dynamic client registration: ${probe.clientRegistration.ok ? "OK" : "FAIL"}${probe.clientRegistration.status ? ` (${probe.clientRegistration.status})` : ""} - ${probe.clientRegistration.detail}`,
+        );
+        console.log(
+          `    owner password page: ${probe.authorizationPage.ok ? "OK" : "FAIL"}${probe.authorizationPage.status ? ` (${probe.authorizationPage.status})` : ""} - ${probe.authorizationPage.detail}`,
+        );
       }
-      console.log(
-        `    /healthz: ${probe.healthz.ok ? "OK" : "FAIL"}${probe.healthz.status ? ` (${probe.healthz.status})` : ""} - ${probe.healthz.detail}`,
-      );
-      console.log(
-        `    protected resource metadata: ${probe.protectedResourceMetadata.ok ? "OK" : "FAIL"}${probe.protectedResourceMetadata.status ? ` (${probe.protectedResourceMetadata.status})` : ""} - ${probe.protectedResourceMetadata.detail}`,
-      );
-      console.log(
-        `    authorization server metadata: ${probe.authorizationServerMetadata.ok ? "OK" : "FAIL"}${probe.authorizationServerMetadata.status ? ` (${probe.authorizationServerMetadata.status})` : ""} - ${probe.authorizationServerMetadata.detail}`,
-      );
-      console.log(
-        `    dynamic client registration: ${probe.clientRegistration.ok ? "OK" : "FAIL"}${probe.clientRegistration.status ? ` (${probe.clientRegistration.status})` : ""} - ${probe.clientRegistration.detail}`,
-      );
-      console.log(
-        `    owner password page: ${probe.authorizationPage.ok ? "OK" : "FAIL"}${probe.authorizationPage.status ? ` (${probe.authorizationPage.status})` : ""} - ${probe.authorizationPage.detail}`,
-      );
       if (fullLoop) {
         const external = await probePublicExternalClientFlow(config, {
           workspacePath: fullLoopWorkspace,
         });
-        console.log(
-          `  Public external client probe: ${external.ready ? "ready" : "attention needed"}`,
-        );
-        console.log(`    Workspace path: ${fullLoopWorkspace}`);
-        console.log(
-          `    client registration: ${external.clientRegistration.ok ? "OK" : "FAIL"}${external.clientRegistration.status ? ` (${external.clientRegistration.status})` : ""} - ${external.clientRegistration.detail}`,
-        );
-        console.log(
-          `    owner password approval: ${external.authorization.ok ? "OK" : "FAIL"}${external.authorization.status ? ` (${external.authorization.status})` : ""} - ${external.authorization.detail}`,
-        );
-        console.log(
-          `    token exchange: ${external.tokenExchange.ok ? "OK" : "FAIL"}${external.tokenExchange.status ? ` (${external.tokenExchange.status})` : ""} - ${external.tokenExchange.detail}`,
-        );
-        console.log(
-          `    MCP initialize: ${external.initialize.ok ? "OK" : "FAIL"}${external.initialize.status ? ` (${external.initialize.status})` : ""} - ${external.initialize.detail}`,
-        );
-        console.log(
-          `    MCP tools/list: ${external.toolsList.ok ? "OK" : "FAIL"}${external.toolsList.status ? ` (${external.toolsList.status})` : ""} - ${external.toolsList.detail}`,
-        );
-        console.log(
-          `    MCP App resource URI: ${external.mcpAppResourceUri.ok ? "OK" : "FAIL"}${external.mcpAppResourceUri.status ? ` (${external.mcpAppResourceUri.status})` : ""} - ${external.mcpAppResourceUri.detail}`,
-        );
-        console.log(
-          `    MCP resources/read: ${external.mcpAppResource.ok ? "OK" : "FAIL"}${external.mcpAppResource.status ? ` (${external.mcpAppResource.status})` : ""} - ${external.mcpAppResource.detail}`,
-        );
-        console.log(
-          `    MCP App MIME type: ${external.mcpAppMimeType.ok ? "OK" : "FAIL"}${external.mcpAppMimeType.status ? ` (${external.mcpAppMimeType.status})` : ""} - ${external.mcpAppMimeType.detail}`,
-        );
-        console.log(
-          `    MCP App entry JavaScript: ${external.mcpAppEntryJavaScript.ok ? "OK" : "FAIL"}${external.mcpAppEntryJavaScript.status ? ` (${external.mcpAppEntryJavaScript.status})` : ""} - ${external.mcpAppEntryJavaScript.detail}`,
-        );
-        console.log(
-          `    MCP App stylesheets: ${external.mcpAppStylesheets.ok ? "OK" : "FAIL"}${external.mcpAppStylesheets.status ? ` (${external.mcpAppStylesheets.status})` : ""} - ${external.mcpAppStylesheets.detail}`,
-        );
-        console.log(
-          `    MCP App asset CORS: ${external.mcpAppAssetCors.ok ? "OK" : "FAIL"}${external.mcpAppAssetCors.status ? ` (${external.mcpAppAssetCors.status})` : ""} - ${external.mcpAppAssetCors.detail}`,
-        );
-        console.log(
-          `    MCP App build fingerprint: ${external.mcpAppBuildFingerprint.ok ? "OK" : "FAIL"}${external.mcpAppBuildFingerprint.status ? ` (${external.mcpAppBuildFingerprint.status})` : ""} - ${external.mcpAppBuildFingerprint.detail}`,
-        );
-        console.log(
-          `    Workspace App telemetry: ${external.workspaceAppTelemetryTool.ok ? "OK" : "FAIL"}${external.workspaceAppTelemetryTool.status ? ` (${external.workspaceAppTelemetryTool.status})` : ""} - ${external.workspaceAppTelemetryTool.detail}`,
-        );
-        console.log(
-          `    MCP devspace_info: ${external.devspaceInfo.ok ? "OK" : "FAIL"}${external.devspaceInfo.status ? ` (${external.devspaceInfo.status})` : ""} - ${external.devspaceInfo.detail}`,
-        );
-        console.log(
-          `    MCP open_workspace: ${external.openWorkspace.ok ? "OK" : "FAIL"}${external.openWorkspace.status ? ` (${external.openWorkspace.status})` : ""} - ${external.openWorkspace.detail}`,
-        );
-        console.log(
-          `    MCP list_workspaces: ${external.listWorkspaces.ok ? "OK" : "FAIL"}${external.listWorkspaces.status ? ` (${external.listWorkspaces.status})` : ""} - ${external.listWorkspaces.detail}`,
-        );
-        console.log(
-          `    MCP resume_workspace: ${external.resumeWorkspace.ok ? "OK" : "FAIL"}${external.resumeWorkspace.status ? ` (${external.resumeWorkspace.status})` : ""} - ${external.resumeWorkspace.detail}`,
-        );
-        if (external.workspaceId) {
-          console.log(`    workspaceId: ${external.workspaceId}`);
+        jsonReport.externalProbe = external;
+        if (!isJson) {
+          console.log(
+            `  Public external client probe: ${external.ready ? "ready" : "attention needed"}`,
+          );
+          console.log(`    Workspace path: ${fullLoopWorkspace}`);
+          console.log(
+            `    client registration: ${external.clientRegistration.ok ? "OK" : "FAIL"}${external.clientRegistration.status ? ` (${external.clientRegistration.status})` : ""} - ${external.clientRegistration.detail}`,
+          );
+          console.log(
+            `    owner password approval: ${external.authorization.ok ? "OK" : "FAIL"}${external.authorization.status ? ` (${external.authorization.status})` : ""} - ${external.authorization.detail}`,
+          );
+          console.log(
+            `    token exchange: ${external.tokenExchange.ok ? "OK" : "FAIL"}${external.tokenExchange.status ? ` (${external.tokenExchange.status})` : ""} - ${external.tokenExchange.detail}`,
+          );
+          console.log(
+            `    MCP initialize: ${external.initialize.ok ? "OK" : "FAIL"}${external.initialize.status ? ` (${external.initialize.status})` : ""} - ${external.initialize.detail}`,
+          );
+          console.log(
+            `    MCP tools/list: ${external.toolsList.ok ? "OK" : "FAIL"}${external.toolsList.status ? ` (${external.toolsList.status})` : ""} - ${external.toolsList.detail}`,
+          );
+          console.log(
+            `    MCP App resource URI: ${external.mcpAppResourceUri.ok ? "OK" : "FAIL"}${external.mcpAppResourceUri.status ? ` (${external.mcpAppResourceUri.status})` : ""} - ${external.mcpAppResourceUri.detail}`,
+          );
+          console.log(
+            `    MCP resources/read: ${external.mcpAppResource.ok ? "OK" : "FAIL"}${external.mcpAppResource.status ? ` (${external.mcpAppResource.status})` : ""} - ${external.mcpAppResource.detail}`,
+          );
+          console.log(
+            `    MCP App MIME type: ${external.mcpAppMimeType.ok ? "OK" : "FAIL"}${external.mcpAppMimeType.status ? ` (${external.mcpAppMimeType.status})` : ""} - ${external.mcpAppMimeType.detail}`,
+          );
+          console.log(
+            `    MCP App entry JavaScript: ${external.mcpAppEntryJavaScript.ok ? "OK" : "FAIL"}${external.mcpAppEntryJavaScript.status ? ` (${external.mcpAppEntryJavaScript.status})` : ""} - ${external.mcpAppEntryJavaScript.detail}`,
+          );
+          console.log(
+            `    MCP App stylesheets: ${external.mcpAppStylesheets.ok ? "OK" : "FAIL"}${external.mcpAppStylesheets.status ? ` (${external.mcpAppStylesheets.status})` : ""} - ${external.mcpAppStylesheets.detail}`,
+          );
+          console.log(
+            `    MCP App asset CORS: ${external.mcpAppAssetCors.ok ? "OK" : "FAIL"}${external.mcpAppAssetCors.status ? ` (${external.mcpAppAssetCors.status})` : ""} - ${external.mcpAppAssetCors.detail}`,
+          );
+          console.log(
+            `    MCP App build fingerprint: ${external.mcpAppBuildFingerprint.ok ? "OK" : "FAIL"}${external.mcpAppBuildFingerprint.status ? ` (${external.mcpAppBuildFingerprint.status})` : ""} - ${external.mcpAppBuildFingerprint.detail}`,
+          );
+          console.log(
+            `    Workspace App telemetry: ${external.workspaceAppTelemetryTool.ok ? "OK" : "FAIL"}${external.workspaceAppTelemetryTool.status ? ` (${external.workspaceAppTelemetryTool.status})` : ""} - ${external.workspaceAppTelemetryTool.detail}`,
+          );
+          console.log(
+            `    MCP devspace_info: ${external.devspaceInfo.ok ? "OK" : "FAIL"}${external.devspaceInfo.status ? ` (${external.devspaceInfo.status})` : ""} - ${external.devspaceInfo.detail}`,
+          );
+          console.log(
+            `    MCP open_workspace: ${external.openWorkspace.ok ? "OK" : "FAIL"}${external.openWorkspace.status ? ` (${external.openWorkspace.status})` : ""} - ${external.openWorkspace.detail}`,
+          );
+          console.log(
+            `    MCP list_workspaces: ${external.listWorkspaces.ok ? "OK" : "FAIL"}${external.listWorkspaces.status ? ` (${external.listWorkspaces.status})` : ""} - ${external.listWorkspaces.detail}`,
+          );
+          console.log(
+            `    MCP resume_workspace: ${external.resumeWorkspace.ok ? "OK" : "FAIL"}${external.resumeWorkspace.status ? ` (${external.resumeWorkspace.status})` : ""} - ${external.resumeWorkspace.detail}`,
+          );
+          if (external.workspaceId) {
+            console.log(`    workspaceId: ${external.workspaceId}`);
+          }
+          if (external.workspaceRoot) {
+            console.log(`    workspace root: ${external.workspaceRoot}`);
+          }
         }
-        if (external.workspaceRoot) {
-          console.log(`    workspace root: ${external.workspaceRoot}`);
-        }
-      } else {
+      } else if (!isJson) {
         console.log(
           "  Public external client probe: run `devspace doctor --public --full-loop` to verify OAuth token exchange and a real open_workspace tool call through the public URL.",
         );
       }
-    } else {
+    } else if (!isJson) {
       console.log(
         "  Public probe: run `devspace doctor --public` while your tunnel or reverse proxy is live.",
       );
     }
+
+    if (isJson) {
+      console.log(JSON.stringify(jsonReport, null, 2));
+    }
   } catch (error) {
-    console.log(
-      `Config status: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    if (isJson) {
+      console.log(
+        JSON.stringify(
+          {
+            error: error instanceof Error ? error.message : String(error),
+          },
+          null,
+          2,
+        ),
+      );
+    } else {
+      console.log(
+        `Config status: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
 

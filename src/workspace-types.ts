@@ -64,6 +64,7 @@ export interface WorkspaceContext {
   availableAgentsFiles: AvailableAgentsFile[];
   projectMemory?: ProjectMemoryPreflightView;
   additionalRootsAuthorization: AdditionalRootsAuthorization;
+  reused?: boolean;
 }
 
 export interface WorkspaceSessionSummary {

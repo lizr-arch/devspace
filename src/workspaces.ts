@@ -77,9 +77,13 @@ export async function refreshWorkspaceGitAttachment(
   workspace: Workspace,
 ): Promise<void> {
   if (workspace.mode !== "worktree" || !workspace.worktree) return;
-  const gitStatus = await inspectGitStatus(workspace.root);
-  workspace.worktree.detached = !gitStatus.branch;
-  workspace.worktree.branch = gitStatus.branch;
+  try {
+    const gitStatus = await inspectGitStatus(workspace.root);
+    workspace.worktree.detached = !gitStatus.branch;
+    workspace.worktree.branch = gitStatus.branch;
+  } catch {
+    // Gracefully handle uninitialized git directory or transient git errors
+  }
 }
 
 export class WorkspaceRegistry {
@@ -448,6 +452,23 @@ export class WorkspaceRegistry {
         };
   }
 
+  private findExistingCheckoutSession(root: string): { id: string } | undefined {
+    for (const ws of this.workspaces.values()) {
+      if (ws.mode === "checkout" && ws.root === root) {
+        return { id: ws.id };
+      }
+    }
+    const stored = this.store?.listSessions();
+    if (stored) {
+      for (const session of stored) {
+        if (session.mode === "checkout" && session.root === root) {
+          return { id: session.id };
+        }
+      }
+    }
+    return undefined;
+  }
+
   private async openCheckoutWorkspace(
     path: string,
     task: string | undefined,
@@ -459,6 +480,35 @@ export class WorkspaceRegistry {
     const rootStats = await stat(root);
     if (!rootStats.isDirectory()) {
       throw new Error(`Workspace root must be a directory: ${path}`);
+    }
+
+    const existingSession = this.findExistingCheckoutSession(root);
+    if (existingSession) {
+      const existingWorkspace = this.getWorkspace(existingSession.id);
+      if (additionalRootsAuthorization.effectiveAdditionalRoots.length > 0) {
+        existingWorkspace.additionalRoots =
+          additionalRootsAuthorization.effectiveAdditionalRoots;
+        existingWorkspace.additionalRootsAuthorization =
+          additionalRootsAuthorization;
+      }
+      const agentsFiles = this.loadInitialAgentsFiles(existingWorkspace.root);
+      const availableAgentsFiles = await this.findAvailableAgentsFiles(
+        existingWorkspace.root,
+        agentsFiles,
+      );
+      const projectMemory = task
+        ? await this.preflightProjectMemory(existingWorkspace.id, task)
+        : undefined;
+
+      return {
+        workspace: existingWorkspace,
+        agentsFiles,
+        availableAgentsFiles,
+        projectMemory,
+        additionalRootsAuthorization:
+          existingWorkspace.additionalRootsAuthorization,
+        reused: true,
+      };
     }
 
     return this.createWorkspaceContext({

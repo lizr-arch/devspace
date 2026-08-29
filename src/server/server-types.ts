@@ -277,6 +277,7 @@ export const workspaceContextOutputSchema: z.ZodRawShape = {
   skillDiagnostics: z.array(z.unknown()),
   projectMemory: projectMemoryPreflightOutputSchema.optional(),
   ...additionalRootsAuthorizationOutputSchema,
+  reused: z.boolean().optional(),
   instruction: z.string(),
 };
 
