@@ -63,22 +63,44 @@ export function resolveRealPath(path: string): string {
   }
 }
 
+// Roots are often supplied via symlinks (macOS: /var/folders -> /private/var/folders),
+// while resolved paths may already be canonical. Cache canonical root forms so
+// comparisons never fail due to symlinked root vs canonical path mismatch.
+const canonicalRootCache = new Map<string, string>();
+
+export function canonicalRootPath(root: string): string {
+  const cacheKey = resolve(expandHomePath(root));
+  const cached = canonicalRootCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  let canonical = cacheKey;
+  try {
+    canonical = resolve(realpathSync.native(cacheKey));
+  } catch {
+    // Nonexistent root — keep the resolved form.
+  }
+  canonicalRootCache.set(cacheKey, canonical);
+  return canonical;
+}
+
 export function isPathInsideAnyRoot(path: string, roots: string[]): boolean {
   const resolvedPath = resolve(expandHomePath(path));
-  if (roots.some((root) => isPathInsideRoot(resolvedPath, root))) {
-    return true;
-  }
-  // Also check the real path to catch junctions/symlinks that resolve
-  // into an allowed root.
-  try {
-    const realPath = resolveRealPath(resolvedPath);
-    if (realPath !== resolvedPath) {
-      return roots.some((root) => isPathInsideRoot(realPath, root));
+  const realPath = resolveRealPath(resolvedPath);
+  const pathVariants =
+    realPath === resolvedPath ? [resolvedPath] : [resolvedPath, realPath];
+  return roots.some((root) => {
+    const rootVariants = [
+      resolve(expandHomePath(root)),
+      canonicalRootPath(root),
+    ];
+    for (const pathVariant of pathVariants) {
+      for (const rootVariant of rootVariants) {
+        if (isPathInsideRoot(pathVariant, rootVariant)) {
+          return true;
+        }
+      }
     }
-  } catch {
-    // Unresolvable — already rejected above.
-  }
-  return false;
+    return false;
+  });
 }
 
 export function assertAllowedPath(

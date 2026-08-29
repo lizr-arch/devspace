@@ -129,10 +129,11 @@ async function assertGitRootAllowed(
   gitRoot: string,
   allowedRoots: string[],
 ): Promise<string> {
-  try {
-    return assertAllowedPath(gitRoot, allowedRoots);
-  } catch {
-    const canonicalGitRoot = await realpath(gitRoot);
+  // Prefer expressing the git root through the logical (as-configured) spelling
+  // of its allowed root, so stored workspace paths stay consistent with the
+  // configured allowedRoots even when git reports canonical real paths.
+  const canonicalGitRoot = await realpath(gitRoot).catch(() => undefined);
+  if (canonicalGitRoot) {
     for (const allowedRoot of allowedRoots) {
       const canonicalAllowedRoot = await realpath(allowedRoot).catch(
         () => undefined,
@@ -150,9 +151,9 @@ async function assertGitRootAllowed(
       );
       return assertAllowedPath(logicalGitRoot, allowedRoots);
     }
-
-    return assertAllowedPath(canonicalGitRoot, allowedRoots);
   }
+
+  return assertAllowedPath(gitRoot, allowedRoots);
 }
 
 async function resolveBaseCommit(

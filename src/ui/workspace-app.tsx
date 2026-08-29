@@ -5,7 +5,6 @@ import {
   applyHostStyleVariables,
 } from "@modelcontextprotocol/ext-apps";
 import {
-  assetCardValue,
   genericPayloadText,
   isAssetIntakeTool,
   isEditTool,
@@ -34,14 +33,33 @@ import {
   resourceType as telemetryResourceType,
   type WorkspaceAppErrorPhase,
 } from "./workspace-app-telemetry.js";
+import {
+  element,
+  folderIcon,
+  fileIcon,
+  filePlusIcon,
+  editIcon,
+  searchIcon,
+  filesIcon,
+  checkCircleIcon,
+  listIcon,
+  terminalIcon,
+  reviewIcon,
+  projectMemoryIcon,
+  jobIcon,
+  assetIcon,
+  approvedAssetIcon,
+  genericResultIcon,
+  renderChevron,
+  iconSvg,
+} from "./dom-utils.js";
+import {
+  type ToolDisplay,
+  renderAssetIntakeCard,
+  resetAssetCardState,
+  type AssetCardContext,
+} from "./asset-cards.js";
 import "./workspace-app.css";
-
-interface ToolDisplay {
-  icon: string;
-  title: string;
-  label: string;
-  tone: string;
-}
 
 interface MountedPayload {
   update(options: {
@@ -61,10 +79,6 @@ let card: ToolResultCard | null = null;
 let expanded = false;
 let reviewFilesExpanded = false;
 let errorMessage: string | null = null;
-let assetPreviewUrl: string | null = null;
-let assetActionStatus: string | null = null;
-let assetActionError: string | null = null;
-let assetActionBusy = false;
 let currentPayload: MountedPayload | null = null;
 let currentPayloadContainer: HTMLElement | null = null;
 const renderGate = new RenderGenerationGate();
@@ -86,6 +100,28 @@ if (!maybeAppRoot) {
 
 const appRoot = maybeAppRoot;
 
+const assetContext: AssetCardContext = {
+  get app() {
+    return app;
+  },
+  appRoot,
+  isExpanded: () => expanded,
+  setExpanded: (val: boolean) => {
+    expanded = val;
+  },
+  getCard: () => card,
+  setCard: (newCard: ToolResultCard | null) => {
+    card = newCard;
+  },
+  setPayloadContainer: (el: HTMLElement | null) => {
+    currentPayloadContainer = el;
+  },
+  renderSummaryBadge,
+  renderPayloadIfNeeded,
+  unmountPayload,
+  render,
+};
+
 void boot();
 
 async function boot(): Promise<void> {
@@ -104,10 +140,7 @@ async function boot(): Promise<void> {
       expanded = false;
       reviewFilesExpanded = false;
       errorMessage = null;
-      assetPreviewUrl = null;
-      assetActionStatus = null;
-      assetActionError = null;
-      assetActionBusy = false;
+      resetAssetCardState();
       render();
     } catch (resultError) {
       telemetry.capture("render_error", "tool_result", {
@@ -216,7 +249,7 @@ function render(): void {
 
   const display = getToolDisplay(card);
   if (isAssetIntakeTool(card.tool)) {
-    renderAssetIntakeCard(card, display);
+    renderAssetIntakeCard(card, display, assetContext);
     return;
   }
   if (isReviewTool(card.tool)) {
@@ -275,489 +308,6 @@ function render(): void {
   main.append(section);
   appRoot.replaceChildren(main);
   renderPayloadIfNeeded();
-}
-
-interface ApprovedAssetListItem {
-  assetReceiptId: string;
-  projectId?: string;
-  taskId?: string;
-  assetRole?: string;
-  destinationPath: string;
-  sha256: string;
-  width?: number;
-  height?: number;
-  sourceKind?: string;
-  sourceFileId?: string;
-  projectReceiptPath?: string;
-  supersededByAssetReceiptId?: string;
-  current?: boolean;
-}
-
-function renderAssetIntakeCard(
-  activeCard: ToolResultCard,
-  display: ToolDisplay,
-): void {
-  unmountPayload();
-
-  const main = element("main", { className: "shell" });
-  const section = element("section", {
-    className: `tool-card asset-intake ${display.tone}`,
-  });
-  const header = element("div", { className: "asset-header" });
-  const icon = element("span", { className: "tool-icon", ariaHidden: "true" });
-  icon.innerHTML = display.icon;
-  const titleGroup = element("div", { className: "review-title-group" });
-  titleGroup.append(
-    element("span", { className: "tool-title", text: display.title }),
-    element("span", {
-      className: "tool-label",
-      text: display.label,
-      title: display.label,
-    }),
-  );
-  header.append(icon, titleGroup, renderSummaryBadge(activeCard));
-
-  const body = element("div", { className: "asset-body" });
-  const preview = renderAssetPreview(activeCard);
-  if (preview) body.append(preview);
-
-  const facts = renderAssetFacts(activeCard);
-  if (facts.childElementCount > 0) body.append(facts);
-
-  const assets = approvedAssetItems(activeCard);
-  if (assets.length > 0) {
-    body.append(renderApprovedAssetMatches(activeCard, assets));
-  }
-
-  const nextStage = element("div", { className: "asset-next-stage" });
-  nextStage.append(
-    element("span", { className: "asset-fact-label", text: "Next stage" }),
-    element("span", { text: assetNextStage(activeCard) }),
-  );
-  body.append(nextStage);
-
-  if (assetActionError) {
-    body.append(
-      element("div", {
-        className: "asset-action-status error",
-        text: assetActionError,
-      }),
-    );
-  } else if (assetActionStatus) {
-    body.append(
-      element("div", {
-        className: "asset-action-status",
-        text: assetActionStatus,
-      }),
-    );
-  }
-
-  const actions = renderAssetActions(activeCard);
-  section.append(header, body);
-  if (actions.childElementCount > 0) section.append(actions);
-
-  if (expanded) {
-    const details = element("div", { className: "tool-body" });
-    currentPayloadContainer = details;
-    section.append(details);
-  }
-
-  main.append(section);
-  appRoot.replaceChildren(main);
-  renderPayloadIfNeeded();
-}
-
-function renderAssetPreview(activeCard: ToolResultCard): HTMLElement | null {
-  const artifactId = assetString(activeCard, "artifactId");
-  if (!artifactId) return null;
-
-  const preview = element("div", { className: "asset-preview" });
-  if (assetPreviewUrl) {
-    const image = element("img", {
-      className: "asset-preview-image",
-      title: "Preview generated from the saved artifact",
-    });
-    image.src = assetPreviewUrl;
-    image.alt = `Saved PNG preview for ${activeCard.path ?? artifactId}`;
-    preview.append(image);
-  } else {
-    preview.append(
-      element("div", {
-        className: "asset-preview-placeholder",
-        text: "Saved PNG",
-      }),
-    );
-  }
-  return preview;
-}
-
-function renderAssetFacts(activeCard: ToolResultCard): HTMLElement {
-  const facts = element("dl", { className: "asset-facts" });
-  const width = assetNumber(activeCard, "width");
-  const height = assetNumber(activeCard, "height");
-  const bytes = assetNumber(activeCard, "bytes");
-  const humanApproval = assetObject(activeCard, "humanApproval");
-  const approval =
-    humanApproval?.status === "passed" && humanApproval.actor === "human_user"
-      ? "human passed"
-      : undefined;
-  const entries: Array<[string, string | undefined]> = [
-    ["Outcome", assetString(activeCard, "outcome")],
-    [
-      "Dimensions",
-      width !== undefined && height !== undefined
-        ? `${width} × ${height}`
-        : undefined,
-    ],
-    ["Bytes", bytes === undefined ? undefined : formatBytes(bytes)],
-    [
-      "Source",
-      assetString(activeCard, "sourceKind") ??
-        assetString(activeCard, "source"),
-    ],
-    ["File", assetString(activeCard, "sourceFileName")],
-    ["SHA-256", assetString(activeCard, "sha256")],
-    ["Artifact", assetString(activeCard, "artifactId")],
-    ["Import receipt", assetString(activeCard, "importReceiptId")],
-    ["Asset receipt", assetString(activeCard, "assetReceiptId")],
-    [
-      "Receipt file",
-      assetString(activeCard, "assetReceiptPath") ??
-        assetString(activeCard, "projectReceiptPath"),
-    ],
-    ["Approval", approval],
-    ["Supersedes", assetString(activeCard, "supersedesAssetReceiptId")],
-    ["Superseded by", assetString(activeCard, "supersededByAssetReceiptId")],
-    ["Previous SHA", assetString(activeCard, "previousSha256")],
-    ["Previous artifact", assetString(activeCard, "previousArtifactId")],
-    ["Rollback snapshot", assetString(activeCard, "displacedTrashId")],
-  ];
-  for (const [label, value] of entries) {
-    if (!value) continue;
-    facts.append(
-      element("dt", { className: "asset-fact-label", text: label }),
-      element("dd", {
-        className:
-          label.includes("SHA") || label.includes("receipt")
-            ? "asset-fact-value mono"
-            : "asset-fact-value",
-        text: value,
-        title: value,
-      }),
-    );
-  }
-  return facts;
-}
-
-function renderApprovedAssetMatches(
-  activeCard: ToolResultCard,
-  assets: ApprovedAssetListItem[],
-): HTMLElement {
-  const container = element("div", { className: "asset-matches" });
-  const visibleAssets = assets.slice(0, 8);
-  container.append(
-    element("div", {
-      className: "asset-section-title",
-      text: `${assets.length} approved ${assets.length === 1 ? "asset" : "assets"}`,
-    }),
-  );
-  for (const asset of visibleAssets) {
-    const row = element("div", {
-      className: `asset-match ${asset.current === false ? "superseded" : ""}`,
-    });
-    const details = element("div", { className: "asset-match-details" });
-    details.append(
-      element("span", {
-        className: "asset-match-role",
-        text: asset.assetRole ?? asset.destinationPath,
-      }),
-      element("span", {
-        className: "asset-match-path",
-        text: asset.destinationPath,
-        title: asset.destinationPath,
-      }),
-      element("span", {
-        className: "asset-match-sha",
-        text: `${asset.sha256.slice(0, 12)}… · ${asset.current === false ? "superseded" : "current"}`,
-        title: asset.sha256,
-      }),
-    );
-    row.append(details);
-    if (asset.current !== false && asset.sourceFileId) {
-      const recover = element("button", {
-        className: "review-action",
-        type: "button",
-        text: "Choose file",
-        disabled:
-          assetActionBusy ||
-          !window.openai?.selectFiles ||
-          !window.openai.getFileDownloadUrl,
-        title:
-          window.openai?.selectFiles && window.openai.getFileDownloadUrl
-            ? "Select this exact approved file from ChatGPT File Library"
-            : "ChatGPT File Library is unavailable in this host",
-      });
-      recover.addEventListener("click", () => {
-        void recoverFromFileLibrary(activeCard, asset);
-      });
-      row.append(recover);
-    }
-    container.append(row);
-  }
-  if (visibleAssets.length < assets.length) {
-    container.append(
-      element("div", {
-        className: "asset-fact-label",
-        text: `${assets.length - visibleAssets.length} more matches are available in the structured result. Narrow the query to recover one exact asset.`,
-      }),
-    );
-  }
-  return container;
-}
-
-function renderAssetActions(activeCard: ToolResultCard): HTMLElement {
-  const actions = element("div", { className: "asset-actions" });
-  const artifactId = assetString(activeCard, "artifactId");
-  const workspaceId =
-    activeCard.workspaceId ?? assetString(activeCard, "workspaceId");
-  if (artifactId && workspaceId) {
-    const preview = element("button", {
-      className: "review-action",
-      type: "button",
-      text: assetPreviewUrl ? "Refresh preview" : "Preview saved PNG",
-      disabled: assetActionBusy,
-    });
-    preview.addEventListener("click", () => {
-      void loadSavedArtifactPreview(activeCard, workspaceId, artifactId);
-    });
-    actions.append(preview);
-  }
-
-  if (activeCard.payload || activeCard.structuredContent !== undefined) {
-    const details = element("button", {
-      className: "review-action",
-      type: "button",
-      text: expanded ? "Hide details" : "Show details",
-    });
-    details.addEventListener("click", () => {
-      expanded = !expanded;
-      render();
-    });
-    actions.append(details);
-  }
-  return actions;
-}
-
-async function loadSavedArtifactPreview(
-  activeCard: ToolResultCard,
-  workspaceId: string,
-  artifactId: string,
-): Promise<void> {
-  if (!app) return;
-  assetActionBusy = true;
-  assetActionError = null;
-  assetActionStatus = "Creating a short-lived preview from the saved artifact…";
-  render();
-  try {
-    const response = await app.callServerTool({
-      name: "publish_artifact",
-      arguments: {
-        workspaceId,
-        artifactId,
-        purpose: "review",
-      },
-    });
-    if (response.isError)
-      throw new Error(payloadText(contentFromResult(response)));
-    const structured = objectValue(response.structuredContent);
-    const url = structured?.url;
-    if (typeof url !== "string" || !url.startsWith("http")) {
-      throw new Error("Preview URL was not returned.");
-    }
-    if (card === activeCard && assetString(card, "artifactId") === artifactId) {
-      assetPreviewUrl = url;
-      assetActionStatus =
-        "Preview loaded from the saved artifact. It is not provenance.";
-    }
-  } catch (previewError) {
-    assetActionError =
-      previewError instanceof Error
-        ? previewError.message
-        : "Unable to load the saved artifact preview.";
-  } finally {
-    assetActionBusy = false;
-    render();
-  }
-}
-
-async function recoverFromFileLibrary(
-  activeCard: ToolResultCard,
-  asset: ApprovedAssetListItem,
-): Promise<void> {
-  const openai = window.openai;
-  const workspaceId =
-    activeCard.workspaceId ?? assetString(activeCard, "workspaceId");
-  if (
-    !app ||
-    !workspaceId ||
-    !asset.sourceFileId ||
-    !openai?.selectFiles ||
-    !openai.getFileDownloadUrl
-  ) {
-    assetActionError =
-      "ChatGPT File Library is unavailable; use the model-facing recovery tool with the exact registered file.";
-    render();
-    return;
-  }
-
-  assetActionBusy = true;
-  assetActionError = null;
-  assetActionStatus = "Waiting for an exact File Library selection…";
-  render();
-  try {
-    const selected = await openai.selectFiles();
-    if (selected.length !== 1) {
-      throw new Error("Select exactly one approved PNG.");
-    }
-    const file = selected[0];
-    if (file.fileId !== asset.sourceFileId) {
-      throw new Error(
-        "Selected file ID does not match the approved receipt. Recovery stopped.",
-      );
-    }
-    if (file.mimeType && file.mimeType !== "image/png") {
-      throw new Error("Selected file is not a PNG. Recovery stopped.");
-    }
-    const { downloadUrl } = await openai.getFileDownloadUrl({
-      fileId: file.fileId,
-    });
-    if (!downloadUrl?.startsWith("https://")) {
-      throw new Error("ChatGPT did not return a secure temporary file URL.");
-    }
-    const response = await app.callServerTool({
-      name: "recover_approved_asset",
-      arguments: {
-        workspaceId,
-        assetReceiptId: asset.assetReceiptId,
-        file: {
-          download_url: downloadUrl,
-          file_id: file.fileId,
-          mime_type: file.mimeType,
-          file_name: file.fileName,
-        },
-      },
-    });
-    if (response.isError) {
-      throw new Error(
-        payloadText(contentFromResult(response)) || "Recovery was rejected.",
-      );
-    }
-    card = normalizeToolResult(response);
-    expanded = false;
-    assetPreviewUrl = null;
-    assetActionStatus = "Approved asset recovered and verified exactly.";
-  } catch (recoveryError) {
-    assetActionError =
-      recoveryError instanceof Error
-        ? recoveryError.message
-        : "Unable to recover the approved asset.";
-  } finally {
-    assetActionBusy = false;
-    render();
-  }
-}
-
-function approvedAssetItems(
-  activeCard: ToolResultCard,
-): ApprovedAssetListItem[] {
-  const assets =
-    (activeCard as unknown as Record<string, unknown>).assets ??
-    objectValue(activeCard.structuredContent)?.assets;
-  if (!Array.isArray(assets)) return [];
-  return assets.filter(isApprovedAssetListItem);
-}
-
-function isApprovedAssetListItem(
-  value: unknown,
-): value is ApprovedAssetListItem {
-  const item = objectValue(value);
-  return (
-    typeof item?.assetReceiptId === "string" &&
-    typeof item.destinationPath === "string" &&
-    typeof item.sha256 === "string"
-  );
-}
-
-function assetNextStage(activeCard: ToolResultCard): string {
-  if (activeCard.tool === "import_png") {
-    return "Technical import only; archive explicit human approval before production.";
-  }
-  if (activeCard.tool === "find_approved_assets") {
-    return approvedAssetItems(activeCard).length > 0
-      ? "Verify the authoritative receipt, or choose the exact registered File Library item to recover."
-      : "No authoritative asset matched; do not substitute a visually similar file.";
-  }
-  if (activeCard.tool === "reindex_approved_assets") {
-    return "Query and verify rebuilt receipts before resuming production.";
-  }
-  return assetCardValue(activeCard, "readyForPipeline") === true
-    ? "Ready for the project’s declared pipeline; no production step was started automatically."
-    : "Pipeline blocked until receipt, current file, SHA, dimensions, and supersession state all verify.";
-}
-
-function assetString(
-  activeCard: ToolResultCard,
-  key: string,
-): string | undefined {
-  const value = assetCardValue(activeCard, key);
-  return typeof value === "string" && value ? value : undefined;
-}
-
-function assetNumber(
-  activeCard: ToolResultCard,
-  key: string,
-): number | undefined {
-  const value = assetCardValue(activeCard, key);
-  return typeof value === "number" && Number.isFinite(value)
-    ? value
-    : undefined;
-}
-
-function assetObject(
-  activeCard: ToolResultCard,
-  key: string,
-): Record<string, unknown> | undefined {
-  return objectValue(assetCardValue(activeCard, key));
-}
-
-function objectValue(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function contentFromResult(result: {
-  content?: Array<{
-    type: string;
-    text?: string;
-    data?: string;
-    mimeType?: string;
-  }>;
-}): { content?: Array<{ type: "text" | "image"; text?: string }> } {
-  return {
-    content: result.content
-      ?.filter((item) => item.type === "text" || item.type === "image")
-      .map((item) => ({
-        type: item.type as "text" | "image",
-        text: item.text,
-      })),
-  };
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function renderEmpty(message: string, tone: "muted" | "error" = "muted"): void {
@@ -1039,7 +589,6 @@ function renderReviewCard(card: ToolResultCard, display: ToolDisplay): void {
   unmountPayload();
 
   const files = card.files ?? [];
-  const summary = card.summary ?? {};
   const visibleFiles = reviewFilesExpanded ? files : files.slice(0, 3);
   const hiddenCount = Math.max(0, files.length - visibleFiles.length);
   const main = element("main", { className: "shell" });
@@ -1084,19 +633,6 @@ function renderReviewCard(card: ToolResultCard, display: ToolDisplay): void {
   main.append(section);
   appRoot.replaceChildren(main);
   renderPayloadIfNeeded();
-}
-
-function renderChevron(isExpanded: boolean, visible: boolean): HTMLElement {
-  const chevron = element("span", {
-    className: visible ? `chevron ${isExpanded ? "expanded" : ""}` : "chevron",
-    ariaHidden: "true",
-  });
-
-  if (visible) {
-    chevron.innerHTML = iconSvg('<path d="m6 9 6 6 6-6" />');
-  }
-
-  return chevron;
 }
 
 function setPayloadLoading(container: HTMLElement, loading: boolean): void {
@@ -1290,118 +826,4 @@ function getToolLabel(card: ToolResultCard): string {
   }
 
   return card.tool;
-}
-
-function element<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  options: {
-    className?: string;
-    text?: string;
-    type?: string;
-    title?: string;
-    ariaHidden?: string;
-    ariaExpanded?: string;
-    disabled?: boolean;
-  } = {},
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  if (options.className) node.className = options.className;
-  if (options.text !== undefined) node.textContent = options.text;
-  if (options.type !== undefined && "type" in node)
-    node.setAttribute("type", options.type);
-  if (options.title !== undefined) node.title = options.title;
-  if (options.ariaHidden !== undefined)
-    node.setAttribute("aria-hidden", options.ariaHidden);
-  if (options.ariaExpanded !== undefined)
-    node.setAttribute("aria-expanded", options.ariaExpanded);
-  if (options.disabled !== undefined && "disabled" in node) {
-    (node as HTMLButtonElement).disabled = options.disabled;
-  }
-  return node;
-}
-
-function iconSvg(children: string): string {
-  return `<svg aria-hidden="true" class="icon-svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8">${children}</svg>`;
-}
-
-function folderIcon(): string {
-  return iconSvg(
-    '<path d="M3 7.5h6l2 2h10" /><path d="M3 7.5v10A2.5 2.5 0 0 0 5.5 20h13a2.5 2.5 0 0 0 2.5-2.5v-8H3" />',
-  );
-}
-
-function fileIcon(): string {
-  return iconSvg(
-    '<path d="M14 3v5h5" /><path d="M6 3h8l5 5v13H6z" /><path d="M9 13h6" /><path d="M9 17h4" />',
-  );
-}
-
-function filePlusIcon(): string {
-  return iconSvg(
-    '<path d="M14 3v5h5" /><path d="M6 3h8l5 5v13H6z" /><path d="M12 12v6" /><path d="M9 15h6" />',
-  );
-}
-
-function editIcon(): string {
-  return iconSvg(
-    '<path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16z" /><path d="m13.5 6.5 4 4" />',
-  );
-}
-
-function searchIcon(): string {
-  return iconSvg('<circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" />');
-}
-
-function filesIcon(): string {
-  return iconSvg(
-    '<path d="M8 7V4h9l4 4v10h-3" /><path d="M12 4v5h5" /><path d="M4 7h9l4 4v10H4z" /><path d="M13 7v5h4" />',
-  );
-}
-
-function checkCircleIcon(): string {
-  return '<svg aria-hidden="true" class="badge-icon" fill="none" viewBox="0 0 16 16" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="8" cy="8" r="6" /><path d="m5.5 8 1.7 1.7 3.4-3.5" /></svg>';
-}
-
-function listIcon(): string {
-  return iconSvg(
-    '<path d="M8 6h12" /><path d="M8 12h12" /><path d="M8 18h12" /><path d="M4 6h.01" /><path d="M4 12h.01" /><path d="M4 18h.01" />',
-  );
-}
-
-function terminalIcon(): string {
-  return iconSvg('<path d="m5 7 5 5-5 5" /><path d="M12 17h7" />');
-}
-
-function reviewIcon(): string {
-  return iconSvg(
-    '<path d="M5 4h14v16H5z" /><path d="M8 8h8" /><path d="M8 12h5" /><path d="M8 16h7" />',
-  );
-}
-
-function projectMemoryIcon(): string {
-  return iconSvg(
-    '<path d="M7 5.5A3.5 3.5 0 0 1 10.5 2H12v20h-1.5A3.5 3.5 0 0 1 7 18.5V18a3.5 3.5 0 0 1 0-7v-.5a3.5 3.5 0 0 1 0-5Z" /><path d="M17 5.5A3.5 3.5 0 0 0 13.5 2H12v20h1.5a3.5 3.5 0 0 0 3.5-3.5V18a3.5 3.5 0 0 0 0-7v-.5a3.5 3.5 0 0 0 0-5Z" />',
-  );
-}
-
-function jobIcon(): string {
-  return iconSvg(
-    '<path d="M5 7h14v12H5z" /><path d="M9 7V4h6v3" /><path d="M9 12h6" /><path d="M9 16h4" />',
-  );
-}
-
-function assetIcon(): string {
-  return iconSvg(
-    '<path d="M5 4h14v16H5z" /><circle cx="9" cy="9" r="1.5" /><path d="m7 17 4-4 2.5 2.5L16 13l2 2" />',
-  );
-}
-
-function approvedAssetIcon(): string {
-  return iconSvg('<path d="M5 4h14v16H5z" /><path d="m8 12 2.5 2.5L16 9" />');
-}
-
-function genericResultIcon(): string {
-  return iconSvg(
-    '<path d="M5 4h14v16H5z" /><path d="M9 9h6" /><path d="M9 13h6" /><path d="M9 17h3" />',
-  );
 }

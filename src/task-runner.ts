@@ -33,242 +33,34 @@ import { type AdditionalRoot } from "./roots.js";
 import { TaskError } from "./task-errors.js";
 import { type SecretResolver, redactSecrets } from "./secret-resolver.js";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import {
+  type TaskSessionStatus,
+  type EnvironmentInfo,
+  type TaskSession,
+  type TaskRunResult,
+  type TaskSessionResult,
+  type BootstrapResult,
+  type TaskRunnerOptions,
+  type BootstrapContext,
+  type WorkspacePythonResolutionOptions,
+  DEFAULT_TASK_TIMEOUT,
+  VENV_CANDIDATES,
+  DEPENDENCY_LOCK_CANDIDATES,
+  terminateProcessTree,
+} from "./task-runner-types.js";
+import { resolveWorkspacePythonEnvironment } from "./task-runner-environment.js";
 
-export type TaskSessionStatus =
-  "running" | "succeeded" | "failed" | "timed_out" | "stopped" | "interrupted";
-
-export interface TaskSession {
-  sessionId: string;
-  workspaceId: string;
-  taskId: string;
-  mode: "run" | "session";
-  status: TaskSessionStatus;
-  pid?: number;
-  exitCode?: number;
-  startedAt: string;
-  finishedAt?: string;
-  stdout: string;
-  stderr: string;
-  runtime: {
-    interpreter: string;
-    environmentSource: string;
-  };
-  environmentInfo?: EnvironmentInfo;
-  bootstrap?: BootstrapResult;
-  errors: ParamValidationError[];
-}
-
-export interface TaskRunResult {
-  taskId: string;
-  mode: "run";
-  sessionId: string;
-  status: TaskSessionStatus;
-  exitCode?: number;
-  stdout: string;
-  stderr: string;
-  durationMs: number;
-  runtime: TaskSession["runtime"];
-  environmentInfo?: EnvironmentInfo;
-  bootstrap?: BootstrapResult;
-  errors: ParamValidationError[];
-}
-
-export interface TaskSessionResult {
-  taskId: string;
-  mode: "session";
-  sessionId: string;
-  status: "running";
-  pid: number;
-}
-
-// ---------------------------------------------------------------------------
-// Task Runner
-// ---------------------------------------------------------------------------
-
-const DEFAULT_TASK_TIMEOUT = 600_000; // 10 minutes
-const VENV_CANDIDATES = [".venv", "venv"];
-const DEPENDENCY_LOCK_CANDIDATES = [
-  "poetry.lock",
-  "Pipfile.lock",
-  "requirements-lock.txt",
-  "requirements.txt",
-];
-
-export function terminateProcessTree(proc: ChildProcess): boolean {
-  const pid = proc.pid;
-  if (!pid || proc.exitCode !== null) return false;
-
-  if (process.platform === "win32") {
-    const result = spawnSync(
-      "taskkill.exe",
-      ["/PID", String(pid), "/T", "/F"],
-      {
-        stdio: "ignore",
-        windowsHide: true,
-      },
-    );
-    if (!result.error && result.status === 0) return true;
-  } else {
-    try {
-      process.kill(-pid, "SIGKILL");
-      return true;
-    } catch {
-      // Fall back to the direct child when process-group termination fails.
-    }
-  }
-
-  try {
-    return proc.kill("SIGKILL");
-  } catch {
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Environment diagnostics types
-// ---------------------------------------------------------------------------
-
-export interface EnvironmentInfo {
-  resolvedExecutable: string;
-  pythonVersion: string | null;
-  environmentSource: ".venv" | "venv" | "workspace-config" | "system";
-  dependencyLockPath: string | null;
-  dependencyLockSha256: string | null;
-}
-
-export interface BootstrapResult {
-  outcome: "created" | "unchanged";
-  target: ".venv" | "venv";
-}
-
-interface WorkspacePythonResolutionOptions {
-  allowIncompleteTarget?: ".venv" | "venv";
-}
-
-export interface TaskRunnerOptions {
-  operatorPythonCommand?: readonly [string, ...string[]];
-  workspacePythonResolver?: (
-    workspaceRoot: string,
-    platform?: NodeJS.Platform,
-    options?: WorkspacePythonResolutionOptions,
-  ) => EnvironmentInfo;
-}
-
-interface BootstrapContext {
-  key: string;
-  target: ".venv" | "venv";
-  targetPath: string;
-  markerPath: string;
-}
-
-// ---------------------------------------------------------------------------
-// Workspace Python environment resolution (standalone export)
-// ---------------------------------------------------------------------------
-
-export function resolveWorkspacePythonEnvironment(
-  workspaceRoot: string,
-  platform: NodeJS.Platform = process.platform,
-  options: WorkspacePythonResolutionOptions = {},
-): EnvironmentInfo {
-  const scriptsDir = platform === "win32" ? "Scripts" : "bin";
-  const pythonName = platform === "win32" ? "python.exe" : "python";
-
-  for (const name of VENV_CANDIDATES) {
-    const venvRoot = join(workspaceRoot, name);
-    const venvScripts = join(venvRoot, scriptsDir);
-    const python = join(venvScripts, pythonName);
-    const incompleteMarker = join(venvRoot, ".devspace-bootstrap-incomplete");
-
-    if (!existsSync(python)) continue;
-    if (
-      existsSync(incompleteMarker) &&
-      options.allowIncompleteTarget !== name
-    ) {
-      continue;
-    }
-
-    // Reject symlinked or incomplete venv directories.
-    try {
-      if (
-        lstatSync(venvRoot).isSymbolicLink() ||
-        lstatSync(venvScripts).isSymbolicLink() ||
-        !statSync(join(venvRoot, "pyvenv.cfg")).isFile() ||
-        !statSync(python).isFile()
-      ) {
-        continue;
-      }
-    } catch {
-      continue;
-    }
-
-    // A candidate is usable only when the interpreter starts and reports that
-    // sys.prefix is the selected workspace venv. A python-shaped half install
-    // must never become the ordinary task runtime.
-    let pythonVersion: string;
-    try {
-      const versionOutput = execFileSync(python, ["--version"], {
-        cwd: workspaceRoot,
-        encoding: "utf8",
-        timeout: 10_000,
-        windowsHide: true,
-      }).trim();
-      const match = versionOutput.match(/Python\s+(\S+)/);
-      pythonVersion = match ? match[1] : versionOutput;
-      const prefixOutput = execFileSync(
-        python,
-        ["-c", "import os,sys; print(os.path.realpath(sys.prefix))"],
-        {
-          cwd: workspaceRoot,
-          encoding: "utf8",
-          timeout: 10_000,
-          windowsHide: true,
-        },
-      ).trim();
-      const expectedPrefix = realpathSync(venvRoot);
-      const normalizeCase = (value: string) =>
-        platform === "win32" ? value.toLowerCase() : value;
-      if (normalizeCase(prefixOutput) !== normalizeCase(expectedPrefix)) {
-        continue;
-      }
-    } catch {
-      continue;
-    }
-
-    // Detect dependency lock file
-    let dependencyLockPath: string | null = null;
-    let dependencyLockSha256: string | null = null;
-    for (const candidate of DEPENDENCY_LOCK_CANDIDATES) {
-      const lockPath = join(workspaceRoot, candidate);
-      if (existsSync(lockPath) && statSync(lockPath).isFile()) {
-        dependencyLockPath = candidate;
-        dependencyLockSha256 = createHash("sha256")
-          .update(readFileSync(lockPath, "utf8"))
-          .digest("hex");
-        break;
-      }
-    }
-
-    return {
-      resolvedExecutable: python,
-      pythonVersion,
-      environmentSource: name as ".venv" | "venv",
-      dependencyLockPath,
-      dependencyLockSha256,
-    };
-  }
-
-  // No .venv found — TASK_ENVIRONMENT_UNAVAILABLE for workspace-python runtime
-  throw new TaskError({
-    code: "TASK_ENVIRONMENT_UNAVAILABLE",
-    manifestPath: join(workspaceRoot, ".devspace/tasks.yaml"),
-    field: "runtime.venv",
-    message: `Workspace requires Python virtual environment but neither .venv nor venv was found at ${workspaceRoot}. Create a venv with 'python -m venv .venv'.`,
-    recoverable: true,
-  });
-}
+export {
+  type TaskSessionStatus,
+  type EnvironmentInfo,
+  type TaskSession,
+  type TaskRunResult,
+  type TaskSessionResult,
+  type BootstrapResult,
+  type TaskRunnerOptions,
+  terminateProcessTree,
+  resolveWorkspacePythonEnvironment,
+};
 
 export class TaskRunner {
   private sessions = new Map<string, TaskSession>();

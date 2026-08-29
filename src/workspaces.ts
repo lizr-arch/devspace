@@ -18,6 +18,7 @@ import {
   AccessDeniedError,
   assertAllowedPath,
   assertWriteAllowed,
+  canonicalRootPath,
   effectiveAdditionalRootAccess,
   expandHomePath,
   isPathInsideAnyRoot,
@@ -43,108 +44,34 @@ import {
   type SkillReadResolution,
 } from "./skills.js";
 
-export interface LoadedAgentsFile {
-  path: string;
-  content: string;
-}
+import {
+  type LoadedAgentsFile,
+  type AvailableAgentsFile,
+  type WorkspaceWorktree,
+  type AdditionalRootRejection,
+  type AdditionalRootsAuthorization,
+  type Workspace,
+  type WorkspaceContext,
+  type WorkspaceSessionSummary,
+  type WorkspaceReadPath,
+  type WorkspaceResolvedPath,
+  type OpenWorkspaceInput,
+  emptyAdditionalRootsAuthorization,
+} from "./workspace-types.js";
 
-export interface AvailableAgentsFile {
-  path: string;
-}
-
-export interface WorkspaceWorktree {
-  path: string;
-  baseRef: string;
-  baseSha: string;
-  dirtySource: boolean;
-  detached: boolean;
-  managed: boolean;
-  branch?: string;
-}
-
-export interface AdditionalRootRejection extends AdditionalRoot {
-  code:
-    | "ADDITIONAL_ROOT_NOT_FOUND"
-    | "ADDITIONAL_ROOT_NOT_DIRECTORY"
-    | "ADDITIONAL_ROOT_ACCESS_CONFLICT";
-  message: string;
-}
-
-export interface AdditionalRootsAuthorization {
-  requestedAdditionalRoots: AdditionalRoot[];
-  effectiveAdditionalRoots: EffectiveAdditionalRoot[];
-  rejectedAdditionalRoots: AdditionalRootRejection[];
-  additionalRootsScope: "in_memory_session";
-  additionalRootsPersisted: false;
-}
-
-export interface Workspace {
-  id: string;
-  root: string;
-  mode: WorkspaceMode;
-  sourceRoot?: string;
-  worktree?: WorkspaceWorktree;
-  additionalRoots: EffectiveAdditionalRoot[];
-  additionalRootsAuthorization: AdditionalRootsAuthorization;
-  approvedTasks?: ApprovedTasks;
-  skills: LoadedSkills["skills"];
-  skillDiagnostics: LoadedSkills["diagnostics"];
-  activatedSkillDirs: Set<string>;
-  projectMemory?: ProjectMemoryActiveState;
-}
-
-export interface WorkspaceContext {
-  workspace: Workspace;
-  agentsFiles: LoadedAgentsFile[];
-  availableAgentsFiles: AvailableAgentsFile[];
-  projectMemory?: ProjectMemoryPreflightView;
-  additionalRootsAuthorization: AdditionalRootsAuthorization;
-}
-
-export interface WorkspaceSessionSummary {
-  workspaceId: string;
-  root: string;
-  mode: WorkspaceMode;
-  sourceRoot?: string;
-  additionalRoots: EffectiveAdditionalRoot[];
-  requestedAdditionalRoots: AdditionalRoot[];
-  effectiveAdditionalRoots: EffectiveAdditionalRoot[];
-  rejectedAdditionalRoots: AdditionalRootRejection[];
-  additionalRootsScope: "in_memory_session";
-  additionalRootsPersisted: false;
-  managed: boolean;
-  detached?: boolean;
-  branch?: string;
-  status: string;
-  createdAt: string;
-  lastUsedAt: string;
-  resumable: boolean;
-  unavailableReason?: string;
-}
-
-export interface WorkspaceReadPath {
-  absolutePath: string;
-  readRoots: string[];
-  rootPath: string;
-  rootKind: "workspace" | "additional";
-  access: "read_only" | "read_write";
-  relativePath: string;
-  skillRead?: SkillReadResolution;
-}
-
-export type WorkspaceResolvedPath = ResolvedWorkspacePath & {
-  rootPath: string;
-  rootKind: "workspace" | "additional";
-  access: "read_only" | "read_write";
+export type {
+  LoadedAgentsFile,
+  AvailableAgentsFile,
+  WorkspaceWorktree,
+  AdditionalRootRejection,
+  AdditionalRootsAuthorization,
+  Workspace,
+  WorkspaceContext,
+  WorkspaceSessionSummary,
+  WorkspaceReadPath,
+  WorkspaceResolvedPath,
+  OpenWorkspaceInput,
 };
-
-export interface OpenWorkspaceInput {
-  path: string;
-  mode?: WorkspaceMode;
-  baseRef?: string;
-  task?: string;
-  additionalRoots?: AdditionalRoot[];
-}
 
 export async function refreshWorkspaceGitAttachment(
   workspace: Workspace,
@@ -387,7 +314,7 @@ export class WorkspaceRegistry {
         rootKind: "workspace" as const,
       },
       ...workspace.additionalRoots.map((root) => ({
-        path: root.path,
+        path: canonicalRootPath(root.path),
         access:
           root.access === "read_only"
             ? ("read_only" as const)
@@ -806,15 +733,6 @@ export class WorkspaceRegistry {
   }
 }
 
-function emptyAdditionalRootsAuthorization(): AdditionalRootsAuthorization {
-  return {
-    requestedAdditionalRoots: [],
-    effectiveAdditionalRoots: [],
-    rejectedAdditionalRoots: [],
-    additionalRootsScope: "in_memory_session",
-    additionalRootsPersisted: false,
-  };
-}
 
 function canonicalizePathWithExistingAncestor(path: string): string {
   let existing = path;
