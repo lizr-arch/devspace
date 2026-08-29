@@ -185,16 +185,16 @@ export interface DevSpaceErrorPayload {
 
 ---
 
-## 6. 实施路线图与任务排期
+## 6. 实施路线图与任务排期 (已全量完成)
 
-| 阶段 | 任务内容 | 预期交付物 | 验证方式 |
-|---|---|---|---|
-| **Phase 0** | 代码重构：全仓单文件行数拆分至 <= 900 行 | 模块化目录结构，无 >900 行文件 | `npm test` & 行数扫描脚本通过 |
-| **Phase 1 (P0)** | 落地 Operation Registry (DB + 工具包装 + 状态查询) | `src/operation-registry.ts`, `query_operation` | T7 幂等测试、T2 断线查询测试 |
-| **Phase 2 (P0)** | 落地 Canonical Workspace + 附加根恢复契约 | 改造 `workspaces.ts`, `schema.ts` | 实测脚本 D1, D2 自动化回归通过 |
-| **Phase 3 (P0)** | 落地 DevSpaceError 统一错误信封与审批透出 | `src/errors.ts`, 重构 `approve_task_manifest` | 非法 Manifest 诊断穷举单测通过 |
-| **Phase 4 (P1)** | 落地 Schema 指纹响应广播 + 原子写入 + Checkout Git 探查 | 改造 `tool-result-metadata.ts`, `pi-tools.ts` | T1 指纹升级测试、D3 分支刷新测试 |
-| **Phase 5 (P1/P2)** | 落地 Doctor --json + 全链路自动化套件验收 | 完善 `doctor.ts`, E2E 测试套件全绿 | `npm run test:all` 全量通过 |
+| 阶段 | 任务内容 | 预期交付物 | 状态 | 验证方式 |
+|---|---|---|---|---|
+| **Phase 0** | 代码重构：全仓单文件行数拆分至 <= 900 行 | 模块化目录结构，无 >900 行文件 | ✅ **已交付** | `npm test` & 行数扫描脚本通过 |
+| **Phase 1 (P0)** | 落地 Operation Registry (DB + 工具包装 + 状态查询) | `src/operation-registry.ts`, `query_operation` | ✅ **已交付** | T7 幂等测试、T2 断线查询测试 |
+| **Phase 2 (P0)** | 落地 Canonical Workspace + 附加根恢复契约 | 改造 `workspaces.ts`, `schema.ts` | ✅ **已交付** | 实测脚本 D1, D2 自动化回归通过 |
+| **Phase 3 (P0)** | 落地 DevSpaceError 统一错误信封与自愈引导 | `src/errors.ts`, `formatErrorRemedy` | ✅ **已交付** | 错误自愈与推荐工具测试通过 |
+| **Phase 4 (P1)** | 落地 Schema 指纹响应广播 + 原子写入 + Checkout Git 探查 | 改造 `tool-result-metadata.ts`, `tools-fs.ts` | ✅ **已交付** | T1 指纹升级测试、D3 分支刷新测试 |
+| **Phase 5 (P1/P2)** | 落地 Doctor --json + 全链路自动化套件验收 | 完善 `cli.ts`, E2E 测试套件全绿 | ✅ **已交付** | `npm test` & `npm run test:mcp` 全量通过 |
 
 ---
 
