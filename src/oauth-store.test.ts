@@ -60,6 +60,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 6, name: "approved-asset-receipts" },
       { version: 7, name: "rebuildable-approved-asset-index" },
       { version: 8, name: "operations-idempotency" },
+      { version: 9, name: "workspace-requested-additional-roots" },
     ]);
   } finally {
     database.close();

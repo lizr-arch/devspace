@@ -19,6 +19,7 @@ export const workspaceSessions = sqliteTable(
     managed: text("managed").notNull().default("false"),
     detached: text("detached").notNull().default("true"),
     branch: text("branch"),
+    requestedAdditionalRootsJson: text("requested_additional_roots_json"),
     createdAt: text("created_at").notNull(),
     lastUsedAt: text("last_used_at").notNull(),
   },

@@ -1,6 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import { workspaceSessions, type WorkspaceSessionRow } from "./db/schema.js";
+import type { AdditionalRoot } from "./roots.js";
 
 export type WorkspaceMode = "checkout" | "worktree";
 
@@ -15,6 +16,7 @@ export interface WorkspaceSession {
   managed: boolean;
   detached: boolean;
   branch?: string;
+  requestedAdditionalRoots?: AdditionalRoot[];
   createdAt: string;
   lastUsedAt: string;
 }
@@ -30,10 +32,12 @@ export interface WorkspaceStore {
     managed?: boolean;
     detached?: boolean;
     branch?: string;
+    requestedAdditionalRoots?: AdditionalRoot[];
   }): WorkspaceSession;
   getSession(id: string): WorkspaceSession | undefined;
   listSessions(limit?: number): WorkspaceSession[];
   touchSession(id: string): void;
+  updateSessionAdditionalRoots?(id: string, roots: AdditionalRoot[]): void;
   close?(): void;
 }
 
@@ -54,6 +58,7 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
     managed?: boolean;
     detached?: boolean;
     branch?: string;
+    requestedAdditionalRoots?: AdditionalRoot[];
   }): WorkspaceSession {
     const now = new Date().toISOString();
     const session: WorkspaceSession = {
@@ -67,9 +72,14 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       managed: input.managed ?? false,
       detached: input.detached ?? true,
       branch: input.branch,
+      requestedAdditionalRoots: input.requestedAdditionalRoots,
       createdAt: now,
       lastUsedAt: now,
     };
+
+    const requestedJson = input.requestedAdditionalRoots
+      ? JSON.stringify(input.requestedAdditionalRoots)
+      : null;
 
     this.database.db
       .insert(workspaceSessions)
@@ -84,6 +94,7 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
         managed: String(session.managed),
         detached: String(session.detached),
         branch: session.branch ?? null,
+        requestedAdditionalRootsJson: requestedJson,
         createdAt: session.createdAt,
         lastUsedAt: session.lastUsedAt,
       })
@@ -120,6 +131,18 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .run();
   }
 
+  updateSessionAdditionalRoots(id: string, roots: AdditionalRoot[]): void {
+    const requestedJson = roots.length > 0 ? JSON.stringify(roots) : null;
+    this.database.db
+      .update(workspaceSessions)
+      .set({
+        requestedAdditionalRootsJson: requestedJson,
+        lastUsedAt: new Date().toISOString(),
+      })
+      .where(eq(workspaceSessions.id, id))
+      .run();
+  }
+
   close(): void {
     this.database.close();
   }
@@ -130,6 +153,15 @@ export function createWorkspaceStore(stateDir: string): WorkspaceStore {
 }
 
 function rowToWorkspaceSession(row: WorkspaceSessionRow): WorkspaceSession {
+  let requestedAdditionalRoots: AdditionalRoot[] | undefined;
+  if (row.requestedAdditionalRootsJson) {
+    try {
+      requestedAdditionalRoots = JSON.parse(row.requestedAdditionalRootsJson);
+    } catch {
+      // Ignore json parse error
+    }
+  }
+
   return {
     id: row.id,
     root: row.root,
@@ -141,6 +173,7 @@ function rowToWorkspaceSession(row: WorkspaceSessionRow): WorkspaceSession {
     managed: row.managed === "true",
     detached: row.detached === "true",
     branch: row.branch ?? undefined,
+    requestedAdditionalRoots,
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
   };

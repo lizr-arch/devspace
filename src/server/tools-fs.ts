@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
@@ -282,10 +283,14 @@ export function registerFsWriteTool(
 
       const patch = newFilePatch(input.path, input.content);
       const stats = countDiffStats(patch);
+      const sha256 = createHash("sha256").update(input.content, "utf-8").digest("hex");
+      const bytesWritten = Buffer.byteLength(input.content, "utf-8");
       const summary = {
         ...stats,
         lines: contentLineCount(input.content),
         characters: input.content.length,
+        bytesWritten,
+        sha256,
       };
       logToolCall(config, {
         tool: toolNames.write,
@@ -312,6 +317,8 @@ export function registerFsWriteTool(
         },
         structuredContent: {
           result: contentText(response.content),
+          sha256,
+          bytesWritten,
         },
       };
 

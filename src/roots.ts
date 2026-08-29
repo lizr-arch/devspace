@@ -30,6 +30,14 @@ export function effectiveAdditionalRootAccess(
   return access === "read_only" ? "read_only" : "read_write";
 }
 
+export function normalizeCrossPlatformPath(path: string): string {
+  let normalized = path.split("\\").join("/");
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    normalized = normalized[0]!.toUpperCase() + normalized.slice(1);
+  }
+  return normalized;
+}
+
 export function expandHomePath(path: string): string {
   if (path === "~") return homedir();
   if (path.startsWith("~/") || path.startsWith("~\\")) {
@@ -40,16 +48,18 @@ export function expandHomePath(path: string): string {
 }
 
 export function isPathInsideRoot(path: string, root: string): boolean {
-  const resolvedPath = resolve(expandHomePath(path));
-  const resolvedRoot = resolve(expandHomePath(root));
-  const relationship = relative(resolvedRoot, resolvedPath);
+  const resolvedPath = normalizeCrossPlatformPath(resolve(expandHomePath(path)));
+  const resolvedRoot = normalizeCrossPlatformPath(resolve(expandHomePath(root)));
+  const relationship = relative(resolvedRoot, resolvedPath)
+    .split("\\")
+    .join("/");
 
   return (
     relationship === "" ||
     (!isAbsolute(relationship) &&
       !relationship.startsWith("..") &&
       relationship !== ".." &&
-      !relationship.includes(`..${sep}`))
+      !relationship.includes("../"))
   );
 }
 

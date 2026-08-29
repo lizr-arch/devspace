@@ -47,6 +47,11 @@ const migrations: Migration[] = [
     name: "operations-idempotency",
     up: migrateOperationsIdempotency,
   },
+  {
+    version: 9,
+    name: "workspace-requested-additional-roots",
+    up: migrateWorkspaceRequestedAdditionalRoots,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -425,6 +430,10 @@ function migrateOperationsIdempotency(sqlite: Database.Database): void {
     create index if not exists operations_created_at_idx
       on operations(created_at desc);
   `);
+}
+
+function migrateWorkspaceRequestedAdditionalRoots(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "workspace_sessions", "requested_additional_roots_json", "text");
 }
 
 function addColumnIfMissing(

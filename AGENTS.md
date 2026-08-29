@@ -23,6 +23,18 @@ automatically by `open_workspace` and by later tool calls when the requested pat
 enters a directory with instructions that have not been loaded for that
 workspace.
 
+Reliability and Idempotency Guidelines:
+
+- **Idempotent Mutations**: Pass `operationId` on mutating tool calls (`write_file`,
+  `edit_file`, `project_task`). If a network interruption occurs, replaying the
+  request with the same `operationId` safely returns the cached result without
+  side-effects.
+- **Network Recovery**: If an operation status is uncertain after a timeout or
+  transport reset, call `query_operation` with the `operationId` before retrying.
+- **Actionable Self-Healing**: When a tool call returns an error, follow the
+  provided `recoveryHint` and `nextRecommendedTools` instead of blindly retrying
+  the identical payload.
+
 Core constraints:
 
 - Treat this as remote access to the local machine; security is part of the
