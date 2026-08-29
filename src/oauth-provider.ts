@@ -26,7 +26,11 @@ import {
   checkResourceAllowed,
   resourceUrlFromServerUrl,
 } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
-import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
+import {
+  SqliteOAuthClientsStore,
+  SqliteOAuthStore,
+  type PersistedAuthorizationCodeRecord,
+} from "./oauth-store.js";
 
 export interface OAuthConfig {
   ownerToken: string;
@@ -34,12 +38,6 @@ export interface OAuthConfig {
   refreshTokenTtlSeconds: number;
   scopes: string[];
   allowedRedirectHosts: string[];
-}
-
-interface AuthorizationCodeRecord {
-  clientId: string;
-  params: AuthorizationParams;
-  expiresAtMs: number;
 }
 
 const CODE_TTL_MS = 5 * 60 * 1000;
@@ -136,7 +134,6 @@ function requestedScopesAllowed(
 
 export class SingleUserOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
-  private readonly codes = new Map<string, AuthorizationCodeRecord>();
   private readonly oauthStore: SqliteOAuthStore;
   private readonly resourceServerUrl: URL;
 
@@ -200,7 +197,8 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     }
 
     const code = `code-${randomUUID()}`;
-    this.codes.set(code, {
+    this.oauthStore.saveAuthorizationCode({
+      code,
       clientId: client.client_id,
       params,
       expiresAtMs: Date.now() + CODE_TTL_MS,
@@ -244,7 +242,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       throw new InvalidGrantError("Invalid resource");
     }
 
-    this.codes.delete(authorizationCode);
+    this.oauthStore.deleteAuthorizationCode(authorizationCode);
     return this.issueTokens(
       client.client_id,
       record.params.scopes ?? this.config.scopes,
@@ -323,8 +321,8 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private validCodeRecord(
     client: OAuthClientInformationFull,
     authorizationCode: string,
-  ): AuthorizationCodeRecord {
-    const record = this.codes.get(authorizationCode);
+  ): PersistedAuthorizationCodeRecord {
+    const record = this.oauthStore.getAuthorizationCode(authorizationCode);
     if (
       !record ||
       record.clientId !== client.client_id ||
@@ -338,7 +336,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private issueTokens(
     clientId: string,
     scopes: string[],
-    resource?: URL,
+    resource?: URL | string,
     consumedRefreshTokenHash?: string,
   ): OAuthTokens {
     const now = Math.floor(Date.now() / 1000);
@@ -346,6 +344,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     const refreshToken = randomToken();
     const accessExpiresAt = now + this.config.accessTokenTtlSeconds;
     const refreshExpiresAt = now + this.config.refreshTokenTtlSeconds;
+    const resourceHref = typeof resource === "string" ? resource : resource?.href;
 
     const saved = this.oauthStore.saveTokenPair(
       {
@@ -354,14 +353,14 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
           clientId,
           scopes,
           expiresAt: accessExpiresAt,
-          resource: resource?.href,
+          resource: resourceHref,
         },
         refreshTokenHash: hashToken(refreshToken),
         refreshToken: {
           clientId,
           scopes,
           expiresAt: refreshExpiresAt,
-          resource: resource?.href,
+          resource: resourceHref,
         },
       },
       consumedRefreshTokenHash,

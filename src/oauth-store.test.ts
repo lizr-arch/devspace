@@ -42,7 +42,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
     assert.equal(database.sqlite.pragma("synchronous", { simple: true }), 1);
     assert.equal(
       database.sqlite.pragma("busy_timeout", { simple: true }),
-      5000,
+      10000,
     );
     assert.equal(database.sqlite.pragma("foreign_keys", { simple: true }), 1);
 
@@ -61,6 +61,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 7, name: "rebuildable-approved-asset-index" },
       { version: 8, name: "operations-idempotency" },
       { version: 9, name: "workspace-requested-additional-roots" },
+      { version: 10, name: "oauth-authorization-codes" },
     ]);
   } finally {
     database.close();
@@ -133,6 +134,22 @@ function testPersistenceAndTokenHashing(stateDir: string): void {
       restoredStore.getRefreshToken(hashToken(refreshToken))?.clientId,
       client.client_id,
     );
+
+    restoredStore.saveAuthorizationCode({
+      code: "test-auth-code-123",
+      clientId: client.client_id,
+      params: {
+        redirectUri,
+        codeChallenge: "challenge-abc",
+        state: "state-xyz",
+      },
+      expiresAtMs: Date.now() + 60000,
+    });
+    const codeRecord = restoredStore.getAuthorizationCode("test-auth-code-123");
+    assert.equal(codeRecord?.clientId, client.client_id);
+    assert.equal(codeRecord?.params.codeChallenge, "challenge-abc");
+    restoredStore.deleteAuthorizationCode("test-auth-code-123");
+    assert.equal(restoredStore.getAuthorizationCode("test-auth-code-123"), undefined);
   } finally {
     restoredStore.close();
   }
@@ -254,7 +271,8 @@ async function testProviderRestartRotationAndRevocation(
   assert.ok(client);
 
   const code = "code-test-123";
-  firstProvider["codes"].set(code, {
+  firstProvider["oauthStore"].saveAuthorizationCode({
+    code,
     clientId: client.client_id,
     params: {
       redirectUri,
@@ -264,14 +282,6 @@ async function testProviderRestartRotationAndRevocation(
     },
     expiresAtMs: Date.now() + 60_000,
   });
-  const issued = await firstProvider.exchangeAuthorizationCode(
-    client,
-    code,
-    undefined,
-    redirectUri,
-    mcpUrl,
-  );
-  assert.ok(issued.refresh_token);
   firstProvider.close();
 
   const secondProvider = new SingleUserOAuthProvider(
@@ -279,6 +289,14 @@ async function testProviderRestartRotationAndRevocation(
     mcpUrl,
     stateDir,
   );
+  const issued = await secondProvider.exchangeAuthorizationCode(
+    client,
+    code,
+    undefined,
+    redirectUri,
+    mcpUrl,
+  );
+  assert.ok(issued.refresh_token);
   try {
     const verified = await secondProvider.verifyAccessToken(
       issued.access_token,

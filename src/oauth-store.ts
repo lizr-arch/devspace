@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import { InvalidRequestError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 
 export interface PersistedAccessTokenRecord {
@@ -16,6 +17,13 @@ export interface PersistedRefreshTokenRecord {
   scopes: string[];
   expiresAt: number;
   resource?: string;
+}
+
+export interface PersistedAuthorizationCodeRecord {
+  code: string;
+  clientId: string;
+  params: AuthorizationParams;
+  expiresAtMs: number;
 }
 
 export interface PersistedTokenPair {
@@ -47,6 +55,76 @@ export class SqliteOAuthStore {
   constructor(stateDir: string) {
     this.database = openDatabase(stateDir);
     this.deleteExpiredTokens(Math.floor(Date.now() / 1000));
+    this.deleteExpiredAuthorizationCodes(Date.now());
+  }
+
+  saveAuthorizationCode(record: PersistedAuthorizationCodeRecord): void {
+    const now = new Date().toISOString();
+    this.database.sqlite
+      .prepare(
+        `insert into oauth_authorization_codes (code, client_id, params_json, expires_at_ms, created_at)
+         values (?, ?, ?, ?, ?)
+         on conflict(code) do update set
+           client_id = excluded.client_id,
+           params_json = excluded.params_json,
+           expires_at_ms = excluded.expires_at_ms`,
+      )
+      .run(
+        record.code,
+        record.clientId,
+        JSON.stringify(record.params),
+        record.expiresAtMs,
+        now,
+      );
+  }
+
+  getAuthorizationCode(code: string): PersistedAuthorizationCodeRecord | undefined {
+    const row = this.database.sqlite
+      .prepare(
+        "select code, client_id, params_json, expires_at_ms from oauth_authorization_codes where code = ?",
+      )
+      .get(code) as
+      | {
+          code: string;
+          client_id: string;
+          params_json: string;
+          expires_at_ms: number;
+        }
+      | undefined;
+
+    if (!row) return undefined;
+    const parsedParams = JSON.parse(row.params_json) as Record<string, unknown>;
+    let resource: URL | undefined;
+    if (typeof parsedParams.resource === "string") {
+      resource = new URL(parsedParams.resource);
+    } else if (
+      parsedParams.resource &&
+      typeof (parsedParams.resource as Record<string, unknown>).href === "string"
+    ) {
+      resource = new URL(
+        (parsedParams.resource as Record<string, unknown>).href as string,
+      );
+    }
+
+    const params: AuthorizationParams = {
+      ...parsedParams,
+      redirectUri: String(parsedParams.redirectUri),
+      codeChallenge: String(parsedParams.codeChallenge),
+      resource,
+    } as AuthorizationParams;
+
+    return {
+      code: row.code,
+      clientId: row.client_id,
+      params,
+      expiresAtMs: row.expires_at_ms,
+    };
+  }
+
+  deleteAuthorizationCode(code: string): void {
+    this.database.sqlite
+      .prepare("delete from oauth_authorization_codes where code = ?")
+      .run(code);
   }
 
   getClient(clientId: string): OAuthClientInformationFull | undefined {
@@ -218,6 +296,12 @@ export class SqliteOAuthStore {
     this.database.sqlite
       .prepare("delete from oauth_refresh_tokens where expires_at < ?")
       .run(nowSeconds);
+  }
+
+  private deleteExpiredAuthorizationCodes(nowMs: number): void {
+    this.database.sqlite
+      .prepare("delete from oauth_authorization_codes where expires_at_ms < ?")
+      .run(nowMs);
   }
 }
 

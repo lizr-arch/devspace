@@ -329,6 +329,8 @@ export function registerInfoTools(server: McpServer, ctx: ServerContext): void {
         `Boot ID: ${runtime.bootId}`,
         `Schema: ${TOOL_SCHEMA_REVISION} (${runtime.schemaFingerprint})`,
         `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
+        `Recovery tools: query_operation, list_task_sessions, wait_task, poll_task`,
+        `Connector sync notice: If your ChatGPT client lacks 'query_operation' or shows deprecated tools (such as 'git_push'), your host connector is caching an outdated schema snapshot. Reconnect or refresh the DevSpace connector in ChatGPT Settings to pull the live ${runtime.tools.length} tools.`,
         `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
         `MCP transport: ${mcpSessions.transportMode}; sessions ${mcpSessions.active}/${mcpSessions.maxSessions} active; high-water ${mcpSessions.highWaterMark}; created ${mcpSessions.createdLastMinute}/min; stateless requests ${mcpSessions.statelessRequests}; reused ${mcpSessions.reusedRequests}; unknown ${mcpSessions.unknownSessionRequests}; expired ${mcpSessions.expired}; capacity evictions ${mcpSessions.capacityEvictions}`,
         `Memory: RSS ${memory.rssMiB} MiB; heap ${memory.heapUsedMiB}/${memory.heapTotalMiB} MiB`,

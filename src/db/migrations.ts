@@ -52,6 +52,11 @@ const migrations: Migration[] = [
     name: "workspace-requested-additional-roots",
     up: migrateWorkspaceRequestedAdditionalRoots,
   },
+  {
+    version: 10,
+    name: "oauth-authorization-codes",
+    up: migrateOAuthAuthorizationCodes,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -434,6 +439,21 @@ function migrateOperationsIdempotency(sqlite: Database.Database): void {
 
 function migrateWorkspaceRequestedAdditionalRoots(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "workspace_sessions", "requested_additional_roots_json", "text");
+}
+
+function migrateOAuthAuthorizationCodes(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists oauth_authorization_codes (
+      code text primary key,
+      client_id text not null,
+      params_json text not null,
+      expires_at_ms integer not null,
+      created_at text not null
+    );
+
+    create index if not exists oauth_authorization_codes_expires_at_idx
+      on oauth_authorization_codes(expires_at_ms);
+  `);
 }
 
 function addColumnIfMissing(

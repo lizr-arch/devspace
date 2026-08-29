@@ -261,10 +261,26 @@ export const operations = sqliteTable(
   ],
 );
 
+export const oauthAuthorizationCodes = sqliteTable(
+  "oauth_authorization_codes",
+  {
+    code: text("code").primaryKey(),
+    clientId: text("client_id").notNull(),
+    paramsJson: text("params_json").notNull(),
+    expiresAtMs: integer("expires_at_ms").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("oauth_authorization_codes_expires_at_idx").on(table.expiresAtMs),
+  ],
+);
+
 export type WorkspaceSessionRow = typeof workspaceSessions.$inferSelect;
 export type NewWorkspaceSessionRow = typeof workspaceSessions.$inferInsert;
 export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;
 export type NewLoadedAgentFileRow = typeof loadedAgentFiles.$inferInsert;
 export type OperationRow = typeof operations.$inferSelect;
 export type NewOperationRow = typeof operations.$inferInsert;
+export type OAuthAuthorizationCodeRow = typeof oauthAuthorizationCodes.$inferSelect;
+export type NewOAuthAuthorizationCodeRow = typeof oauthAuthorizationCodes.$inferInsert;
 

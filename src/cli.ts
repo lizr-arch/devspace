@@ -9,6 +9,7 @@ import {
   probeLocalChatGptFlow,
   probePublicChatGptFlow,
 } from "./doctor.js";
+import { runSchemaProbe } from "./schema-probe.js";
 import {
   generateOwnerToken,
   loadDevspaceFiles,
@@ -50,6 +51,7 @@ type Command =
   | "doctor"
   | "config"
   | "help"
+  | "schema-probe"
   | "collab"
   | "worker"
   | "handoff"
@@ -77,6 +79,9 @@ async function main(argv: string[]): Promise<void> {
       return;
     case "doctor":
       await runDoctor(args);
+      return;
+    case "schema-probe":
+      await runSchemaProbe(args);
       return;
     case "config":
       runConfigCommand(args);
@@ -119,7 +124,12 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config")
+  if (
+    command === "init" ||
+    command === "doctor" ||
+    command === "config" ||
+    command === "schema-probe"
+  )
     return command;
   if (command === "help" || command === "--help" || command === "-h")
     return "help";
