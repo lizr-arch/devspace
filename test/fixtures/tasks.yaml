@@ -1,0 +1,28 @@
+version: 1
+tasks:
+  inspect-env:
+    mode: run
+    runtime: workspace-python
+    command:
+      - "${PYTHON_SCRIPT}"
+    timeout_seconds: 30
+    parameters:
+      PYTHON_SCRIPT:
+        type: path
+        required: true
+
+  test-hello:
+    mode: run
+    runtime: workspace-python
+    command:
+      - "-c"
+      - "print('hello from workspace python')"
+    timeout_seconds: 10
+
+  test-system:
+    mode: run
+    runtime: system
+    command:
+      - "python"
+      - "--version"
+    timeout_seconds: 10

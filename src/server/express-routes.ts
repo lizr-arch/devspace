@@ -284,6 +284,268 @@ export function setupExpressRoutes(params: {
     await publisher.serve(token, res);
   });
 
+  // Compatibility shim: Gemini Spark (and possibly other MCP clients) sends
+  // empty-string optional client metadata fields such as client_uri: "" in its
+  // Dynamic Client Registration request. The MCP SDK validates these with a
+  // strict URL schema (SafeUrlSchema = z.string().url()) and rejects the whole
+  // registration with 400 invalid_client_metadata, which forces the client onto
+  // a degraded manual-credentials path where account linking never completes.
+  // An empty string in RFC 7591 metadata carries no information, so treat it as
+  // "field not provided": parse the JSON body first and drop empty-string
+  // top-level values before the SDK router (whose own express.json() skips
+  // re-parsing once req.body is populated).
+  // Wire log (dcr_wire) records sanitized request + response so Gemini's exact
+  // registration body and rejection reason are visible in run.log.
+  app.post("/register", express.json({ limit: "1mb" }), (req, res, next) => {
+    if (req.body && typeof req.body === "object" && !Array.isArray(req.body)) {
+      const removed: string[] = [];
+      for (const key of Object.keys(req.body)) {
+        const value = req.body[key];
+        if (typeof value === "string" && value.trim() === "") {
+          delete req.body[key];
+          removed.push(key);
+        }
+      }
+      const origJson = res.json.bind(res);
+      res.json = ((body: unknown) => {
+        logEvent(config.logging, "info", "dcr_wire", {
+          removedBlankFields: removed.join(",") || "none",
+          requestBody: JSON.stringify(req.body).slice(0, 800),
+          responseStatus: res.statusCode,
+          responseBody: JSON.stringify(body).slice(0, 800),
+        });
+        return origJson(body as never);
+      }) as typeof res.json;
+    }
+    next();
+  });
+
+  // Wire diagnosis + Gemini Spark compatibility for /mcp POST requests.
+  // GET (SSE stream) and DELETE pass through untouched.
+  //
+  // Gemini compat (2026-09-08, root-caused from wire logs): Gemini Spark's
+  // connector completes DCR/OAuth/initialize but after receiving the full
+  // tools/list catalog (59 tools / 129KB, every tool carrying $schema,
+  // additionalProperties, outputSchema and Apps-UI _meta) it treats the server
+  // as having "no usable tools", DELETEs the session and retries until it
+  // gives up with "We had trouble connecting to this server". Google's own
+  // docs warn above ~50 tools per connector and list $schema/additionalProperties
+  // as schema features its pipeline must sanitize. ChatGPT tolerates the raw
+  // catalog, so we filter ONLY for the Gemini connector signature observed on
+  // the wire (clientInfo.name="mcp", version="0.1.0") and leave every other
+  // client's tools/list byte-identical.
+  const GEMINI_CLIENT_MATCH = (name: string, version: string): boolean =>
+    name === "mcp" && version === "0.1.0";
+
+  const GEMINI_TOOL_ALLOWLIST = new Set([
+    "devspace_info",
+    "list_workspaces",
+    "open_workspace",
+    "resume_workspace",
+    "read",
+    "write",
+    "edit",
+    "grep",
+    "glob",
+    "ls",
+    "git_status",
+    "git_diff",
+    "project_task",
+    "list_task_sessions",
+    "wait_task",
+    "poll_task",
+    "stop_task",
+    "approve_task_manifest",
+  ]);
+
+  const geminiSessions = new Map<string, true>();
+
+  // Recursively drop JSON-Schema features Gemini's function-declaration
+  // pipeline is documented to struggle with / sanitize itself.
+  const sanitizeSchemaForGemini = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(sanitizeSchemaForGemini);
+    if (node && typeof node === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(
+        node as Record<string, unknown>,
+      )) {
+        if (key === "$schema" || key === "additionalProperties") continue;
+        out[key] = sanitizeSchemaForGemini(value);
+      }
+      return out;
+    }
+    return node;
+  };
+
+  const stripToolForGemini = (
+    tool: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    const out: Record<string, unknown> = { ...tool };
+    delete out.outputSchema; // not covered by Gemini's documented sanitizer
+    delete out["_meta"]; // Apps-UI (ui:// iframe) metadata ChatGPT-only
+    if (out.inputSchema && typeof out.inputSchema === "object") {
+      out.inputSchema = sanitizeSchemaForGemini(out.inputSchema);
+    }
+    return out;
+  };
+
+  // Rewrite one SSE/JSON chunk of a tools/list response for Gemini sessions.
+  // Returns the rewritten text, or null when nothing matched (pass through).
+  const transformToolsListChunk = (
+    text: string,
+    requestId: string | undefined,
+  ): string | null => {
+    if (!text.includes('"tools"')) return null;
+    const lines = text.split("\n");
+    let changed = false;
+    const outLines = lines.map((line) => {
+      const payload = line.startsWith("data: ") ? line.slice(6) : null;
+      if (payload === null) return line;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(payload);
+      } catch {
+        return line;
+      }
+      const result = (parsed as { result?: { tools?: unknown } })?.result;
+      if (!result || !Array.isArray(result.tools)) return line;
+      const before = result.tools.length;
+      result.tools = (result.tools as Record<string, unknown>[])
+        .filter((tool) => GEMINI_TOOL_ALLOWLIST.has(String(tool.name)))
+        .map(stripToolForGemini);
+      changed = true;
+      logEvent(config.logging, "info", "gemini_tools_filtered", {
+        requestId,
+        toolsBefore: before,
+        toolsAfter: (result.tools as unknown[]).length,
+      });
+      return "data: " + JSON.stringify(parsed);
+    });
+    return changed ? outLines.join("\n") : null;
+  };
+
+  app.use("/mcp", (req, res, next) => {
+    if (req.method !== "POST") {
+      next();
+      return;
+    }
+    const requestId = res.locals.requestId as string | undefined;
+    const rpcMethod =
+      req.body && typeof req.body === "object" && !Array.isArray(req.body)
+        ? (req.body as { method?: unknown }).method
+        : undefined;
+    if (geminiSessions.size > 256) geminiSessions.clear();
+
+    // Is this request part of a known Gemini session?
+    const requestSessionId = req.header("mcp-session-id");
+    const geminiCompat =
+      requestSessionId !== undefined &&
+      geminiSessions.get(requestSessionId) === true;
+
+    const chunks: Buffer[] = [];
+    const origWrite = res.write.bind(res);
+    const origEnd = res.end.bind(res);
+
+    // When we filter a Gemini tools/list response the byte length shrinks, but
+    // @hono/node-server fixed Content-Length to the UNFILTERED size in
+    // writeHead() before pumping the body. Writing fewer bytes than the
+    // declared Content-Length makes the client wait for bytes that never
+    // arrive and then terminate the connection. Drop Content-Length for the
+    // filtered case so Node falls back to chunked transfer-encoding.
+    if (geminiCompat && rpcMethod === "tools/list") {
+      const origWriteHead = res.writeHead.bind(res);
+      res.writeHead = ((status: unknown, ...args: unknown[]) => {
+        const headers = args[args.length - 1];
+        if (
+          headers &&
+          typeof headers === "object" &&
+          !Array.isArray(headers)
+        ) {
+          const record = headers as Record<string, unknown>;
+          delete record["content-length"];
+          delete record["Content-Length"];
+        }
+        return (origWriteHead as (...a: never[]) => typeof res)(
+          status as never,
+          ...(args as never[]),
+        );
+      }) as typeof res.writeHead;
+    }
+
+    const processChunk = (chunk: unknown): unknown => {
+      // @hono/node-server pumps Uint8Array from the SDK's TextEncoder, NOT
+      // Buffer or string — all three shapes must be accepted or this hook
+      // silently sees zero bytes (observed as resLen:0 in mcp_wire).
+      let text: string | undefined;
+      if (typeof chunk === "string") text = chunk;
+      else if (chunk instanceof Uint8Array)
+        text = Buffer.from(chunk).toString("utf8");
+      if (text === undefined) return chunk;
+      if (!geminiCompat || rpcMethod !== "tools/list") {
+        chunks.push(Buffer.from(text));
+        return chunk;
+      }
+      const transformed = transformToolsListChunk(text, requestId);
+      if (transformed === null) {
+        chunks.push(Buffer.from(text));
+        return chunk;
+      }
+      chunks.push(Buffer.from(transformed));
+      return Buffer.from(transformed);
+    };
+
+    res.write = ((chunk: unknown, ...rest: unknown[]) => {
+      return (origWrite as (...args: never[]) => boolean)(
+        processChunk(chunk) as never,
+        ...(rest as never[]),
+      );
+    }) as typeof res.write;
+    res.end = ((chunk?: unknown, ...rest: unknown[]) => {
+      if (chunk !== undefined && chunk !== null) chunk = processChunk(chunk);
+
+      // Remember Gemini sessions from initialize responses so subsequent
+      // tools/list calls on the same session get the filtered catalog.
+      if (rpcMethod === "initialize") {
+        const newSessionId = res.getHeader("mcp-session-id");
+        const clientInfo = (
+          req.body as {
+            params?: { clientInfo?: { name?: unknown; version?: unknown } };
+          }
+        )?.params?.clientInfo;
+        if (
+          typeof newSessionId === "string" &&
+          typeof clientInfo?.name === "string" &&
+          GEMINI_CLIENT_MATCH(clientInfo.name, String(clientInfo.version ?? ""))
+        ) {
+          geminiSessions.set(newSessionId, true);
+          logEvent(config.logging, "info", "gemini_session_marked", {
+            requestId,
+            sessionIdPrefix: sessionIdPrefix(newSessionId),
+            clientName: clientInfo.name,
+            clientVersion: String(clientInfo.version ?? ""),
+          });
+        }
+      }
+
+      const body = Buffer.concat(chunks).toString("utf8");
+      logEvent(config.logging, "info", "mcp_wire", {
+        httpMethod: req.method,
+        rpcMethod: typeof rpcMethod === "string" ? rpcMethod : undefined,
+        sessionIdPrefix: sessionIdPrefix(requestSessionId),
+        status: res.statusCode,
+        geminiCompat,
+        contentType: String(res.getHeader("content-type") ?? ""),
+        resBody: body.slice(0, 600),
+        resLen: body.length,
+      });
+      return (origEnd as (...args: never[]) => typeof res)(
+        chunk as never,
+        ...(rest as never[]),
+      );
+    }) as typeof res.end;
+    next();
+  });
+
   app.use(
     mcpAuthRouter({
       provider: oauthProvider,

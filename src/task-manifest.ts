@@ -621,6 +621,13 @@ function validateTaskPath(
     .split("\\")
     .join("/");
   if (!relativePath || relativePath === ".") return true;
+  // resolveWorkspacePath realpath-syncs the workspace root, which throws
+  // ENOENT when the allowed root does not exist yet. Additional roots are
+  // legitimately allowed to be not-yet-created directories (GATE 31 covers
+  // exactly this: "/outside" granted before it exists). Containment was
+  // already verified by isPathInsideRoot over canonicalized paths, so skip
+  // the symlink deep-check only when the grant root itself is absent.
+  if (!existsSync(owningGrant.path)) return true;
   try {
     resolveWorkspacePath(owningGrant.path, relativePath);
     return true;
@@ -635,7 +642,19 @@ function canonicalizeTaskPath(path: string): string {
   while (!existsSync(existing)) {
     const parent = dirname(existing);
     if (parent === existing) return resolve(path);
-    missingParts.unshift(existing.slice(parent.length + 1));
+    // On Windows a drive-root parent ("D:") does not include a trailing
+    // separator, so `parent.length + 1` would swallow the first real
+    // path segment ("D:\outside" → parent "D:" → slice(3) = "utside").
+    // Slice from parent.length and strip ANY leading separators (the tail
+    // after dirname() starts with "\" on Windows — `/^[\\/]+/` in TS source
+    // is the char class backslash-or-slash; `"[\\/]+"` in compiled JS is
+    // a literal two-char string match and strips nothing, which turned
+    // "D:\outside\path" into "\path" → resolve() treated it as absolute
+    // on the current drive → "D:\path" (path segment silently dropped).
+    const tail = existing
+      .slice(parent.length)
+      .replace(/^[\\/]+/, "");
+    if (tail) missingParts.unshift(tail);
     existing = parent;
   }
   return resolve(realpathSync.native(existing), ...missingParts);
