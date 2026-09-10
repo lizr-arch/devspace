@@ -38,7 +38,12 @@ try {
   assert.equal(events[1]?.statusCode, 404);
 
   const eventPath = join(stateDir, "monitor-events.jsonl");
-  assert.equal(statSync(eventPath).mode & 0o777, 0o600);
+  // POSIX file modes are not real on Windows (NTFS reports 0o666), so the
+  // permission bit assertion only applies on POSIX platforms — same gate
+  // pattern as oauth-store.test.ts.
+  if (process.platform !== "win32") {
+    assert.equal(statSync(eventPath).mode & 0o777, 0o600);
+  }
   assert.equal(
     readFileSync(eventPath, "utf8").split("\n").filter(Boolean).length,
     2,

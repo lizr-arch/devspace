@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 
 const emptyConfigDir = mkdtempSync(
@@ -19,12 +19,24 @@ assert.equal(loadConfig(baseEnv).mcpSessionIdleTtlMs, 300_000);
 assert.equal(loadConfig(baseEnv).mcpSessionMaxSessions, 64);
 assert.equal(loadConfig(baseEnv).mcpSessionSweepIntervalMs, 30_000);
 assert.deepEqual(loadConfig(baseEnv).taskExecution, {});
+// The operator Python path must survive round-trip as an absolute path. Use a
+// path built for the running platform: on Windows, resolve() prefixes a POSIX
+// absolute path with the current drive letter, so asserting the raw POSIX
+// string is platform-dependent and fails.
+const operatorPythonInput = process.platform === "win32"
+  ? "C:\\Program Files\\Python311\\python.exe"
+  : "/usr/bin/python3";
+// All POSIX operator-Python paths in this file share one platform-dependent
+// resolution: path.resolve prefixes the current drive on Windows. Derive the
+// expected value instead of hardcoding it.
+const expectedResolvedPython = (posix: string): string =>
+  process.platform === "win32" ? resolve(posix) : posix;
 assert.equal(
   loadConfig({
     ...baseEnv,
-    DEVSPACE_OPERATOR_PYTHON: "/usr/bin/python3",
+    DEVSPACE_OPERATOR_PYTHON: operatorPythonInput,
   }).taskExecution.operatorPythonExecutable,
-  "/usr/bin/python3",
+  expectedResolvedPython(operatorPythonInput),
 );
 assert.throws(
   () =>
@@ -173,7 +185,7 @@ assert.equal(
     ...baseEnv,
     DEVSPACE_CONFIG_DIR: fullToolConfigDir,
   }).taskExecution.operatorPythonExecutable,
-  "/opt/operator/python3",
+  expectedResolvedPython("/opt/operator/python3"),
 );
 assert.equal(
   loadConfig({
@@ -181,7 +193,7 @@ assert.equal(
     DEVSPACE_CONFIG_DIR: fullToolConfigDir,
     DEVSPACE_OPERATOR_PYTHON: "/usr/bin/python3",
   }).taskExecution.operatorPythonExecutable,
-  "/usr/bin/python3",
+  expectedResolvedPython("/usr/bin/python3"),
 );
 assert.deepEqual(
   {
