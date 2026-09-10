@@ -188,6 +188,32 @@ export function setupExpressRoutes(params: {
   });
 
   if (workspaceApp) {
+    // Serve the Workspace App template over plain HTTP at
+    // /ui/workspace-app[*].html. ChatGPT's Apps SDK may resolve a `ui://`
+    // resource URI to this HTTP path (and legacy/older clients do), instead of
+    // calling MCP resources/read. Without a route here that request 404s and
+    // surfaces in the ChatGPT UI as "Failed to fetch template" /
+    // "Error loading app". Accept both the versioned
+    // (workspace-app-<hash>.html) and legacy (workspace-app.html) names.
+    app.get("/ui/:file", (req, res) => {
+      const file =
+        typeof req.params.file === "string" ? req.params.file : "";
+      if (!/^workspace-app(-[0-9a-f]+)?\.html$/.test(file)) {
+        res.status(404).type("text").send("Not found");
+        return;
+      }
+      // Assets must be absolute: this HTML renders inside a ChatGPT iframe.
+      const publicBase = config.publicBaseUrl
+        ? String(config.publicBaseUrl).replace(/\/+$/, "")
+        : `${req.protocol}://${req.get("host") ?? "127.0.0.1:7676"}`;
+      res.setHeader("Cache-Control", "no-store");
+      res
+        .type("html")
+        .send(
+          workspaceAppHtml(config, workspaceApp, `${publicBase}/mcp-app-assets`),
+        );
+    });
+
     app.get("/app-test", (req, res) => {
       if (!requireLocalMonitor(req, res)) return;
       for (const [name, value] of Object.entries(
