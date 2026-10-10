@@ -71,6 +71,7 @@ import {
   registerTaskSessionReadOnlyTools,
   registerTaskSessionMutationTools,
 } from "./server/tools-tasks.js";
+import { registerGodotImportTool } from "./server/tools-godot.js";
 import { setupExpressRoutes } from "./server/express-routes.js";
 import { OperationRegistry } from "./operation-registry.js";
 import { MonitorEventStore } from "./monitor-events.js";
@@ -88,6 +89,7 @@ import { ArtifactLedger } from "./artifact-ledger.js";
 import { AssetReceiptStore } from "./asset-receipts.js";
 import { ArtifactPublisher } from "./artifact-publisher.js";
 import { BackgroundJobManager } from "./background-jobs.js";
+import { GodotImportRegistry } from "./godot-import.js";
 import { GameSessionManager } from "./game-sessions.js";
 import { ExternalInspectorManager } from "./inspectors.js";
 import {
@@ -159,6 +161,7 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   registerProjectTaskTool(server, ctx);
   registerTaskSessionReadOnlyTools(server, ctx);
   registerTaskSessionMutationTools(server, ctx);
+  registerGodotImportTool(server, ctx);
 
   return server;
 }
@@ -278,6 +281,7 @@ export function createServer(
       }),
   });
   const jobs = new BackgroundJobManager(config.stateDir, runners, artifacts);
+  const godotImport = new GodotImportRegistry();
   const games = new GameSessionManager(config.stateDir, runners);
   const inspectors = new ExternalInspectorManager(config.stateDir, runners);
   const requestMonitor = new LiveRequestMonitor();
@@ -318,6 +322,7 @@ export function createServer(
     runtime,
     workspaceApp,
     tasks,
+    godotImport,
     toolNames,
     widgetMeta,
     interactiveWidgetMeta,

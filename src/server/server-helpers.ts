@@ -201,6 +201,9 @@ export function exposedToolNames(
     if (config.gitRemoteWrite.enabled) {
       tools.splice(tools.indexOf("git_merge") + 1, 0, "git_push");
     }
+    if (config.godotImport.enabled) {
+      tools.push("godot_import");
+    }
   }
   if (config.widgets === "changes") tools.push("show_changes");
   if (exposeDedicatedReadTools(config)) {
@@ -242,6 +245,7 @@ export function createServiceRuntime(
         requiredCapabilities,
         runnerNames: JOB_RUNNERS,
         gitRemoteWrite: config.gitRemoteWrite,
+        godotImport: config.godotImport,
         workspaceApp: workspaceApp
           ? {
               resourceUri: workspaceApp.resourceUri,
@@ -334,6 +338,7 @@ export function requiredCapabilityForTool(tool: string): ToolCapability {
     [
       "start_job",
       "start_capture",
+      "godot_import",
       "wait_job",
       "list_jobs",
       "poll_job",
@@ -576,6 +581,21 @@ export async function assertManagedAttachedGitWorkspace(
       "GIT_DETACHED_HEAD: Operation requires an attached managed worktree branch.",
     );
   }
+}
+
+export function godotImportSummary(config: ServerConfig) {
+  const policy = config.godotImport;
+  return {
+    enabled: policy.enabled,
+    runner: policy.runner,
+    argumentPolicy: policy.argumentPolicy,
+    fixedArgs: policy.fixedArgs,
+    approvedProjectRoots: policy.approvedProjectRoots,
+    defaultTimeoutSeconds: policy.defaultTimeoutSeconds,
+    maxTimeoutSeconds: policy.maxTimeoutSeconds,
+    requireTrackedFilesUnchanged: policy.requireTrackedFilesUnchanged,
+    requireCleanCheckout: policy.requireCleanCheckout,
+  };
 }
 
 export function gitRemoteWriteSummary(config: ServerConfig) {

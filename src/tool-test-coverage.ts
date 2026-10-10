@@ -135,7 +135,10 @@ const coverageGroups: CoverageGroup[] = [
   {
     tools: ["git_fetch", "git_merge", "git_push"],
     subsystem: "remote Git",
-    functionalTests: ["src/git-remote-tools.test.ts"],
+    functionalTests: [
+      "src/git-remote-tools.test.ts",
+      "src/git-push-policy.test.ts",
+    ],
     mode: "local_bare_remote",
     visualContract: "sandbox_fixture",
   },
@@ -180,6 +183,13 @@ const coverageGroups: CoverageGroup[] = [
       "src/background-jobs-venv.test.ts",
     ],
     mode: "mock_runtime",
+    visualContract: "sandbox_fixture",
+  },
+  {
+    tools: ["godot_import"],
+    subsystem: "Godot editor resource import",
+    functionalTests: ["src/godot-import.test.ts"],
+    mode: "temp_workspace",
     visualContract: "sandbox_fixture",
   },
   {

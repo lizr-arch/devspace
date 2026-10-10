@@ -31,6 +31,7 @@ import {
   type RunnerName,
 } from "./runner-registry.js";
 import { ArtifactLedger, type ArtifactBaseline } from "./artifact-ledger.js";
+import { validateGodotEditorImportArguments } from "./runner-validation.js";
 
 import {
   JOB_RUNNERS,
@@ -122,10 +123,22 @@ export class BackgroundJobManager {
         `At most ${definition.maxConcurrent} ${input.runner} job(s) may run concurrently.`,
       );
     }
-    this.runners.validateArguments(input.runner, input.args, {
-      workspaceRoot: input.workspaceRoot,
-      workingDirectory: input.workingDirectory,
-    });
+    if (input.godotEditorImport === true) {
+      if (input.runner !== "godot-mono") {
+        throw new Error(
+          "RUNNER_ARGUMENT_REJECTED: Godot editor import requires the godot-mono runner.",
+        );
+      }
+      validateGodotEditorImportArguments(input.args, {
+        workspaceRoot: input.workspaceRoot,
+        workingDirectory: input.workingDirectory,
+      });
+    } else {
+      this.runners.validateArguments(input.runner, input.args, {
+        workspaceRoot: input.workspaceRoot,
+        workingDirectory: input.workingDirectory,
+      });
+    }
     const timeoutSeconds =
       input.timeoutSeconds ?? definition.defaultTimeoutSeconds;
     if (
@@ -305,8 +318,7 @@ export class BackgroundJobManager {
     outputCursor?: string,
     waitSeconds = DEFAULT_WAIT_SECONDS,
     maxBytes = DEFAULT_WAIT_OUTPUT_BYTES,
-  ): Promise<JobSnapshot> {
-    this.initialize();
+  ): Promise<JobSnapshot> {    this.initialize();
     validateJobId(jobId);
     validateWaitArguments(waitSeconds, maxBytes);
 
@@ -336,6 +348,23 @@ export class BackgroundJobManager {
       maxBytes,
       waitTimedOut,
     );
+  }
+
+  /**
+   * Reads up to `maxBytes` of the persisted job log from the beginning. Used
+   * by bounded diagnostics (for example the Godot import error census) that
+   * need the whole captured log rather than a tail window.
+   */
+  readLogFromStart(jobId: string, maxBytes = MAX_JOB_OUTPUT_BYTES): string {
+    this.initialize();
+    validateJobId(jobId);
+    this.getJob(jobId);
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) {
+      throw new Error("maxBytes must be a positive integer.");
+    }
+    if (!existsSync(this.logPath(jobId))) return "";
+    const log = readFileSync(this.logPath(jobId));
+    return log.subarray(0, maxBytes).toString("utf8");
   }
 
   list(workspaceId: string, options: ListJobsOptions = {}): JobSnapshot[] {
@@ -662,6 +691,8 @@ export class BackgroundJobManager {
     this.notifyWaiters(job.jobId);
     void this.finalizeArtifacts(job);
   }
+
+
 
   private persist(job: LiveJob): void {
     const persisted = {

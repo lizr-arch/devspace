@@ -54,6 +54,12 @@ export interface DevspaceUserConfig {
     requireExpectedRemoteSha?: boolean;
     requireFastForward?: boolean;
   };
+  godotImport?: {
+    enabled?: boolean;
+    approvedProjectRoots?: string[];
+    defaultTimeoutSeconds?: number;
+    maxTimeoutSeconds?: number;
+  };
 }
 
 export interface DevspaceAuthConfig {

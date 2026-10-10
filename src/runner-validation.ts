@@ -36,6 +36,43 @@ export {
   SHELL_CONTROL_PATTERN,
 };
 
+// The only argument vector DevSpace is ever willing to hand to the Godot
+// editor. Callers of godot_import cannot supply, extend, or reorder it.
+export const GODOT_EDITOR_IMPORT_ARGS: readonly string[] = [
+  "--headless",
+  "--editor",
+  "--import",
+  "--path",
+  ".",
+  "--quit",
+];
+
+export const GODOT_EDITOR_IMPORT_ARGUMENT_POLICY = "godot_editor_import_v1";
+
+/**
+ * Validates the fixed Godot editor-import argument vector. Unlike
+ * `validateActionPolicy`, this policy *requires* `--editor` and accepts no
+ * caller-supplied arguments: the array must be byte-identical to
+ * `GODOT_EDITOR_IMPORT_ARGS`.
+ */
+export function validateGodotEditorImportArguments(
+  args: string[],
+  context?: RunnerValidationContext,
+): void {
+  validateArgumentArray(args);
+  if (
+    args.length !== GODOT_EDITOR_IMPORT_ARGS.length ||
+    args.some((argument, index) => argument !== GODOT_EDITOR_IMPORT_ARGS[index])
+  ) {
+    throw new Error(
+      `RUNNER_ARGUMENT_REJECTED: Godot editor import only accepts the fixed argument vector ${GODOT_EDITOR_IMPORT_ARGS.join(" ")}.`,
+    );
+  }
+  if (context) {
+    assertWorkspaceContainedArguments(args, context);
+  }
+}
+
 export function validateArgumentArray(args: string[]): void {
   if (!Array.isArray(args) || args.length === 0 || args.length > 128) {
     throw new Error(
@@ -633,6 +670,48 @@ export async function isExecutableFile(candidate: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Well-known .NET SDK installation roots. Godot Mono shells out to `dotnet`
+ * for the embedded C# build, so the Godot runners need it on PATH even when
+ * DevSpace itself was started by launchd with the minimal
+ * `/usr/bin:/bin:/usr/sbin:/sbin` PATH.
+ */
+export function dotnetRootCandidates(platform: NodeJS.Platform): string[] {
+  if (platform === "darwin") {
+    return [
+      "/usr/local/share/dotnet",
+      "/opt/homebrew/opt/dotnet/libexec",
+      "/usr/local/opt/dotnet/libexec",
+    ];
+  }
+  if (platform === "win32") return ["C:\\Program Files\\dotnet"];
+  return ["/usr/share/dotnet", "/usr/lib/dotnet", "/usr/local/share/dotnet"];
+}
+
+export function withDotnetRuntime(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): NodeJS.ProcessEnv {
+  const executableName = platform === "win32" ? "dotnet.exe" : "dotnet";
+  const root = dotnetRootCandidates(platform).find((candidate) =>
+    existsSync(join(candidate, executableName)),
+  );
+  if (!root) return env;
+  const pathKey =
+    Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  const entries = (env[pathKey] ?? "").split(delimiter).filter(Boolean);
+  const withoutDuplicate = entries.filter(
+    (entry) =>
+      (platform === "win32" ? entry.toLowerCase() : entry) !==
+      (platform === "win32" ? root.toLowerCase() : root),
+  );
+  return {
+    ...env,
+    DOTNET_ROOT: env.DOTNET_ROOT ?? root,
+    [pathKey]: [root, ...withoutDuplicate].join(delimiter),
+  };
 }
 
 export async function probeVersion(

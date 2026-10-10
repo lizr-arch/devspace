@@ -17,7 +17,6 @@ import {
   gitMutationLockKey,
   assertNoExecutableGitFilters,
   assertNoExecutableMergeDrivers,
-  escapeRegex,
   GitExecutionError,
 } from "./git-tools.js";
 
@@ -407,7 +406,9 @@ export async function fetchGitLocked(
     input.approvedRemoteUrls,
     false,
   );
-  const prune = input.prune ?? true;
+  // Never prune unless the operator explicitly asks for it: an ordinary
+  // fetch must not delete remote-tracking refs as a side effect.
+  const prune = input.prune ?? false;
   const refsBefore = await listRemoteTrackingRefs(root, remote);
   try {
     await runGit(
@@ -519,7 +520,7 @@ export async function assertApprovedRemote(
   if (!remotes.includes(value)) {
     throw new Error(`GIT_REMOTE_NOT_FOUND: Remote ${value} does not exist.`);
   }
-  await assertSafeLocalRemoteConfig(root, value);
+  await assertSafeLocalRemoteConfig(root);
   const urls = (
     await runGit(root, [
       "remote",
@@ -547,19 +548,26 @@ export async function assertApprovedRemote(
   return value;
 }
 
-export async function assertSafeLocalRemoteConfig(
-  root: string,
-  remote: string,
-): Promise<void> {
+/**
+ * Rejects repository-local Git configuration that could execute a program,
+ * capture credentials, rewrite the approved remote URL, or alter the HTTP
+ * transport. `git config` lowercases section and variable names, so every
+ * alternative here is spelled the way `git config --local --get-regexp`
+ * actually prints it.
+ */
+export const UNSAFE_LOCAL_GIT_CONFIG_PATTERN =
+  "^(core\\.(sshcommand|gitproxy|askpass|editor|hookspath|fsmonitor|pager)|credential\\..*|include(if)?\\..*|url\\..*\\.(insteadof|pushinsteadof)|http\\..*|remote\\..*\\.(uploadpack|receivepack|proxy|vcs|pushurl))$";
+
+export async function assertSafeLocalRemoteConfig(root: string): Promise<void> {
   const unsafe = await runGit(root, [
     "config",
     "--local",
     "--get-regexp",
-    `^(core\\.(sshCommand|gitProxy)|credential\\..*|credential\\.helper|include(If)?\\..*|url\\..*\\.insteadOf|remote\\.${escapeRegex(remote)}\\.(uploadpack|receivepack))$`,
+    UNSAFE_LOCAL_GIT_CONFIG_PATTERN,
   ]).catch(() => undefined);
   if (unsafe?.stdout.trim()) {
     throw new Error(
-      "GIT_REMOTE_CONFIG_REJECTED: Repository-local executable or URL rewrite Git configuration is not supported.",
+      "GIT_REMOTE_CONFIG_REJECTED: Repository-local executable, credential, transport, or URL rewrite Git configuration is not supported.",
     );
   }
 }

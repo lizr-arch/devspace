@@ -17,6 +17,7 @@ import type { ArtifactLedger } from "../artifact-ledger.js";
 import type { AssetReceiptStore } from "../asset-receipts.js";
 import type { ArtifactPublisher } from "../artifact-publisher.js";
 import type { TaskRunner } from "../task-runner.js";
+import type { GodotImportRegistry } from "../godot-import.js";
 
 export type Transport = StreamableHTTPServerTransport;
 
@@ -27,7 +28,7 @@ export const PACKAGE_VERSION = (
 ).version;
 
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-v1.2026-07-29";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1.2026-10-10";
 
 export const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 export const LEGACY_WORKSPACE_APP_RESOURCE_URI =
@@ -462,6 +463,7 @@ export interface ServerContext {
   runtime: ServiceRuntime;
   workspaceApp: WorkspaceAppBuild | undefined;
   tasks: TaskRunner;
+  godotImport: GodotImportRegistry;
   toolNames: ToolNames;
   widgetMeta: (
     toolName: string,

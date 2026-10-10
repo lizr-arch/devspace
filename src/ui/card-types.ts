@@ -37,6 +37,7 @@ export const TOOL_NAMES = [
   "git_fetch",
   "git_merge",
   "git_push",
+  "godot_import",
   "start_game_session",
   "inspect_game_session",
   "send_game_input",

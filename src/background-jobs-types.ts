@@ -145,6 +145,14 @@ export interface StartJobInput {
   artifactRoots?: string[];
   captureProfile?: string;
   environment?: Record<string, string>;
+  /**
+   * Closed internal flag used only by the dedicated `godot_import`
+   * capability. It switches argument validation to the fixed
+   * `godot_editor_import_v1` vector
+   * (`--headless --editor --import --path . --quit`) for the `godot-mono`
+   * runner. MCP callers can never set it: `start_job` never forwards it.
+   */
+  godotEditorImport?: true;
 }
 
 export interface JobSnapshot extends PersistedJob {

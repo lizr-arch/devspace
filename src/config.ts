@@ -39,6 +39,28 @@ export interface GitRemoteWritePolicy {
   requireExpectedRemoteSha: true;
   requireFastForward: true;
 }
+export interface GodotImportPolicy {
+  enabled: boolean;
+  approvedProjectRoots: string[];
+  runner: "godot-mono";
+  argumentPolicy: "godot_editor_import_v1";
+  fixedArgs: string[];
+  defaultTimeoutSeconds: number;
+  maxTimeoutSeconds: number;
+  requireTrackedFilesUnchanged: true;
+  requireCleanCheckout: true;
+}
+export const GODOT_IMPORT_FIXED_ARGS: readonly string[] = [
+  "--headless",
+  "--editor",
+  "--import",
+  "--path",
+  ".",
+  "--quit",
+];
+export const GODOT_IMPORT_MIN_TIMEOUT_SECONDS = 1;
+export const GODOT_IMPORT_MAX_TIMEOUT_SECONDS = 6 * 60 * 60;
+export const GODOT_IMPORT_DEFAULT_TIMEOUT_SECONDS = 30 * 60;
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
@@ -67,6 +89,7 @@ export interface ServerConfig {
   taskExecution: TaskExecutionConfig;
   runners: RunnerRegistryConfig;
   gitRemoteWrite: GitRemoteWritePolicy;
+  godotImport: GodotImportPolicy;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -427,6 +450,7 @@ function parseGitRemoteWritePolicy(
       throw new Error(`Invalid approved Git destination branch: ${branch}`);
     }
   }
+
   for (const root of approvedRepositoryRoots) {
     if (
       !allowedRoots.some((allowedRoot) => isPathInsideRoot(root, allowedRoot))
@@ -490,8 +514,75 @@ function parseGitRemoteWritePolicy(
   };
 }
 
+
+
 type DevspaceUserConfigGitRemoteWrite = NonNullable<
   ReturnType<typeof loadDevspaceFiles>["config"]["gitRemoteWrite"]
+>;
+
+function parseGodotImportPolicy(
+  env: NodeJS.ProcessEnv,
+  value: DevspaceUserConfigGodotImport | undefined,
+  allowedRoots: string[],
+): GodotImportPolicy {
+  const enabled =
+    env.DEVSPACE_GODOT_IMPORT_ENABLED === undefined
+      ? value?.enabled === true
+      : parseBoolean(env.DEVSPACE_GODOT_IMPORT_ENABLED);
+  const approvedProjectRoots = parseConfiguredStringList(
+    env.DEVSPACE_GODOT_IMPORT_APPROVED_PROJECT_ROOTS,
+    value?.approvedProjectRoots,
+    [],
+  ).map((root) => resolve(expandHomePath(root)));
+  const defaultTimeoutSeconds = parseBoundedInteger(
+    value?.defaultTimeoutSeconds,
+    GODOT_IMPORT_DEFAULT_TIMEOUT_SECONDS,
+    GODOT_IMPORT_MIN_TIMEOUT_SECONDS,
+    GODOT_IMPORT_MAX_TIMEOUT_SECONDS,
+    "godotImport.defaultTimeoutSeconds",
+  );
+  const maxTimeoutSeconds = parseBoundedInteger(
+    value?.maxTimeoutSeconds,
+    GODOT_IMPORT_MAX_TIMEOUT_SECONDS,
+    GODOT_IMPORT_MIN_TIMEOUT_SECONDS,
+    GODOT_IMPORT_MAX_TIMEOUT_SECONDS,
+    "godotImport.maxTimeoutSeconds",
+  );
+  if (defaultTimeoutSeconds > maxTimeoutSeconds) {
+    throw new Error(
+      "godotImport.defaultTimeoutSeconds must not exceed godotImport.maxTimeoutSeconds",
+    );
+  }
+  for (const root of approvedProjectRoots) {
+    if (
+      !allowedRoots.some((allowedRoot) => isPathInsideRoot(root, allowedRoot))
+    ) {
+      throw new Error(
+        `Approved Godot project root is outside allowed roots: ${root}`,
+      );
+    }
+  }
+  if (enabled && approvedProjectRoots.length === 0) {
+    throw new Error(
+      "Enabled godotImport requires at least one approvedProjectRoots entry",
+    );
+  }
+
+  return {
+    enabled,
+    approvedProjectRoots,
+    runner: "godot-mono",
+    argumentPolicy: "godot_editor_import_v1",
+    fixedArgs: [...GODOT_IMPORT_FIXED_ARGS],
+    defaultTimeoutSeconds,
+    maxTimeoutSeconds,
+    requireTrackedFilesUnchanged: true,
+    requireCleanCheckout: true,
+  };
+}
+
+type DevspaceUserConfigGodotImport = NonNullable<
+  ReturnType<typeof loadDevspaceFiles>["config"]["godotImport"]
 >;
 
 function parseConfiguredStringList(
@@ -697,6 +788,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     gitRemoteWrite: parseGitRemoteWritePolicy(
       env,
       files.config.gitRemoteWrite,
+      allowedRoots,
+    ),
+    godotImport: parseGodotImportPolicy(
+      env,
+      files.config.godotImport,
       allowedRoots,
     ),
   };

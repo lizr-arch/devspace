@@ -26,6 +26,7 @@ import {
   processMemorySnapshot,
   formatRunnerSummary,
   gitRemoteWriteSummary,
+  godotImportSummary,
   textBlock,
 } from "./server-helpers.js";
 
@@ -220,6 +221,17 @@ export function registerInfoTools(server: McpServer, ctx: ServerContext): void {
           requireExpectedRemoteSha: z.literal(true),
           requireFastForward: z.literal(true),
         }),
+        godotImport: z.object({
+          enabled: z.boolean(),
+          runner: z.literal("godot-mono"),
+          argumentPolicy: z.literal("godot_editor_import_v1"),
+          fixedArgs: z.array(z.string()),
+          approvedProjectRoots: z.array(z.string()),
+          defaultTimeoutSeconds: z.number().int().positive(),
+          maxTimeoutSeconds: z.number().int().positive(),
+          requireTrackedFilesUnchanged: z.literal(true),
+          requireCleanCheckout: z.literal(true),
+        }),
         taskExecution: z.object({
           operatorPythonBootstrapConfigured: z.boolean(),
           operatorPythonBootstrapAvailable: z.boolean(),
@@ -312,6 +324,7 @@ export function registerInfoTools(server: McpServer, ctx: ServerContext): void {
           captureProfileDirectory: ".devspace/captures" as const,
         },
         gitRemoteWrite: gitRemoteWriteSummary(config),
+        godotImport: godotImportSummary(config),
         taskExecution: {
           operatorPythonBootstrapConfigured: taskExecutionStatus.configured,
           operatorPythonBootstrapAvailable: taskExecutionStatus.available,
@@ -330,7 +343,7 @@ export function registerInfoTools(server: McpServer, ctx: ServerContext): void {
         `Schema: ${TOOL_SCHEMA_REVISION} (${runtime.schemaFingerprint})`,
         `Tools (${runtime.tools.length}): ${runtime.tools.join(", ")}`,
         `Recovery tools: query_operation, list_task_sessions, wait_task, poll_task`,
-        `Connector sync notice: If your ChatGPT client lacks 'query_operation' or shows deprecated tools (such as 'git_push'), your host connector is caching an outdated schema snapshot. Reconnect or refresh the DevSpace connector in ChatGPT Settings to pull the live ${runtime.tools.length} tools.`,
+        `Connector sync notice: If your ChatGPT client does not list all ${runtime.tools.length} tools below (for example it lacks 'query_operation' or 'git_push'), your host connector is caching an outdated schema snapshot. Reconnect or refresh the DevSpace connector in ChatGPT Settings.`,
         `Mode: ${details.toolMode}, readOnly=${String(config.readOnly)}`,
         `MCP transport: ${mcpSessions.transportMode}; sessions ${mcpSessions.active}/${mcpSessions.maxSessions} active; high-water ${mcpSessions.highWaterMark}; created ${mcpSessions.createdLastMinute}/min; stateless requests ${mcpSessions.statelessRequests}; reused ${mcpSessions.reusedRequests}; unknown ${mcpSessions.unknownSessionRequests}; expired ${mcpSessions.expired}; capacity evictions ${mcpSessions.capacityEvictions}`,
         `Memory: RSS ${memory.rssMiB} MiB; heap ${memory.heapUsedMiB}/${memory.heapTotalMiB} MiB`,
@@ -339,6 +352,7 @@ export function registerInfoTools(server: McpServer, ctx: ServerContext): void {
           : "Workspace App: disabled",
         `Allowed roots: ${config.allowedRoots.join(", ")}`,
         `Git remote write: enabled=${String(config.gitRemoteWrite.enabled)}, remotes=${config.gitRemoteWrite.approvedRemotes.join(", ") || "(none)"}, branches=${config.gitRemoteWrite.approvedDestinationBranches.join(", ") || "(none)"}, force=false`,
+        `Godot import: enabled=${String(config.godotImport.enabled)}, runner=${config.godotImport.runner}, policy=${config.godotImport.argumentPolicy}, args=[${config.godotImport.fixedArgs.join(" ")}], projects=${config.godotImport.approvedProjectRoots.join(", ") || "(none)"}, timeout=${config.godotImport.defaultTimeoutSeconds}/${config.godotImport.maxTimeoutSeconds}s`,
         `Task Python: bootstrap=${taskExecutionStatus.available ? "available" : taskExecutionStatus.configured ? "configured-unavailable" : "unconfigured"}, ordinary fallback=false`,
         `Asset intake: PNG max=${MAX_PNG_IMPORT_BYTES} bytes; connect/headers=${DEFAULT_ASSET_DOWNLOAD_TIMEOUTS.connectOrHeadersMs}ms; idle=${DEFAULT_ASSET_DOWNLOAD_TIMEOUTS.idleReadMs}ms; total=${DEFAULT_ASSET_DOWNLOAD_TIMEOUTS.totalMs}ms; signed URLs persisted=false`,
         `Runners: ${formatRunnerSummary(runnerRegistry.runners)}`,

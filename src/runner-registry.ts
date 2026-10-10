@@ -29,6 +29,7 @@ import {
   applyBoundedOverride,
   argumentPolicyName,
   expandHome,
+  withDotnetRuntime,
   cloneDefinition,
   isRunnerName,
   isRecord,
@@ -147,10 +148,9 @@ export class RunnerRegistry {
     }
 
     const executable = await this.locateExecutable(name);
-    const environment = environmentForExecutable(
-      executable,
-      this.env,
-      this.platform,
+    const environment = this.finalizeEnvironment(
+      name,
+      environmentForExecutable(executable, this.env, this.platform),
     );
     const probedVersion = await probeVersion(
       executable,
@@ -183,10 +183,9 @@ export class RunnerRegistry {
       );
     }
 
-    const environment = environmentForExecutable(
-      executable,
-      this.env,
-      this.platform,
+    const environment = this.finalizeEnvironment(
+      name,
+      environmentForExecutable(executable, this.env, this.platform),
     );
     const version = await probeVersion(
       executable,
@@ -365,6 +364,16 @@ export class RunnerRegistry {
         diagnostics: this.diagnostics,
       });
     }
+  }
+
+  private finalizeEnvironment(
+    name: string,
+    environment: NodeJS.ProcessEnv,
+  ): NodeJS.ProcessEnv {
+    if (name === "godot" || name === "godot-mono") {
+      return withDotnetRuntime(environment, this.platform);
+    }
+    return environment;
   }
 
   private async locateExecutable(name: RunnerName): Promise<string> {
