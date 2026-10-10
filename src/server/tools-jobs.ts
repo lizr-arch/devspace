@@ -14,6 +14,7 @@ import {
   MAX_WAIT_SECONDS,
 } from "../background-jobs.js";
 import { MAX_ARTIFACT_ROOTS } from "../artifact-ledger.js";
+import { JOB_RETENTION_CLASSES } from "../job-retention.js";
 import { loadCaptureProfile } from "../capture-profiles.js";
 import {
   resultOutputSchema,
@@ -376,10 +377,26 @@ export function registerJobTools(server: McpServer, ctx: ServerContext): void {
           .describe(
             `Maximum jobs to return. Defaults to ${DEFAULT_LIST_JOBS_LIMIT}; capped at ${MAX_LIST_JOBS_LIMIT}.`,
           ),
+        retention: z
+          .boolean()
+          .optional()
+          .describe(
+            "Also return a READ-ONLY lifecycle preview of the whole job store: per-class counts and bytes, the only records a cleanup could ever consider, and the records that are protected (running, recovery-pending, failure evidence, unattributed). Nothing is deleted.",
+          ),
+        succeededRetentionDays: z
+          .number()
+          .int()
+          .min(1)
+          .max(3650)
+          .optional()
+          .describe(
+            "Retention window applied to succeeded job records when retention=true. Defaults to 30 days. Failed, cancelled, timed-out and interrupted records are never eligible.",
+          ),
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
       outputSchema: resultOutputSchema({
         jobs: z.array(jobSnapshotOutputSchema),
+        retention: z.unknown().optional(),
       }),
       ...widgetMeta("list_jobs", "job"),
       annotations: {
@@ -389,7 +406,14 @@ export function registerJobTools(server: McpServer, ctx: ServerContext): void {
         openWorldHint: false,
       },
     },
-    async ({ workspaceId, activeOnly, limit, projectMemoryReceiptId }) => {
+    async ({
+      workspaceId,
+      activeOnly,
+      limit,
+      retention,
+      succeededRetentionDays,
+      projectMemoryReceiptId,
+    }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
@@ -398,11 +422,26 @@ export function registerJobTools(server: McpServer, ctx: ServerContext): void {
         projectMemoryReceiptId,
       );
       const listed = jobs.list(workspaceId, { activeOnly, limit });
+      const retentionPreview = retention
+        ? jobs.jobRetentionPreview(succeededRetentionDays)
+        : undefined;
       const active = listed.filter(
         (job) => job.status === "running" || job.status === "cancelling",
       ).length;
+      const retentionText = retentionPreview
+        ? [
+            "",
+            `Job store retention preview (READ-ONLY, deletes nothing): ${retentionPreview.totalRecords} record(s), ${(retentionPreview.totalBytes / 1024 / 1024).toFixed(1)} MiB.`,
+            ...JOB_RETENTION_CLASSES.map(
+              (kind) =>
+                `  ${kind}: ${retentionPreview.byClass[kind].count}`,
+            ),
+            `  eligible for a future cleanup: ${retentionPreview.expirableCandidates.length}`,
+            ...retentionPreview.notes.map((note) => `  note: ${note}`),
+          ].join("\n")
+        : "";
       const result =
-        listed.length === 0
+        (listed.length === 0
           ? "No background jobs found for this workspace."
           : [
               `Found ${listed.length} background job(s); ${active} active.`,
@@ -410,7 +449,7 @@ export function registerJobTools(server: McpServer, ctx: ServerContext): void {
                 (job) =>
                   `${job.jobId}: ${job.status} · ${job.runner} · ${job.label ?? job.args.join(" ")}`,
               ),
-            ].join("\n");
+            ].join("\n")) + retentionText;
       logToolCall(config, {
         tool: "list_jobs",
         workspaceId,
@@ -427,7 +466,7 @@ export function registerJobTools(server: McpServer, ctx: ServerContext): void {
             summary: { count: listed.length, active },
           },
         },
-        structuredContent: { result, jobs: listed },
+        structuredContent: { result, jobs: listed, retention: retentionPreview },
       };
     },
   );

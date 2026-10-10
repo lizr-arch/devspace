@@ -4,6 +4,14 @@ import {
   spawnSync,
   type ChildProcessByStdio,
 } from "node:child_process";
+import {
+  JobResourceLocks,
+  sharedResourceLocks,
+} from "./job-resource-locks.js";
+import {
+  previewJobRetention,
+  type JobRetentionPreview,
+} from "./job-retention.js";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -99,6 +107,9 @@ export class BackgroundJobManager {
   private readonly jobs = new Map<string, LiveJob>();
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly jobsDir: string;
+  // Shared with the declared-task path so a project_task build cannot race a
+  // background job in the same workspace.
+  private readonly resourceLocks = sharedResourceLocks;
   private initialized = false;
   private closed = false;
 
@@ -193,6 +204,20 @@ export class BackgroundJobManager {
       artifactBaseline,
       captureProfile: input.captureProfile,
     };
+
+    // Take the workspace / Godot-cache locks before the process exists. A
+    // rejected acquisition must not leave a half-started job behind.
+    const lockRequests = JobResourceLocks.requestsFor({
+      runner: input.runner,
+      workspaceRoot: input.workspaceRoot,
+      godotEditorImport: input.godotEditorImport === true,
+    });
+    this.resourceLocks.acquire({
+      jobId,
+      runner: input.runner,
+      workspaceRoot: input.workspaceRoot,
+      requests: lockRequests,
+    });
 
     writeFileSync(this.logPath(jobId), "", { mode: 0o600 });
     this.jobs.set(jobId, job);
@@ -367,6 +392,20 @@ export class BackgroundJobManager {
     return log.subarray(0, maxBytes).toString("utf8");
   }
 
+  /**
+   * Non-terminal job ids rooted at a workspace. Used by the workspace
+   * lifecycle audit so a workspace with work in flight is never reported as
+   * reclaimable.
+   */
+  activeJobIdsForRoot(workspaceRoot: string): string[] {
+    this.initialize();
+    return [...this.jobs.values()]
+      .filter(
+        (job) => job.workspaceRoot === workspaceRoot && !isTerminal(job.status),
+      )
+      .map((job) => job.jobId);
+  }
+
   list(workspaceId: string, options: ListJobsOptions = {}): JobSnapshot[] {
     this.initialize();
     const limit = options.limit ?? DEFAULT_LIST_JOBS_LIMIT;
@@ -461,6 +500,9 @@ export class BackgroundJobManager {
   close(): void {
     this.initialize();
     this.closed = true;
+    // Every job is about to become terminal (interrupted), so no lock may
+    // outlive this process.
+    this.resourceLocks.releaseAll();
     for (const job of this.jobs.values()) {
       if (isTerminal(job.status) && !job.processCleanupPending) continue;
       if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
@@ -665,6 +707,9 @@ export class BackgroundJobManager {
       }
     }
     job.child = undefined;
+    // The job is terminal at this point: release its resources immediately so a
+    // cancelled or timed-out job can never strand a lock.
+    this.resourceLocks.release(job.jobId);
     if (this.closed && job.status === "interrupted") {
       this.completeProcessCleanup(job);
       this.notifyWaiters(job.jobId);
@@ -687,12 +732,30 @@ export class BackgroundJobManager {
     job.endedAt = new Date().toISOString();
     job.child = undefined;
     this.completeProcessCleanup(job);
+    this.resourceLocks.release(job.jobId);
     this.persist(job);
     this.notifyWaiters(job.jobId);
     void this.finalizeArtifacts(job);
   }
 
+  /** Currently held resource locks, for diagnostics and tests. */
+  resourceLockSnapshot() {
+    return this.resourceLocks.snapshot();
+  }
 
+  /**
+   * Read-only lifecycle preview for the job store. It classifies every record
+   * and reports what a cleanup WOULD consider; it never removes anything.
+   */
+  jobRetentionPreview(succeededRetentionDays?: number): JobRetentionPreview {
+    this.initialize();
+    return previewJobRetention({
+      jobsDirectory: this.jobsDir,
+      liveStatus: (jobId) => this.jobs.get(jobId)?.status,
+      needsRecovery: (jobId) => this.jobs.get(jobId)?.processCleanupPending === true,
+      succeededRetentionDays,
+    });
+  }
 
   private persist(job: LiveJob): void {
     const persisted = {

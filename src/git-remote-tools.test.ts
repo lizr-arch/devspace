@@ -15,6 +15,7 @@ import {
   expectCode,
   shellQuote,
   delay,
+  TEST_DESTINATION_BRANCH,
 } from "./git-test-helpers.js";
 
 const suite = new TestSuite();
@@ -25,7 +26,7 @@ test("git_fetch and git_push reject an exact remote URL binding mismatch before 
   try {
     const trackingBefore = await revParse(
       fixture.client,
-      "refs/remotes/origin/main",
+      `refs/remotes/origin/${TEST_DESTINATION_BRANCH}`,
     );
     const remoteSha = await commitFile(
       fixture.producer,
@@ -33,7 +34,7 @@ test("git_fetch and git_push reject an exact remote URL binding mismatch before 
       "remote update\n",
       "remote update",
     );
-    await git(fixture.producer, ["push", "origin", "main"]);
+    await git(fixture.producer, ["push", "origin", `main:refs/heads/${TEST_DESTINATION_BRANCH}`]);
     const mismatchedBinding = {
       origin: [join(fixture.root, "different-remote.git")],
     };
@@ -48,7 +49,7 @@ test("git_fetch and git_push reject an exact remote URL binding mismatch before 
       "GIT_REMOTE_URL_MISMATCH",
     );
     assert.equal(
-      await revParse(fixture.client, "refs/remotes/origin/main"),
+      await revParse(fixture.client, `refs/remotes/origin/${TEST_DESTINATION_BRANCH}`),
       trackingBefore,
       "URL mismatch must be rejected before fetch updates tracking refs",
     );
@@ -69,9 +70,9 @@ test("git_fetch and git_push reject an exact remote URL binding mismatch before 
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
         approvedRemoteUrls: mismatchedBinding,
-        approvedDestinationBranches: ["main"],
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
         remote: "origin",
-        destinationBranch: "main",
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
       }),
@@ -82,11 +83,11 @@ test("git_fetch and git_push reject an exact remote URL binding mismatch before 
       "URL mismatch must be rejected before the remote pre-receive hook runs",
     );
     assert.equal(
-      await revParse(fixture.client, "refs/remotes/origin/main"),
+      await revParse(fixture.client, `refs/remotes/origin/${TEST_DESTINATION_BRANCH}`),
       trackingBefore,
       "URL mismatch must be rejected before push performs its internal fetch",
     );
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
   } finally {
     await fixture.cleanup();
   }
@@ -97,7 +98,7 @@ test("git_push performs an exact fast-forward push and verifies the remote", asy
   try {
     const remoteBefore = await revParse(
       fixture.client,
-      "refs/remotes/origin/main",
+      `refs/remotes/origin/${TEST_DESTINATION_BRANCH}`,
     );
     const localSha = await commitFile(
       fixture.client,
@@ -109,10 +110,10 @@ test("git_push performs an exact fast-forward push and verifies the remote", asy
     const result = await pushGit({
       workspaceRoot: fixture.client,
       approvedRemotes: ["origin"],
-      approvedDestinationBranches: ["main"],
+      approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
       remote: "origin",
       sourceRef: "HEAD",
-      destinationBranch: "main",
+      destinationBranch: TEST_DESTINATION_BRANCH,
       expectedLocalSha: localSha,
       expectedRemoteSha: remoteBefore,
     });
@@ -123,9 +124,9 @@ test("git_push performs an exact fast-forward push and verifies the remote", asy
     assert.equal(result.pushSucceeded, true);
     assert.equal(result.remoteShaAfter, localSha);
     assert.equal(result.remoteContainsLocal, true);
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), localSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), localSha);
     assert.equal(
-      await revParse(fixture.client, "refs/remotes/origin/main"),
+      await revParse(fixture.client, `refs/remotes/origin/${TEST_DESTINATION_BRANCH}`),
       localSha,
     );
     assert.deepEqual(await snapshotRepository(fixture.client), before);
@@ -137,7 +138,7 @@ test("git_push performs an exact fast-forward push and verifies the remote", asy
 test("git_push rejects remote SHA mismatch before pushing", async () => {
   const fixture = await createRemoteFixture("push-remote-mismatch");
   try {
-    const remoteBefore = await revParse(fixture.bare, "refs/heads/main");
+    const remoteBefore = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
     const localSha = await commitFile(
       fixture.client,
       "client.txt",
@@ -148,14 +149,14 @@ test("git_push rejects remote SHA mismatch before pushing", async () => {
       pushGit({
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: localSha,
       }),
       "GIT_REMOTE_CHANGED",
     );
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteBefore);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteBefore);
   } finally {
     await fixture.cleanup();
   }
@@ -176,20 +177,20 @@ test("git_push rejects non-fast-forward history before push", async () => {
       "producer update\n",
       "producer update",
     );
-    await git(fixture.producer, ["push", "origin", "main"]);
+    await git(fixture.producer, ["push", "origin", `main:refs/heads/${TEST_DESTINATION_BRANCH}`]);
 
     await expectCode(
       pushGit({
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
       }),
       "GIT_PUSH_NON_FAST_FORWARD",
     );
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
   } finally {
     await fixture.cleanup();
   }
@@ -198,7 +199,7 @@ test("git_push rejects non-fast-forward history before push", async () => {
 test("git_push enforces approved remote and destination branch policy", async () => {
   const fixture = await createRemoteFixture("push-policy");
   try {
-    const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+    const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
     const localSha = await commitFile(
       fixture.client,
       "client.txt",
@@ -209,8 +210,8 @@ test("git_push enforces approved remote and destination branch policy", async ()
       pushGit({
         workspaceRoot: fixture.client,
         approvedRemotes: [],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
       }),
@@ -221,13 +222,13 @@ test("git_push enforces approved remote and destination branch policy", async ()
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
         approvedDestinationBranches: ["release"],
-        destinationBranch: "main",
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
       }),
       "GIT_DESTINATION_BRANCH_NOT_APPROVED",
     );
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
   } finally {
     await fixture.cleanup();
   }
@@ -237,7 +238,7 @@ for (const dirtyKind of ["staged", "unstaged", "untracked"] as const) {
   test(`git_push rejects a ${dirtyKind} workspace`, async () => {
     const fixture = await createRemoteFixture(`push-dirty-${dirtyKind}`);
     try {
-      const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+      const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
       const localSha = await commitFile(
         fixture.client,
         "client.txt",
@@ -256,14 +257,14 @@ for (const dirtyKind of ["staged", "unstaged", "untracked"] as const) {
         pushGit({
           workspaceRoot: fixture.client,
           approvedRemotes: ["origin"],
-          approvedDestinationBranches: ["main"],
-          destinationBranch: "main",
+          approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+          destinationBranch: TEST_DESTINATION_BRANCH,
           expectedLocalSha: localSha,
           expectedRemoteSha: remoteSha,
         }),
         "GIT_WORKSPACE_NOT_CLEAN",
       );
-      assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+      assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
     } finally {
       await fixture.cleanup();
     }
@@ -273,7 +274,7 @@ for (const dirtyKind of ["staged", "unstaged", "untracked"] as const) {
 test("git_push rejects detached HEAD", async () => {
   const fixture = await createRemoteFixture("push-detached");
   try {
-    const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+    const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
     const localSha = await commitFile(
       fixture.client,
       "client.txt",
@@ -285,14 +286,14 @@ test("git_push rejects detached HEAD", async () => {
       pushGit({
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
       }),
       "GIT_DETACHED_HEAD",
     );
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
   } finally {
     await fixture.cleanup();
   }
@@ -301,7 +302,7 @@ test("git_push rejects detached HEAD", async () => {
 test("git_push surfaces remote hook rejection and disables local pre-push hooks", async () => {
   const fixture = await createRemoteFixture("push-hook-reject");
   try {
-    const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+    const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
     const localSha = await commitFile(
       fixture.client,
       "client.txt",
@@ -323,8 +324,8 @@ test("git_push surfaces remote hook rejection and disables local pre-push hooks"
       pushGit({
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
       }),
@@ -332,7 +333,7 @@ test("git_push surfaces remote hook rejection and disables local pre-push hooks"
     );
     assert.equal(await readFile(remoteMarker, "utf8"), "ran");
     await assert.rejects(readFile(localMarker));
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
   } finally {
     await fixture.cleanup();
   }
@@ -341,7 +342,7 @@ test("git_push surfaces remote hook rejection and disables local pre-push hooks"
 test("git_push times out a delayed remote rejection without updating the remote", async () => {
   const fixture = await createRemoteFixture("push-timeout");
   try {
-    const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+    const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
     const localSha = await commitFile(
       fixture.client,
       "client.txt",
@@ -357,8 +358,8 @@ test("git_push times out a delayed remote rejection without updating the remote"
       pushGit({
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
         timeoutMs: 100,
@@ -366,7 +367,7 @@ test("git_push times out a delayed remote rejection without updating the remote"
       "GIT_TIMEOUT",
     );
     await delay(1_200);
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
   } finally {
     await fixture.cleanup();
   }
@@ -375,7 +376,7 @@ test("git_push times out a delayed remote rejection without updating the remote"
 test("git_push kills a delayed accepting remote process group on timeout", async () => {
   const fixture = await createRemoteFixture("push-timeout-accept");
   try {
-    const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+    const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
     const localSha = await commitFile(
       fixture.client,
       "client.txt",
@@ -388,8 +389,8 @@ test("git_push kills a delayed accepting remote process group on timeout", async
       pushGit({
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
         timeoutMs: 100,
@@ -397,7 +398,7 @@ test("git_push kills a delayed accepting remote process group on timeout", async
       "GIT_TIMEOUT",
     );
     await delay(1_200);
-    assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+    assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
   } finally {
     await fixture.cleanup();
   }
@@ -406,7 +407,7 @@ test("git_push kills a delayed accepting remote process group on timeout", async
 test("remote operations in linked worktrees are serialized by their common Git directory", async () => {
   const fixture = await createRemoteFixture("common-dir-mutex");
   try {
-    const remoteBase = await revParse(fixture.bare, "refs/heads/main");
+    const remoteBase = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
     await git(fixture.producer, [
       "push",
       "origin",

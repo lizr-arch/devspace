@@ -1,6 +1,11 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
+import {
+  isProtectedDefaultBranch,
+  isSafeAuthorizationBranch,
+  type GitBranchAuthorization,
+} from "./git-branch-authorization.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import {
   DEFAULT_MAX_MCP_SESSIONS,
@@ -32,6 +37,12 @@ export interface GitRemoteWritePolicy {
   enabled: boolean;
   approvedRemotes: string[];
   approvedDestinationBranches: string[];
+  /**
+   * Scoped grants that add to the static list at call time. Each names one
+   * exact branch in one exact repository, may carry an expiry, and can be
+   * revoked without deleting the record.
+   */
+  branchAuthorizations: GitBranchAuthorization[];
   approvedRepositoryRoots: string[];
   approvedRemoteUrls: Record<string, string[]>;
   allowForce: false;
@@ -449,8 +460,20 @@ function parseGitRemoteWritePolicy(
     if (!isSafeConfiguredBranch(branch)) {
       throw new Error(`Invalid approved Git destination branch: ${branch}`);
     }
+    // A default branch must never be a standing grant. Reach it through an
+    // explicit, time-boxed branchAuthorization so a one-off release push
+    // cannot silently become permanent.
+    if (isProtectedDefaultBranch(branch)) {
+      throw new Error(
+        `gitRemoteWrite.approvedDestinationBranches must not contain the protected default branch ${branch}. Use a scoped, expiring gitRemoteWrite.branchAuthorizations entry instead.`,
+      );
+    }
   }
 
+  const branchAuthorizations = parseBranchAuthorizations(
+    value?.branchAuthorizations,
+    approvedRepositoryRoots,
+  );
   for (const root of approvedRepositoryRoots) {
     if (
       !allowedRoots.some((allowedRoot) => isPathInsideRoot(root, allowedRoot))
@@ -505,6 +528,7 @@ function parseGitRemoteWritePolicy(
     enabled,
     approvedRemotes,
     approvedDestinationBranches,
+    branchAuthorizations,
     approvedRepositoryRoots,
     approvedRemoteUrls,
     allowForce: false,
@@ -514,6 +538,82 @@ function parseGitRemoteWritePolicy(
   };
 }
 
+/**
+ * Validate scoped branch authorizations. Every entry must name a safe branch,
+ * an approved repository root, and a parseable ISO grant time; an expiry, when
+ * present, must also parse. Malformed entries are rejected rather than ignored,
+ * because a silently dropped authorization would look like a policy change.
+ */
+function parseBranchAuthorizations(
+  value: unknown,
+  approvedRepositoryRoots: string[],
+): GitBranchAuthorization[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("gitRemoteWrite.branchAuthorizations must be an array");
+  }
+  const parsed: GitBranchAuthorization[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      throw new Error("Invalid gitRemoteWrite.branchAuthorizations entry");
+    }
+    const raw = entry as Record<string, unknown>;
+    const branch = raw.branch;
+    const repositoryRoot = raw.repositoryRoot;
+    const grantedAt = raw.grantedAt;
+    if (typeof branch !== "string" || !isSafeAuthorizationBranch(branch)) {
+      throw new Error(`Invalid authorized branch: ${String(branch)}`);
+    }
+    if (typeof repositoryRoot !== "string" || !repositoryRoot) {
+      throw new Error(
+        `Authorization for ${branch} must name an explicit repositoryRoot`,
+      );
+    }
+    const resolvedRoot = resolve(expandHomePath(repositoryRoot));
+    if (!approvedRepositoryRoots.includes(resolvedRoot)) {
+      throw new Error(
+        `Authorization for ${branch} names a repository root that is not approved: ${resolvedRoot}`,
+      );
+    }
+    if (typeof grantedAt !== "string" || Number.isNaN(Date.parse(grantedAt))) {
+      throw new Error(
+        `Authorization for ${branch} must carry a parseable ISO grantedAt`,
+      );
+    }
+    const expiresAt = raw.expiresAt;
+    if (
+      expiresAt !== undefined &&
+      (typeof expiresAt !== "string" || Number.isNaN(Date.parse(expiresAt)))
+    ) {
+      throw new Error(`Authorization for ${branch} has an unparseable expiresAt`);
+    }
+    const revokedAt = raw.revokedAt;
+    if (
+      revokedAt !== undefined &&
+      (typeof revokedAt !== "string" || Number.isNaN(Date.parse(revokedAt)))
+    ) {
+      throw new Error(`Authorization for ${branch} has an unparseable revokedAt`);
+    }
+    const key = `${resolvedRoot}\u0000${branch}`;
+    if (seen.has(key)) {
+      throw new Error(
+        `Duplicate branch authorization for ${branch} in ${resolvedRoot}`,
+      );
+    }
+    seen.add(key);
+    parsed.push({
+      branch,
+      repositoryRoot: resolvedRoot,
+      grantedAt,
+      expiresAt: expiresAt as string | undefined,
+      grantedBy: typeof raw.grantedBy === "string" ? raw.grantedBy : undefined,
+      note: typeof raw.note === "string" ? raw.note : undefined,
+      revokedAt: revokedAt as string | undefined,
+    });
+  }
+  return parsed;
+}
 
 
 type DevspaceUserConfigGitRemoteWrite = NonNullable<

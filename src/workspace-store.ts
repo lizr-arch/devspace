@@ -37,6 +37,8 @@ export interface WorkspaceStore {
   getSession(id: string): WorkspaceSession | undefined;
   listSessions(limit?: number): WorkspaceSession[];
   touchSession(id: string): void;
+  /** Remove a single workspace record. Returns true when a row was deleted. */
+  deleteSession(id: string): boolean;
   updateSessionAdditionalRoots?(id: string, roots: AdditionalRoot[]): void;
   close?(): void;
 }
@@ -121,6 +123,14 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .limit(limit)
       .all()
       .map(rowToWorkspaceSession);
+  }
+
+  deleteSession(id: string): boolean {
+    const result = this.database.db
+      .delete(workspaceSessions)
+      .where(eq(workspaceSessions.id, id))
+      .run();
+    return result.changes > 0;
   }
 
   touchSession(id: string): void {

@@ -370,7 +370,7 @@ function normalizeGitPaths(paths: string[]): string[] {
       `GIT_INPUT_INVALID: At most ${MAX_GIT_PATHS} paths are allowed.`,
     );
   }
-  return [...new Set(paths.map(normalizeWorkspaceRelativePath))];
+  return [...new Set(paths.map((path) => normalizeWorkspaceRelativePath(path)))];
 }
 
 function normalizeRequiredGitPaths(paths: string[]): string[] {

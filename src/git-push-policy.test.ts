@@ -16,6 +16,7 @@ import {
   git,
   revParse,
   TestSuite,
+  TEST_DESTINATION_BRANCH,
 } from "./git-test-helpers.js";
 
 const suite = new TestSuite();
@@ -208,7 +209,7 @@ try {
   await test("git_push refuses refspec, force, deletion, and tag shapes", async () => {
     const fixture = await createRemoteFixture("push-shapes");
     try {
-      const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+      const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
       const localSha = await commitFile(
         fixture.client,
         "client.txt",
@@ -224,8 +225,8 @@ try {
       const base = {
         workspaceRoot: fixture.client,
         approvedRemotes: ["origin"],
-        approvedDestinationBranches: ["main"],
-        destinationBranch: "main",
+        approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+        destinationBranch: TEST_DESTINATION_BRANCH,
         expectedLocalSha: localSha,
         expectedRemoteSha: remoteSha,
       };
@@ -285,7 +286,7 @@ try {
   await test("git_push refuses a source ref that is not the workspace HEAD", async () => {
     const fixture = await createRemoteFixture("push-source-head");
     try {
-      const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+      const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
       await git(fixture.client, ["switch", "-c", "side"]);
       await commitFile(fixture.client, "side.txt", "side\n", "side commit");
       await git(fixture.client, ["switch", "main"]);
@@ -299,15 +300,15 @@ try {
         pushGit({
           workspaceRoot: fixture.client,
           approvedRemotes: ["origin"],
-          approvedDestinationBranches: ["main"],
+          approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
           sourceRef: "side",
-          destinationBranch: "main",
+          destinationBranch: TEST_DESTINATION_BRANCH,
           expectedLocalSha: localSha,
           expectedRemoteSha: remoteSha,
         }),
         "GIT_SOURCE_NOT_HEAD",
       );
-      assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+      assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
     } finally {
       await fixture.cleanup();
     }
@@ -316,7 +317,7 @@ try {
   await test("git_push refuses an unapproved destination even when it exists remotely", async () => {
     const fixture = await createRemoteFixture("push-main-denied");
     try {
-      const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+      const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
       const localSha = await commitFile(
         fixture.client,
         "client.txt",
@@ -333,13 +334,13 @@ try {
             "feat/wego-p0-gui-performance",
             "fix/wego-p1-locale-native-crash",
           ],
-          destinationBranch: "main",
+          destinationBranch: TEST_DESTINATION_BRANCH,
           expectedLocalSha: localSha,
           expectedRemoteSha: remoteSha,
         }),
         "GIT_DESTINATION_BRANCH_NOT_APPROVED",
       );
-      assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+      assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
     } finally {
       await fixture.cleanup();
     }
@@ -348,7 +349,7 @@ try {
   await test("git_push refuses a remote URL that is not the exact approved binding", async () => {
     const fixture = await createRemoteFixture("push-exact-url");
     try {
-      const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+      const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
       const localSha = await commitFile(
         fixture.client,
         "client.txt",
@@ -362,14 +363,14 @@ try {
           approvedRemoteUrls: {
             origin: [`${fixture.bare}-near-miss`],
           },
-          approvedDestinationBranches: ["main"],
-          destinationBranch: "main",
+          approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+          destinationBranch: TEST_DESTINATION_BRANCH,
           expectedLocalSha: localSha,
           expectedRemoteSha: remoteSha,
         }),
         "GIT_REMOTE_URL_MISMATCH",
       );
-      assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+      assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
     } finally {
       await fixture.cleanup();
     }
@@ -427,7 +428,7 @@ try {
   await test("git_fetch/git_push refuse repository-local transport and credential config", async () => {
     const fixture = await createRemoteFixture("push-local-config");
     try {
-      const remoteSha = await revParse(fixture.bare, "refs/heads/main");
+      const remoteSha = await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`);
       const localSha = await commitFile(
         fixture.client,
         "client.txt",
@@ -460,8 +461,8 @@ try {
           pushGit({
             workspaceRoot: fixture.client,
             approvedRemotes: ["origin"],
-            approvedDestinationBranches: ["main"],
-            destinationBranch: "main",
+            approvedDestinationBranches: [TEST_DESTINATION_BRANCH],
+            destinationBranch: TEST_DESTINATION_BRANCH,
             expectedLocalSha: localSha,
             expectedRemoteSha: remoteSha,
           }),
@@ -470,7 +471,7 @@ try {
         // Unset works because the key resolves case-insensitively.
         await git(fixture.client, ["config", "--local", "--unset", key]);
       }
-      assert.equal(await revParse(fixture.bare, "refs/heads/main"), remoteSha);
+      assert.equal(await revParse(fixture.bare, `refs/heads/${TEST_DESTINATION_BRANCH}`), remoteSha);
       // The repository is only rejected for remote I/O, never mutated.
       const status = await git(fixture.client, ["status", "--porcelain=v1"]);
       assert.equal(status.trim(), "");

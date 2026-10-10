@@ -43,6 +43,18 @@ writeFileSync(
   }),
 );
 
+// Independent workspaces used by the concurrency test: the resource lock is
+// scoped per workspace, so these must be able to run at the same time.
+const parallelWorkspaceRoot = join(root, "workspace-b");
+const thirdWorkspaceRoot = join(root, "workspace-c");
+for (const dir of [parallelWorkspaceRoot, thirdWorkspaceRoot]) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "package.json"),
+    readFileSync(join(workspaceRoot, "package.json")),
+  );
+}
+
 const manager = new BackgroundJobManager(stateDir);
 try {
   assert.throws(() => validateJobArguments("npm", ["install"]), /only allow/);
@@ -249,20 +261,41 @@ if (process.argv.includes("--version")) {
     args: ["run", "wait"],
     timeoutSeconds: 30,
   });
-  const parallelB = await manager.start({
-    workspaceId: "ws_test",
-    workspaceRoot,
-    workingDirectory: workspaceRoot,
-    runner: "npm",
-    args: ["run", "wait"],
-    timeoutSeconds: 30,
-  });
+  // Two INDEPENDENT workspaces may run in parallel: the resource lock is
+  // scoped per workspace, so unrelated work is not serialized. The global cap
+  // is what rejects the third job.
+  // A second job in the SAME workspace is refused by the workspace build lock,
+  // which is what stops two builds from overwriting each other's assemblies.
   await assert.rejects(
     () =>
       manager.start({
         workspaceId: "ws_test",
         workspaceRoot,
         workingDirectory: workspaceRoot,
+        runner: "npm",
+        args: ["run", "verify"],
+        timeoutSeconds: 30,
+      }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "JOB_RESOURCE_BUSY");
+      return true;
+    },
+  );
+  const parallelB = await manager.start({
+    workspaceId: "ws_test_b",
+    workspaceRoot: parallelWorkspaceRoot,
+    workingDirectory: parallelWorkspaceRoot,
+    runner: "npm",
+    args: ["run", "wait"],
+    timeoutSeconds: 30,
+  });
+  // A third job in a third workspace exceeds the global cap of two.
+  await assert.rejects(
+    () =>
+      manager.start({
+        workspaceId: "ws_test_c",
+        workspaceRoot: thirdWorkspaceRoot,
+        workingDirectory: thirdWorkspaceRoot,
         runner: "npm",
         args: ["run", "verify"],
         timeoutSeconds: 30,

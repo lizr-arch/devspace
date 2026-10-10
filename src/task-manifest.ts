@@ -25,7 +25,20 @@ export interface TaskParameter {
   type: "string" | "path" | "sha256" | "int";
   access?: "read" | "write";
   required?: boolean;
+  /**
+   * Anchored regular expression the value must match in full. Enforced for
+   * `string` and `path` parameters. This was previously parsed but never
+   * applied, so a manifest could declare a constraint that silently did
+   * nothing.
+   */
   pattern?: string;
+  /**
+   * Closed set of accepted values for a `string` parameter. This is the
+   * allowlist mechanism for passing a named variant — for example one test
+   * suite runner — into a fixed command without opening a general-purpose
+   * argument channel.
+   */
+  enum?: string[];
   min?: number;
   max?: number;
 }
@@ -35,6 +48,16 @@ export interface TaskPathGrant {
   access: "read_only" | "read_write";
 }
 
+/**
+ * Names of the built-in result parsers. A parser turns a task's raw output into
+ * machine-readable counts while the raw log is always preserved verbatim.
+ */
+export type TaskResultParserName = "triaregna_v1";
+
+export const TASK_RESULT_PARSERS: readonly TaskResultParserName[] = [
+  "triaregna_v1",
+];
+
 export interface TaskDefinition {
   mode: TaskMode;
   command: string[];
@@ -42,6 +65,11 @@ export interface TaskDefinition {
   timeout_seconds?: number;
   parameters?: Record<string, TaskParameter>;
   secrets?: TaskSecretBinding[];
+  /**
+   * Optional structured result parser for this task's output. Purely additive:
+   * raw stdout/stderr and the exit code are always returned regardless.
+   */
+  result_parser?: TaskResultParserName;
 }
 
 export interface TaskManifest {
@@ -287,7 +315,60 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest {
               recoverable: true,
             });
           }
+          // Fail closed on an unusable pattern: a constraint that cannot be
+          // compiled must not silently degrade into "no constraint".
+          try {
+            new RegExp(pd.pattern);
+          } catch {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.pattern`,
+              message: `Task ${id}: parameter ${pname} pattern is not a valid regular expression.`,
+              recoverable: true,
+            });
+          }
           param.pattern = pd.pattern;
+        }
+        if (pd.enum !== undefined) {
+          if (
+            !Array.isArray(pd.enum) ||
+            pd.enum.length === 0 ||
+            pd.enum.some(
+              (entry) => typeof entry !== "string" || entry.length === 0,
+            )
+          ) {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.enum`,
+              message: `Task ${id}: parameter ${pname} enum must be a non-empty list of non-empty strings.`,
+              recoverable: true,
+            });
+          }
+          if (pd.type !== "string") {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.enum`,
+              message: `Task ${id}: parameter ${pname} enum is only supported for string parameters.`,
+              recoverable: true,
+            });
+          }
+          if (new Set(pd.enum).size !== pd.enum.length) {
+            throw new TaskError({
+              code: "TASK_PARAMETER_SCHEMA_INVALID",
+              manifestPath: path,
+              taskId: id,
+              field: `parameters.${pname}.enum`,
+              message: `Task ${id}: parameter ${pname} enum contains duplicate values.`,
+              recoverable: true,
+            });
+          }
+          param.enum = [...pd.enum];
         }
         if (pd.min !== undefined) {
           if (typeof pd.min !== "number") {
@@ -406,6 +487,24 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest {
       }
     }
 
+    let resultParser: TaskResultParserName | undefined;
+    if (d.result_parser !== undefined) {
+      if (
+        typeof d.result_parser !== "string" ||
+        !TASK_RESULT_PARSERS.includes(d.result_parser as TaskResultParserName)
+      ) {
+        throw new TaskError({
+          code: "TASK_PARAMETER_SCHEMA_INVALID",
+          manifestPath: path,
+          taskId: id,
+          field: "result_parser",
+          message: `Task ${id}: result_parser must be one of ${TASK_RESULT_PARSERS.join(", ")}.`,
+          recoverable: true,
+        });
+      }
+      resultParser = d.result_parser as TaskResultParserName;
+    }
+
     tasks[id] = {
       mode,
       command: d.command as string[],
@@ -413,6 +512,7 @@ export function loadTaskManifest(workspaceRoot: string): TaskManifest {
       timeout_seconds: timeout as number | undefined,
       parameters,
       secrets,
+      result_parser: resultParser,
     };
   }
 
@@ -506,6 +606,9 @@ export function validateAndSubstitute(
 ): { command: string[]; errors: ParamValidationError[] } {
   const errors: ParamValidationError[] = [];
   const subst = new Map<string, string>();
+  // A parameter that was supplied but rejected must not ALSO be reported as
+  // missing; the caller needs one actionable reason per parameter.
+  const supplied = new Set(Object.keys(params));
 
   // Validate provided params against declared parameters
   for (const [name, value] of Object.entries(params)) {
@@ -513,6 +616,31 @@ export function validateAndSubstitute(
     if (!def) {
       errors.push({ param: name, message: `Undeclared parameter: ${name}` });
       continue;
+    }
+    // `enum` and `pattern` are the only way a caller can influence a declared
+    // command, so they are enforced before any type-specific handling and
+    // before the value is recorded for substitution.
+    if (def.enum && !def.enum.includes(value)) {
+      errors.push({
+        param: name,
+        message: `Parameter ${name} must be one of: ${def.enum.join(", ")}`,
+      });
+      continue;
+    }
+    if (def.pattern) {
+      let matches = false;
+      try {
+        matches = new RegExp(`^(?:${def.pattern})$`).test(value);
+      } catch {
+        matches = false;
+      }
+      if (!matches) {
+        errors.push({
+          param: name,
+          message: `Parameter ${name} does not match the required pattern.`,
+        });
+        continue;
+      }
     }
     switch (def.type) {
       case "string":
@@ -568,7 +696,7 @@ export function validateAndSubstitute(
   // Check required params
   if (task.parameters) {
     for (const [name, def] of Object.entries(task.parameters)) {
-      if (def.required && !subst.has(name)) {
+      if (def.required && !subst.has(name) && !supplied.has(name)) {
         errors.push({
           param: name,
           message: `Required parameter ${name} is missing`,

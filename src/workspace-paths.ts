@@ -16,10 +16,26 @@ export interface ResolvedWorkspacePath {
   canonicalWorkspaceRoot: string;
 }
 
-export function normalizeWorkspaceRelativePath(value: string): string {
+export interface WorkspacePathOptions {
+  /**
+   * Allow the workspace root itself to be addressed. Only the exact root
+   * spellings `""`, `"."` and `"./"` are accepted, and only where a caller
+   * explicitly opts in (for example a Godot project whose `project.godot`
+   * lives at the workspace root). Every other caller keeps the historical
+   * rejection of root paths, so this is not a general loosening: `..`,
+   * absolute paths, backslashes and NUL bytes stay rejected in both modes.
+   */
+  allowWorkspaceRoot?: boolean;
+}
+
+const WORKSPACE_ROOT_SPELLINGS = new Set(["", ".", "./"]);
+
+export function normalizeWorkspaceRelativePath(
+  value: string,
+  options: WorkspacePathOptions = {},
+): string {
   if (
     typeof value !== "string" ||
-    value.length === 0 ||
     value.length > 512 ||
     value.includes("\0") ||
     value.includes("\\") ||
@@ -28,7 +44,13 @@ export function normalizeWorkspaceRelativePath(value: string): string {
     throw new Error(`PATH_INVALID: Invalid workspace-relative path: ${value}`);
   }
   const parts = value.split("/").filter((part) => part && part !== ".");
-  if (parts.length === 0 || parts.includes("..")) {
+  if (parts.length === 0) {
+    if (options.allowWorkspaceRoot && WORKSPACE_ROOT_SPELLINGS.has(value)) {
+      return ".";
+    }
+    throw new Error(`PATH_INVALID: Invalid workspace-relative path: ${value}`);
+  }
+  if (parts.includes("..")) {
     throw new Error(`PATH_INVALID: Invalid workspace-relative path: ${value}`);
   }
   return parts.join("/");
@@ -37,8 +59,9 @@ export function normalizeWorkspaceRelativePath(value: string): string {
 export function resolveWorkspacePath(
   workspaceRoot: string,
   value: string,
+  options: WorkspacePathOptions = {},
 ): ResolvedWorkspacePath {
-  const relativePath = normalizeWorkspaceRelativePath(value);
+  const relativePath = normalizeWorkspaceRelativePath(value, options);
   const canonicalWorkspaceRoot = realpathSync(workspaceRoot);
   const absolutePath = resolve(canonicalWorkspaceRoot, relativePath);
   if (!isPathInsideRoot(absolutePath, canonicalWorkspaceRoot)) {
@@ -63,8 +86,9 @@ export function resolveExistingWorkspacePath(
   workspaceRoot: string,
   value: string,
   kind?: WorkspaceObjectKind,
+  options: WorkspacePathOptions = {},
 ): ResolvedWorkspacePath & { stats: Stats } {
-  const resolved = resolveWorkspacePath(workspaceRoot, value);
+  const resolved = resolveWorkspacePath(workspaceRoot, value, options);
   if (!existsSync(resolved.absolutePath)) {
     throw new Error(`PATH_NOT_FOUND: Path does not exist: ${value}`);
   }

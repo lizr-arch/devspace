@@ -23,7 +23,7 @@ const coverageGroups: CoverageGroup[] = [
     visualContract: "sandbox_fixture",
   },
   {
-    tools: ["list_workspaces", "open_workspace", "resume_workspace"],
+    tools: ["list_workspaces", "open_workspace", "resume_workspace", "reclaim_workspace"],
     subsystem: "workspace lifecycle",
     functionalTests: ["src/workspaces.test.ts", "src/doctor.test.ts"],
     mode: "temp_workspace",

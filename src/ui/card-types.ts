@@ -10,6 +10,7 @@ export const TOOL_NAMES = [
   "git_diff",
   "inspect_glb",
   "resume_workspace",
+  "reclaim_workspace",
   "open_workspace",
   "project_memory_preflight",
   "read",

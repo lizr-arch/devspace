@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { inspectGitStatus } from "./git-tools.js";
+import { inspectGitStatus, runGit } from "./git-tools.js";
 import type {
   ProjectMemoryAccessObservation,
   ProjectMemoryActiveState,
@@ -58,6 +58,14 @@ import {
   type OpenWorkspaceInput,
   emptyAdditionalRootsAuthorization,
 } from "./workspace-types.js";
+import {
+  auditWorkspace,
+  type WorkspaceAudit,
+  canonicalPath,
+  listRegisteredWorktrees,
+  scanWorktreeDirectories,
+  type WorktreeDirectoryScan,
+} from "./workspace-audit.js";
 
 export type {
   LoadedAgentsFile,
@@ -72,6 +80,14 @@ export type {
   WorkspaceResolvedPath,
   OpenWorkspaceInput,
 };
+
+function realpathOf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
 
 export async function refreshWorkspaceGitAttachment(
   workspace: Workspace,
@@ -240,6 +256,190 @@ export class WorkspaceRegistry {
     }
 
     return summaries;
+  }
+
+  /**
+   * Read-only lifecycle audit for every listed workspace.
+   *
+   * The store's `status` column is written `"active"` at creation and never
+   * updated, so it cannot be trusted; this derives the real state from the
+   * filesystem and Git and refuses to call anything reclaimable unless every
+   * precondition is positively proven.
+   */
+  async auditWorkspaces(input: {
+    limit?: number;
+    /** Roots that currently have a non-terminal background job. */
+    activeJobRoots?: (workspaceRoot: string) => string[];
+  }): Promise<WorkspaceAudit[]> {
+    const summaries = await this.listWorkspaces(input.limit ?? 50);
+    const audits: WorkspaceAudit[] = [];
+    for (const summary of summaries) {
+      audits.push(
+        await auditWorkspace({
+          workspaceId: summary.workspaceId,
+          root: summary.root,
+          mode: summary.mode,
+          managed: summary.managed,
+          createdAt: summary.createdAt,
+          lastUsedAt: summary.lastUsedAt,
+          hasActiveSession: this.workspaces.has(summary.workspaceId),
+          activeJobIds: input.activeJobRoots?.(summary.root) ?? [],
+        }),
+      );
+    }
+    return audits;
+  }
+
+  /**
+   * Read-only inventory of directories under the managed worktree root that no
+   * workspace record mentions. These are invisible to every existing tool: they
+   * are neither listed nor removable.
+   *
+   * Nothing here deletes anything. The result exists so an operator can decide,
+   * with evidence, whether a directory still holds Git references, uncommitted
+   * work, unmerged commits, or is in use by another session.
+   */
+  async orphanedWorktreeAudit(input: {
+    limit?: number;
+    activeJobRoots?: (workspaceRoot: string) => string[];
+  }): Promise<{
+    scan: WorktreeDirectoryScan;
+    audits: WorkspaceAudit[];
+    truncated: boolean;
+  }> {
+    const limit = Math.min(input.limit ?? 50, 200);
+    const summaries = await this.listWorkspaces(100);
+    // Directory scans can return a symlinked spelling, so both the recorded
+    // roots and the Git listing are canonicalised before they are compared.
+    const knownRoots = summaries
+      .map((summary) => canonicalPath(summary.root));
+    const scan = scanWorktreeDirectories(this.config.worktreeRoot, knownRoots);
+    const registered = await listRegisteredWorktrees(this.config.worktreeRoot);
+    const audits: WorkspaceAudit[] = [];
+    const targets = scan.orphaned.slice(0, limit);
+    for (const directory of targets) {
+      audits.push(
+        await auditWorkspace({
+          workspaceId: null,
+          root: directory,
+          mode: "worktree",
+          managed: false,
+          createdAt: null,
+          lastUsedAt: null,
+          hasActiveSession: false,
+          activeJobIds: input.activeJobRoots?.(directory) ?? [],
+          registeredWorktrees: registered ?? undefined,
+        }),
+      );
+    }
+    return {
+      scan,
+      audits,
+      truncated: scan.orphaned.length > targets.length,
+    };
+  }
+
+  /**
+   * Remove one managed Git worktree.
+   *
+   * Safety rules, all enforced here rather than trusted to the caller:
+   *   - only managed worktrees created by DevSpace are eligible; a normal
+   *     checkout is never removed;
+   *   - the audit is re-run immediately before acting, and any risk refuses;
+   *   - the caller must echo the exact current HEAD SHA, so a worktree that
+   *     moved since it was inspected cannot be removed by a stale decision;
+   *   - removal goes through `git worktree remove` WITHOUT `--force`, so Git
+   *     itself refuses a dirty worktree as a second line of defence. No
+   *     `git clean`, no reset, no recursive directory delete.
+   */
+  async reclaimWorkspace(input: {
+    workspaceId: string;
+    expectedHeadSha: string;
+    confirmation: string;
+    /**
+     * Resolved lazily from the stored session's root. Passing job ids directly
+     * is not enough: the caller would have to look the workspace up first, and
+     * that lookup itself attaches a live session, which the active-session
+     * guard below then (correctly) refuses.
+     */
+    activeJobIdsForRoot?: (workspaceRoot: string) => string[];
+  }): Promise<{
+    workspaceId: string;
+    root: string;
+    removed: true;
+    branch: string | null;
+    headSha: string;
+    storeRecordRemoved: boolean;
+  }> {
+    const session = this.store?.getSession(input.workspaceId);
+    if (!session) throw new Error("WORKSPACE_RECLAIM_UNKNOWN: No such workspace.");
+    if (input.confirmation !== input.workspaceId) {
+      throw new Error(
+        "WORKSPACE_RECLAIM_CONFIRMATION_REQUIRED: confirmation must exactly equal the workspaceId being reclaimed.",
+      );
+    }
+    if (this.workspaces.has(input.workspaceId)) {
+      throw new Error(
+        "WORKSPACE_RECLAIM_ACTIVE: A live session is using this workspace. Close it first.",
+      );
+    }
+    if (session.mode !== "worktree" || session.managed !== true) {
+      throw new Error(
+        "WORKSPACE_RECLAIM_NOT_MANAGED_WORKTREE: Only DevSpace-managed worktrees can be reclaimed. Normal checkouts are never removed.",
+      );
+    }
+    const worktreeRoot = this.config.worktreeRoot;
+    if (!isPathInsideRoot(realpathOf(session.root), realpathOf(worktreeRoot))) {
+      throw new Error(
+        "WORKSPACE_RECLAIM_OUTSIDE_WORKTREE_ROOT: Refusing to remove a path outside the managed worktree root.",
+      );
+    }
+
+    const audit = await auditWorkspace({
+      workspaceId: session.id,
+      root: session.root,
+      mode: session.mode,
+      managed: session.managed,
+      createdAt: session.createdAt,
+      lastUsedAt: session.lastUsedAt,
+      hasActiveSession: false,
+      activeJobIds: input.activeJobIdsForRoot?.(session.root) ?? [],
+    });
+    if (!audit.reclaimable) {
+      throw new Error(
+        `WORKSPACE_RECLAIM_UNSAFE: Refusing to remove ${session.root}. ${audit.blockedReasons.join("; ")}.`,
+      );
+    }
+    if (!audit.headSha || audit.headSha !== input.expectedHeadSha) {
+      throw new Error(
+        `WORKSPACE_RECLAIM_HEAD_MISMATCH: Expected HEAD ${input.expectedHeadSha}, found ${audit.headSha ?? "unknown"}. Re-inspect before reclaiming.`,
+      );
+    }
+
+    // `git worktree remove` without --force: Git refuses a dirty or locked
+    // worktree, which is exactly the second check we want.
+    try {
+      await runGit(session.sourceRoot ?? session.root, [
+        "worktree",
+        "remove",
+        session.root,
+      ]);
+    } catch (error) {
+      throw new Error(
+        `WORKSPACE_RECLAIM_FAILED: git worktree remove refused ${session.root}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    const storeRecordRemoved = this.store?.deleteSession?.(session.id) ?? false;
+    return {
+      workspaceId: session.id,
+      root: session.root,
+      removed: true,
+      branch: audit.branch,
+      headSha: audit.headSha,
+      storeRecordRemoved,
+    };
   }
 
   getWorkspace(workspaceId: string): Workspace {

@@ -241,7 +241,7 @@ writeFileSync(
     gitRemoteWrite: {
       enabled: true,
       approvedRemotes: ["origin"],
-      approvedDestinationBranches: ["main"],
+      approvedDestinationBranches: ["devspace/integration/example"],
       approvedRepositoryRoots: [process.cwd()],
       approvedRemoteUrls: {
         origin: ["https://github.com/example/devspace.git"],
@@ -277,6 +277,7 @@ assert.deepEqual(loadConfig(baseEnv).gitRemoteWrite, {
   enabled: false,
   approvedRemotes: ["origin"],
   approvedDestinationBranches: [],
+  branchAuthorizations: [],
   approvedRepositoryRoots: [],
   approvedRemoteUrls: {},
   allowForce: false,
@@ -297,7 +298,8 @@ assert.throws(
       ...baseEnv,
       DEVSPACE_GIT_REMOTE_WRITE_ENABLED: "1",
       DEVSPACE_GIT_APPROVED_REMOTES: "origin",
-      DEVSPACE_GIT_APPROVED_DESTINATION_BRANCHES: "main",
+      DEVSPACE_GIT_APPROVED_DESTINATION_BRANCHES:
+        "devspace/integration/config-fixture",
       DEVSPACE_GIT_APPROVED_REPOSITORY_ROOTS: process.cwd(),
     }),
   /exact approvedRemoteUrls/,

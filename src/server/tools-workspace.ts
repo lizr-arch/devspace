@@ -15,11 +15,21 @@ import {
   workspaceContextToolResponse,
 } from "./server-helpers.js";
 
+function projectMemoryReceiptInputSchema() {
+  return z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional()
+    .describe(
+      "Receipt ID returned by the latest Project Memory preflight for this task. SHADOW records missing or stale IDs but does not block the tool.",
+    );
+}
+
 export function registerWorkspaceListTools(
   server: McpServer,
   ctx: ServerContext,
 ): void {
-  const { config, workspaces } = ctx;
+  const { config, workspaces, jobs } = ctx;
 
   registerAppTool(
     server,
@@ -36,9 +46,23 @@ export function registerWorkspaceListTools(
           .max(100)
           .optional()
           .describe("Maximum recent sessions to return. Defaults to 20."),
+        audit: z
+          .boolean()
+          .optional()
+          .describe(
+            "Include a read-only lifecycle audit: real state derived from disk and Git, uncommitted/untracked/unmerged/active-job risks, and whether each workspace is a safe reclamation CANDIDATE. The persisted status column is never trusted.",
+          ),
+        includeOrphans: z
+          .boolean()
+          .optional()
+          .describe(
+            "With audit=true, also inventory directories under the managed worktree root that NO workspace record mentions. These are invisible to every other tool. Read-only: nothing is removed, and each entry reports whether Git still references it, whether it holds uncommitted or unmerged work, and whether a job is running in it.",
+          ),
       },
       outputSchema: resultOutputSchema({
         workspaces: z.array(workspaceSessionOutputSchema),
+        audits: z.array(z.unknown()).optional(),
+        orphanedWorktrees: z.unknown().optional(),
       }),
       _meta: {},
       annotations: {
@@ -47,10 +71,22 @@ export function registerWorkspaceListTools(
         openWorldHint: false,
       },
     },
-    async ({ limit }) => {
+    async ({ limit, audit, includeOrphans }) => {
       const startedAt = performance.now();
       const sessions = await workspaces.listWorkspaces(limit ?? 20);
-      const result =
+      const audits = audit
+        ? await workspaces.auditWorkspaces({
+            limit: limit ?? 20,
+            activeJobRoots: (root) => jobs.activeJobIdsForRoot(root),
+          })
+        : undefined;
+      const orphanAudit =
+        audit && includeOrphans
+          ? await workspaces.orphanedWorktreeAudit({
+              activeJobRoots: (root) => jobs.activeJobIdsForRoot(root),
+            })
+          : undefined;
+      const base =
         sessions.length === 0
           ? "No resumable workspace sessions are available."
           : sessions
@@ -59,6 +95,33 @@ export function registerWorkspaceListTools(
                   `${session.workspaceId} | ${session.mode} | ${session.resumable ? "resumable" : "unavailable"} | ${session.root}`,
               )
               .join("\n");
+      const auditText = audits?.length
+        ? "\n\n" +
+          audits
+            .map((entry) => {
+              const risks = entry.risks.map((risk) => risk.code).join(",") || "none";
+              return `${entry.workspaceId ?? "(orphan)"} | ${entry.lifecycle} | lastUsed=${entry.lastUsedAt ?? "unknown"} | dirty=${entry.dirtyFileCount} untracked=${entry.untrackedFileCount} unmerged=${entry.unmergedCommitCount} | risks=${risks} | ${entry.reclaimable ? "RECLAIM_CANDIDATE" : "keep"}`;
+            })
+            .join("\n")
+        : "";
+      const orphanText = orphanAudit
+        ? "\n\n" +
+          [
+            `Orphaned worktree directories (no workspace record): ${orphanAudit.scan.orphaned.length} of ${orphanAudit.scan.directories.length} under ${orphanAudit.scan.worktreeRoot}`,
+            ...orphanAudit.audits.map((entry) => {
+              const risks =
+                entry.risks.map((risk) => risk.code).join(",") || "none";
+              return `  ${entry.root} | gitRegistered=${entry.risks.some((r) => r.code === "not_a_worktree") ? "no" : "yes"} | dirty=${entry.dirtyFileCount} untracked=${entry.untrackedFileCount} unmerged=${entry.unmergedCommitCount} | risks=${risks} | ${entry.reclaimable ? "RECLAIM_CANDIDATE" : "keep"}`;
+            }),
+            orphanAudit.truncated
+              ? "  (truncated; raise the limit for the full inventory)"
+              : "",
+            "  Read-only inventory. Nothing has been removed.",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : "";
+      const result = base + auditText + orphanText;
       logToolCall(config, {
         tool: "list_workspaces",
         success: true,
@@ -67,10 +130,82 @@ export function registerWorkspaceListTools(
       return {
         content: [textBlock(result)],
         _meta: { tool: "list_workspaces" },
-        structuredContent: { result, workspaces: sessions },
+        structuredContent: {
+          result,
+          workspaces: sessions,
+          audits,
+          orphanedWorktrees: orphanAudit,
+        },
       };
     },
   );
+
+  if (!config.readOnly) {
+    registerAppTool(
+      server,
+      "reclaim_workspace",
+      {
+        title: "Reclaim a managed worktree",
+        description:
+          "Remove ONE DevSpace-managed Git worktree after an explicit, SHA-pinned confirmation. Refuses anything with uncommitted files, untracked files, unmerged commits, a running job, a live session, or uncertain ownership. Only managed worktrees created by open_workspace(mode=\"worktree\") are eligible; normal checkouts are never removed. Removal uses `git worktree remove` WITHOUT --force, so Git independently refuses a dirty worktree. There is no recursive directory delete, no `git clean`, and no reset.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("The managed worktree workspaceId to reclaim."),
+          expectedHeadSha: z
+            .string()
+            .regex(/^[0-9a-f]{40}$/)
+            .describe(
+              "Exact current HEAD SHA from list_workspaces(audit=true). A stale decision cannot remove a worktree that has moved.",
+            ),
+          confirmWorkspaceId: z
+            .string()
+            .describe(
+              "Must exactly equal workspaceId. Guards against acting on the wrong workspace.",
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({ reclaimed: z.unknown() }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        expectedHeadSha,
+        confirmWorkspaceId,
+        projectMemoryReceiptId,
+      }) => {
+        // The safety guards must observe the workspace as it was BEFORE this
+        // call. Both getWorkspace() and observeProjectMemoryAccess() attach a
+        // live session as a side effect, which would make the active-session
+        // guard reject a workspace the caller only wanted to inspect. So the
+        // guarded action runs first and the SHADOW observation is recorded
+        // afterwards.
+        const reclaimed = await workspaces.reclaimWorkspace({
+          workspaceId,
+          expectedHeadSha,
+          confirmation: confirmWorkspaceId,
+          activeJobIdsForRoot: (root) => jobs.activeJobIdsForRoot(root),
+        });
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "reclaim_workspace",
+          projectMemoryReceiptId,
+        );
+        const result = `Reclaimed ${reclaimed.workspaceId} at ${reclaimed.root} (HEAD ${reclaimed.headSha}). Store record removed: ${reclaimed.storeRecordRemoved}.`;
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "reclaim_workspace", projectMemory },
+          structuredContent: { result, reclaimed },
+        };
+      },
+    );
+  }
 
   registerAppTool(
     server,

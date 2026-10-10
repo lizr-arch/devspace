@@ -47,6 +47,20 @@ export interface DevspaceUserConfig {
     enabled?: boolean;
     approvedRemotes?: string[];
     approvedDestinationBranches?: string[];
+    /**
+     * Scoped, optionally expiring and revocable grants that add to the static
+     * destination-branch list. This is the only way to authorize a protected
+     * default branch such as main.
+     */
+    branchAuthorizations?: Array<{
+      branch: string;
+      repositoryRoot: string;
+      grantedAt: string;
+      expiresAt?: string;
+      grantedBy?: string;
+      note?: string;
+      revokedAt?: string;
+    }>;
     approvedRepositoryRoots?: string[];
     approvedRemoteUrls?: Record<string, string[]>;
     allowForce?: boolean;

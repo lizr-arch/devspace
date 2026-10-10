@@ -32,6 +32,8 @@ import {
   type GameSessionStatus,
   type GameTreeNode,
   type GameSessionSnapshot,
+  type GameCaptureManifest,
+  type GameStopDiagnostics,
   type LiveSession,
   validateNodes,
   publicSnapshot,
@@ -42,6 +44,10 @@ import {
   isTerminal,
   waitForExit,
   terminatePersistedProcess,
+  deriveGuiVerdict,
+  toRenderInfo,
+  toPressedState,
+  isEmptyPressedState,
 } from "./game-sessions-types.js";
 
 export {
@@ -49,6 +55,8 @@ export {
   type GameSessionStatus,
   type GameTreeNode,
   type GameSessionSnapshot,
+  type GameCaptureManifest,
+  type GameStopDiagnostics,
 };
 
 export class GameSessionManager {
@@ -83,6 +91,7 @@ export class GameSessionManager {
       input.workspaceRoot,
       input.projectPath,
       "directory",
+      { allowWorkspaceRoot: true },
     );
     if (!existsSync(join(project.absolutePath, "project.godot"))) {
       throw new Error(
@@ -135,18 +144,75 @@ export class GameSessionManager {
         typeof handshake.engineVersion === "string"
           ? handshake.engineVersion
           : resolvedEngine.version;
+      session.bridgeProtocol =
+        typeof handshake.protocol === "number" ? handshake.protocol : 1;
+      session.renderInfo = toRenderInfo(handshake.renderInfo);
+      session.guiVerdict = deriveGuiVerdict(session.renderInfo);
+      if (typeof handshake.scene === "string" && handshake.scene) {
+        session.scene = handshake.scene;
+      }
       session.status = "running";
       session.lastHeartbeatAt = new Date().toISOString();
-      this.appendLog(session, "[bridge] authenticated\n");
+      this.appendLog(
+        session,
+        `[bridge] authenticated protocol=${session.bridgeProtocol ?? "unknown"} ` +
+          `driver=${session.renderInfo?.renderingDriver || "unknown"} ` +
+          `display=${session.renderInfo?.displayServer || "unknown"} ` +
+          `gui=${session.guiVerdict}\n`,
+      );
+      if (session.guiVerdict !== "real_gpu") {
+        this.appendLog(
+          session,
+          "[bridge] WARNING: session is not backed by a real GPU display; " +
+            "frames from it are not GUI visual evidence.\n",
+        );
+      }
       this.persist(session);
       return publicSnapshot(session);
     } catch (error) {
-      session.error = error instanceof Error ? error.message : String(error);
+      session.error = this.describeStartFailure(session, error);
       session.status = "crashed";
       session.endedAt = new Date().toISOString();
       this.terminate(session, "SIGKILL");
       this.persist(session);
-      throw error;
+      throw new Error(session.error);
+    }
+  }
+
+  /**
+   * Handshake failures used to surface as a bare `GAME_SESSION_HANDSHAKE_TIMEOUT`
+   * with no hint about which engine was launched or what the engine printed.
+   * Attach the elapsed time, resolved executable, and log tail so the failure is
+   * diagnosable from the tool result alone.
+   */
+  private describeStartFailure(session: LiveSession, error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    const lines = [message];
+    if (message === "GAME_SESSION_HANDSHAKE_TIMEOUT") {
+      lines.push(
+        `bridge did not authenticate within ${HANDSHAKE_TIMEOUT_MS}ms`,
+        `engine=${session.engine} executable=${session.engineExecutable ?? "unknown"}`,
+        `projectPath=${session.projectPath} scene=${session.scene}`,
+        `viewport=${session.viewport.width}x${session.viewport.height}`,
+        `exitCode=${session.exitCode ?? "none"} signal=${session.signal ?? "none"}`,
+      );
+      const tail = this.logTail(session);
+      if (tail) lines.push(`engine output tail:\n${tail}`);
+      lines.push(
+        "If the engine printed no output at all, the binary likely never started; " +
+          "if it printed import or C# build errors, run the project import/build task first.",
+      );
+    }
+    return lines.join("\n");
+  }
+
+  private logTail(session: LiveSession, maxBytes = 4096): string {
+    try {
+      const log = readFileSync(this.logPath(session.sessionId));
+      if (log.length === 0) return "";
+      return log.subarray(Math.max(0, log.length - maxBytes)).toString("utf8");
+    } catch {
+      return "";
     }
   }
 
@@ -158,6 +224,13 @@ export class GameSessionManager {
     if (session.status === "running") {
       const result = await this.request(session, "inspect", {});
       session.nodes = validateNodes(result.nodes);
+      session.pressedInput = toPressedState(result.pressed);
+      if (typeof result.sceneGeneration === "number") {
+        session.sceneGeneration = result.sceneGeneration;
+      }
+      if (typeof result.scene === "string" && result.scene) {
+        session.scene = result.scene;
+      }
       this.persist(session);
     }
     return publicSnapshot(session);
@@ -166,67 +239,129 @@ export class GameSessionManager {
   async sendInput(
     workspaceId: string,
     sessionId: string,
-    input:
-      | {
-          kind: "action";
-          action: string;
-          operation: "press" | "release" | "tap";
-          strength?: number;
-          frames?: number;
-        }
-      | {
-          kind: "click";
-          x: number;
-          y: number;
-          button: "left" | "right" | "middle";
-        },
-  ): Promise<{ accepted: true }> {
+    input: GameInput,
+  ): Promise<{ accepted: true; pressedInput?: GamePressedState }> {
     const session = this.getRunning(workspaceId, sessionId);
-    if (input.kind === "action") {
-      if (!/^[A-Za-z0-9_.:/-]{1,128}$/.test(input.action)) {
-        throw new Error("GAME_SESSION_INPUT_INVALID: Invalid action name.");
+    switch (input.kind) {
+      case "action":
+        await this.sendAction(session, input);
+        return { accepted: true };
+      case "click":
+        await this.sendClick(session, input);
+        return { accepted: true };
+      case "pointer": {
+        const result = await this.request(session, "pointer", {
+          event: input.event,
+          x: input.x,
+          y: input.y,
+          buttonIndex: input.button
+            ? MOUSE_BUTTON_INDEX[input.button]
+            : undefined,
+          wheelDirection: input.wheelDirection,
+          factor: input.factor,
+          modifiers: normalizeModifiers(input.modifiers),
+        });
+        return this.accepted(session, result);
       }
-      const strength = input.strength ?? 1;
-      const frames = input.frames ?? 1;
-      if (!Number.isFinite(strength) || strength < 0 || strength > 1) {
-        throw new Error("GAME_SESSION_INPUT_INVALID: strength must be 0-1.");
+      case "key": {
+        const key = input.key.trim();
+        if (key.length === 0 || key.length > 64) {
+          throw new Error(
+            "GAME_SESSION_INPUT_INVALID: key must be 1-64 characters.",
+          );
+        }
+        const text = validateKeyText(input.text);
+        const result = await this.request(session, "key", {
+          event: input.event,
+          key,
+          text,
+          physical: input.physical ?? false,
+          echo: input.echo ?? false,
+          modifiers: normalizeModifiers(input.modifiers),
+        });
+        return this.accepted(session, result);
       }
-      if (!Number.isInteger(frames) || frames < 1 || frames > 120) {
+      case "sequence": {
+        const steps = validateSequence(input.steps);
+        const result = await this.request(
+          session,
+          "sequence",
+          { steps, releaseAtEnd: input.releaseAtEnd ?? true },
+          sequenceTimeoutMs(steps),
+        );
+        return this.accepted(session, result);
+      }
+      case "release_all": {
+        await this.request(session, "release_all", {});
+        session.pressedInput = { mouse: [], keys: [], actions: [] };
+        this.persist(session);
+        return { accepted: true, pressedInput: session.pressedInput };
+      }
+      default: {
+        const exhaustive: never = input;
         throw new Error(
-          "GAME_SESSION_INPUT_INVALID: tap frames must be 1-120.",
+          `GAME_SESSION_INPUT_INVALID: Unsupported input kind ${String(exhaustive)}.`,
         );
       }
-      await this.request(session, "action", {
-        action: input.action,
-        operation: input.operation,
-        strength,
-        frames,
-      });
-    } else {
-      if (
-        !Number.isFinite(input.x) ||
-        !Number.isFinite(input.y) ||
-        input.x < 0 ||
-        input.y < 0 ||
-        input.x >= session.viewport.width ||
-        input.y >= session.viewport.height
-      ) {
-        throw new Error(
-          "GAME_SESSION_INPUT_INVALID: Click must be inside the viewport.",
-        );
-      }
-      await this.request(session, "click", {
-        x: input.x,
-        y: input.y,
-        buttonIndex: { left: 1, right: 2, middle: 3 }[input.button],
-      });
     }
-    return { accepted: true };
+  }
+
+  private accepted(
+    session: LiveSession,
+    result: Record<string, unknown>,
+  ): {
+    accepted: true;
+    pressedInput?: GamePressedState;
+  } {
+    if (result.pressed) {
+      session.pressedInput = toPressedState(result.pressed);
+      if (typeof result.sceneGeneration === "number") {
+        session.sceneGeneration = result.sceneGeneration;
+      }
+      this.persist(session);
+    }
+    return { accepted: true, pressedInput: session.pressedInput };
+  }
+
+  private async sendAction(
+    session: LiveSession,
+    input: Extract<GameInput, { kind: "action" }>,
+  ): Promise<void> {
+    if (!/^[A-Za-z0-9_.:/-]{1,128}$/.test(input.action)) {
+      throw new Error("GAME_SESSION_INPUT_INVALID: Invalid action name.");
+    }
+    const strength = input.strength ?? 1;
+    const frames = input.frames ?? 1;
+    if (!Number.isFinite(strength) || strength < 0 || strength > 1) {
+      throw new Error("GAME_SESSION_INPUT_INVALID: strength must be 0-1.");
+    }
+    if (!Number.isInteger(frames) || frames < 1 || frames > 120) {
+      throw new Error("GAME_SESSION_INPUT_INVALID: tap frames must be 1-120.");
+    }
+    await this.request(session, "action", {
+      action: input.action,
+      operation: input.operation,
+      strength,
+      frames,
+    });
+  }
+
+  private async sendClick(
+    session: LiveSession,
+    input: Extract<GameInput, { kind: "click" }>,
+  ): Promise<void> {
+    assertInsideViewport(session, input.x, input.y, "Click");
+    await this.request(session, "click", {
+      x: input.x,
+      y: input.y,
+      buttonIndex: MOUSE_BUTTON_INDEX[input.button],
+    });
   }
 
   async capture(
     workspaceId: string,
     sessionId: string,
+    options: { waitFrames?: number } = {},
   ): Promise<{
     frameId: string;
     path: string;
@@ -236,11 +371,21 @@ export class GameSessionManager {
     sha256: string;
     bytes: number;
     data: string;
+    manifest: GameCaptureManifest;
+    manifestPath: string;
   }> {
     const session = this.getRunning(workspaceId, sessionId);
     const frameId = `frame_${randomUUID()}`;
     const path = join(this.sessionEvidencePath(sessionId), `${frameId}.png`);
-    const result = await this.request(session, "capture", { path }, 15_000);
+    const result = await this.request(
+      session,
+      "capture",
+      {
+        path,
+        waitFrames: clampWaitFrames(options.waitFrames),
+      },
+      30_000,
+    );
     if (!existsSync(path)) {
       throw new Error("GAME_SESSION_CAPTURE_FAILED: Frame was not written.");
     }
@@ -253,16 +398,106 @@ export class GameSessionManager {
     ) {
       throw new Error("GAME_SESSION_CAPTURE_FAILED: Invalid PNG evidence.");
     }
+    const renderInfo = toRenderInfo(result) ?? session.renderInfo;
+    // A frame is only GUI visual evidence when the engine itself reports a real
+    // GPU display server and a non-dummy rendering driver.
+    const guiVerdict = deriveGuiVerdict(renderInfo);
+    const capturedAt = new Date().toISOString();
+    const manifest: GameCaptureManifest = {
+      manifestVersion: 1,
+      frameId,
+      sessionId,
+      workspaceId,
+      capturedAt,
+      image: {
+        path,
+        sha256: sha256(bytes),
+        bytes: bytes.length,
+        width: numberField(result.width, session.viewport.width),
+        height: numberField(result.height, session.viewport.height),
+      },
+      scene: textOr(result.scene, session.scene),
+      sceneGeneration:
+        typeof result.sceneGeneration === "number"
+          ? result.sceneGeneration
+          : "unknown",
+      sceneInstances: Array.isArray(result.instances)
+        ? result.instances.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [],
+      projectPath: session.projectPath,
+      workspaceRoot: session.workspaceRoot,
+      engine: session.engine,
+      engineVersion: session.engineVersion ?? "unknown",
+      bridgeProtocol: session.bridgeProtocol ?? "unknown",
+      render: renderInfo ?? "unknown",
+      guiVerdict,
+      git: {
+        headSha: session.headSha ?? "unknown",
+        dirtyDiffSha256: session.dirtyDiffSha256,
+        statusSha256: session.statusSha256,
+        untrackedCount: session.untrackedCount,
+      },
+      assembly: this.assemblyIdentity(session),
+      frameTiming: {
+        requestedAt: timingField(result.frameRequestedAt),
+        capturedAt: timingField(result.frameCapturedAt),
+      },
+    };
+    const manifestPath = join(
+      this.sessionEvidencePath(sessionId),
+      `${frameId}.manifest.json`,
+    );
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", {
+      mode: 0o600,
+    });
     return {
       frameId,
       path,
-      width: numberField(result.width, session.viewport.width),
-      height: numberField(result.height, session.viewport.height),
-      capturedAt: new Date().toISOString(),
-      sha256: sha256(bytes),
+      width: manifest.image.width,
+      height: manifest.image.height,
+      capturedAt,
+      sha256: manifest.image.sha256,
       bytes: bytes.length,
       data: bytes.toString("base64"),
+      manifest,
+      manifestPath,
     };
+  }
+
+  /**
+   * Best-effort identity of the managed assembly backing the session. Mono
+   * Godot writes the compiled game assembly under `.godot/mono/temp/bin`. When
+   * it cannot be located the manifest records `"unknown"` rather than a guess.
+   */
+  private assemblyIdentity(
+    session: LiveSession,
+  ): GameCaptureManifest["assembly"] {
+    try {
+      const projectRoot = join(
+        session.workspaceRoot,
+        session.projectPath === "." ? "" : session.projectPath,
+      );
+      const binaryRoot = join(projectRoot, ".godot", "mono", "temp", "bin");
+      if (!existsSync(binaryRoot)) return "unknown";
+      const candidates = collectAssemblyFiles(binaryRoot);
+      if (candidates.length === 0) return "unknown";
+      const newest = candidates
+        .map((candidate) => ({
+          candidate,
+          mtime: statSync(candidate).mtimeMs,
+        }))
+        .sort((left, right) => right.mtime - left.mtime)[0].candidate;
+      const bytes = readFileSync(newest);
+      return {
+        path: newest,
+        sha256: sha256(bytes),
+        bytes: bytes.length,
+      };
+    } catch {
+      return "unknown";
+    }
   }
 
   readLogs(
@@ -309,16 +544,65 @@ export class GameSessionManager {
     session.stopRequested = true;
     session.status = "stopping";
     this.persist(session);
-    await this.request(session, "quit", {}, 1_000).catch(() => undefined);
+
+    // Explicitly drop anything still held before asking the engine to quit.
+    // The bridge also releases on disconnect, but doing it here means a normal
+    // stop never depends on the disconnect path firing.
+    let releasedInputs = false;
+    const before = await this.request(session, "state", {}, 3_000).catch(
+      () => undefined,
+    );
+    if (before) {
+      const pressed = toPressedState(before.pressed);
+      session.pressedInput = pressed;
+      if (!isEmptyPressedState(pressed)) {
+        releasedInputs = true;
+        this.appendLog(
+          session,
+          `[bridge] releasing latched input before stop: ${JSON.stringify(pressed)}\n`,
+        );
+      }
+    }
+    await this.request(session, "release_all", {}, 3_000).catch(() => undefined);
+    session.pressedInput = { mouse: [], keys: [], actions: [] };
+
+    await this.request(session, "quit", {}, 2_000).catch(() => undefined);
+    let gracePath: GameStopDiagnostics["gracePath"] = "bridge_quit";
     await waitForExit(session.child, STOP_GRACE_MS);
-    if (!isTerminal(session.status)) this.terminate(session, "SIGTERM");
-    await waitForExit(session.child, 1_000);
-    if (!isTerminal(session.status)) this.terminate(session, "SIGKILL");
+    if (!isTerminal(session.status)) {
+      gracePath = "sigterm";
+      this.terminate(session, "SIGTERM");
+      await waitForExit(session.child, 2_000);
+    }
+    if (!isTerminal(session.status)) {
+      gracePath = "sigkill";
+      this.terminate(session, "SIGKILL");
+      await waitForExit(session.child, 2_000);
+    }
     if (!isTerminal(session.status)) {
       session.status = "stopped";
       session.endedAt = new Date().toISOString();
-      this.persist(session);
     }
+    if (!session.processGroupId) {
+      gracePath = session.exitCode !== undefined ? "already_exited" : gracePath;
+    }
+    const residual = session.pressedInput ?? {
+      mouse: [],
+      keys: [],
+      actions: [],
+    };
+    session.stopDiagnostics = {
+      releasedInputs: releasedInputs || !isEmptyPressedState(residual),
+      residualPressedInput: residual,
+      processGroupReaped: !processGroupAlive(session),
+      gracePath,
+    };
+    this.appendLog(
+      session,
+      `[bridge] stopped via ${gracePath}; residualInput=${JSON.stringify(residual)} ` +
+        `groupReaped=${session.stopDiagnostics.processGroupReaped}\n`,
+    );
+    this.persist(session);
     return publicSnapshot(session);
   }
 
@@ -466,6 +750,7 @@ export class GameSessionManager {
       },
     );
     session.child = child;
+    session.engineExecutable = executable;
     session.processId = child.pid;
     session.processGroupId =
       process.platform === "win32" ? undefined : child.pid;
@@ -714,6 +999,311 @@ function validateSessionId(sessionId: string): void {
   if (!/^session_[0-9a-f-]{36}$/.test(sessionId)) {
     throw new Error("GAME_SESSION_ID_INVALID");
   }
+}
+
+// --- input helpers ---------------------------------------------------------
+
+const MOUSE_BUTTON_INDEX: Record<string, number> = {
+  left: 1,
+  right: 2,
+  middle: 3,
+};
+
+/** Godot key names accepted by the bridge (resolved with OS.find_keycode_from_string). */
+const KEY_NAME_PATTERN = /^[A-Za-z0-9_+ -]{1,32}$/;
+
+const POINTER_EVENTS = ["down", "up", "move", "wheel", "double_click"];
+const MAX_SEQUENCE_STEPS = 256;
+const MAX_SEQUENCE_FRAME_DELAY = 600;
+
+export interface GameModifiers {
+  shift?: boolean;
+  ctrl?: boolean;
+  alt?: boolean;
+  meta?: boolean;
+}
+
+export interface GamePressedState {
+  mouse: number[];
+  keys: number[];
+  actions: string[];
+}
+
+export type GameInput =
+  | {
+      kind: "action";
+      action: string;
+      operation: "press" | "release" | "tap";
+      strength?: number;
+      frames?: number;
+    }
+  | {
+      kind: "click";
+      x: number;
+      y: number;
+      button: "left" | "right" | "middle";
+    }
+  | {
+      kind: "pointer";
+      event: "down" | "up" | "move" | "wheel" | "double_click";
+      x: number;
+      y: number;
+      button?: "left" | "right" | "middle";
+      wheelDirection?: "up" | "down" | "left" | "right";
+      factor?: number;
+      modifiers?: GameModifiers;
+    }
+  | {
+      kind: "key";
+      event: "press" | "release" | "tap";
+      key: string;
+      /**
+       * Character this key should insert into a focused text control. Godot
+       * inserts from InputEventKey.unicode, so a key event alone cannot type
+       * into a LineEdit. Defaults to the key itself when it is a single
+       * printable character.
+       */
+      text?: string;
+      physical?: boolean;
+      echo?: boolean;
+      modifiers?: GameModifiers;
+    }
+  | {
+      kind: "sequence";
+      steps: GameSequenceStep[];
+      releaseAtEnd?: boolean;
+    }
+  | { kind: "release_all" };
+
+export type GameSequenceStep =
+  | ({
+      type: "pointer";
+      frameDelay?: number;
+    } & Omit<Extract<GameInput, { kind: "pointer" }>, "kind">)
+  | ({
+      type: "key";
+      frameDelay?: number;
+    } & Omit<Extract<GameInput, { kind: "key" }>, "kind">)
+  | ({
+      type: "action";
+      frameDelay?: number;
+      action: string;
+      operation: "press" | "release" | "tap";
+      strength?: number;
+      frames?: number;
+    })
+  | { type: "wait"; frameDelay?: number };
+
+function normalizeModifiers(
+  modifiers: GameModifiers | undefined,
+): GameModifiers | undefined {
+  if (!modifiers) return undefined;
+  return {
+    shift: modifiers.shift === true,
+    ctrl: modifiers.ctrl === true,
+    alt: modifiers.alt === true,
+    meta: modifiers.meta === true,
+  };
+}
+
+function assertInsideViewport(
+  session: LiveSession,
+  x: number,
+  y: number,
+  label: string,
+): void {
+  if (
+    !Number.isFinite(x) ||
+    !Number.isFinite(y) ||
+    x < 0 ||
+    y < 0 ||
+    x >= session.viewport.width ||
+    y >= session.viewport.height
+  ) {
+    throw new Error(
+      `GAME_SESSION_INPUT_INVALID: ${label} must be inside the viewport.`,
+    );
+  }
+}
+
+/**
+ * Input sequences are the primary multi-step affordance (drag, wheel bursts,
+ * modifier chords). They are validated to a closed shape so a caller can never
+ * smuggle an unknown command into the bridge, and they always carry a bounded
+ * frame budget so a request cannot outlive its own timeout.
+ */
+function validateSequence(steps: GameSequenceStep[]): Array<
+  Record<string, unknown>
+> {
+  if (!Array.isArray(steps) || steps.length === 0) {
+    throw new Error(
+      "GAME_SESSION_INPUT_INVALID: A sequence needs at least one step.",
+    );
+  }
+  if (steps.length > MAX_SEQUENCE_STEPS) {
+    throw new Error(
+      `GAME_SESSION_INPUT_INVALID: A sequence may contain at most ${MAX_SEQUENCE_STEPS} steps.`,
+    );
+  }
+  let totalFrames = 0;
+  const encoded = steps.map((step, index) => {
+    const frameDelay = step.frameDelay ?? 1;
+    if (
+      !Number.isInteger(frameDelay) ||
+      frameDelay < 0 ||
+      frameDelay > MAX_SEQUENCE_FRAME_DELAY
+    ) {
+      throw new Error(
+        `GAME_SESSION_INPUT_INVALID: step ${index} frameDelay must be 0-${MAX_SEQUENCE_FRAME_DELAY}.`,
+      );
+    }
+    totalFrames += frameDelay;
+    switch (step.type) {
+      case "pointer": {
+        if (!POINTER_EVENTS.includes(step.event)) {
+          throw new Error(
+            `GAME_SESSION_INPUT_INVALID: step ${index} has an unsupported pointer event.`,
+          );
+        }
+        if (!Number.isFinite(step.x) || !Number.isFinite(step.y)) {
+          throw new Error(
+            `GAME_SESSION_INPUT_INVALID: step ${index} needs finite x/y.`,
+          );
+        }
+        if (step.button && !(step.button in MOUSE_BUTTON_INDEX)) {
+          throw new Error(
+            `GAME_SESSION_INPUT_INVALID: step ${index} has an unsupported button.`,
+          );
+        }
+        return {
+          type: "pointer",
+          event: step.event,
+          x: step.x,
+          y: step.y,
+          buttonIndex: step.button
+            ? MOUSE_BUTTON_INDEX[step.button]
+            : undefined,
+          wheelDirection: step.wheelDirection,
+          factor: step.factor,
+          modifiers: normalizeModifiers(step.modifiers),
+          frameDelay,
+        };
+      }
+      case "key": {
+        const key = step.key.trim();
+        if (!KEY_NAME_PATTERN.test(key)) {
+          throw new Error(
+            `GAME_SESSION_INPUT_INVALID: step ${index} has an unsupported key name.`,
+          );
+        }
+        if (!["press", "release", "tap"].includes(step.event)) {
+          throw new Error(
+            `GAME_SESSION_INPUT_INVALID: step ${index} has an unsupported key event.`,
+          );
+        }
+        return {
+          type: "key",
+          event: step.event,
+          key,
+          text: validateKeyText(step.text),
+          physical: step.physical === true,
+          echo: step.echo === true,
+          modifiers: normalizeModifiers(step.modifiers),
+          frameDelay,
+        };
+      }
+      case "action": {
+        if (!/^[A-Za-z0-9_.:/-]{1,128}$/.test(step.action)) {
+          throw new Error(
+            `GAME_SESSION_INPUT_INVALID: step ${index} has an invalid action name.`,
+          );
+        }
+        return {
+          type: "action",
+          action: step.action,
+          operation: step.operation,
+          strength: step.strength ?? 1,
+          frames: step.frames ?? 1,
+          frameDelay,
+        };
+      }
+      case "wait":
+        return { type: "wait", frameDelay };
+      default:
+        throw new Error(
+          `GAME_SESSION_INPUT_INVALID: step ${index} has an unknown type.`,
+        );
+    }
+  });
+  return encoded;
+}
+
+/**
+ * A sequence is dispatched one step per frame on the engine side, so the host
+ * timeout has to scale with the declared frame budget instead of using the
+ * fixed single-request timeout.
+ */
+function sequenceTimeoutMs(steps: Array<Record<string, unknown>>): number {
+  const frames = steps.reduce(
+    (total, step) => total + numberField(step.frameDelay, 1) + 1,
+    0,
+  );
+  const budget = frames * 20 + 5_000;
+  return Math.min(Math.max(budget, REQUEST_TIMEOUT_MS), 120_000);
+}
+
+/**
+ * A printable character to insert. Godot's unicode field is a single code
+ * point, so longer strings are rejected rather than silently truncated.
+ */
+function validateKeyText(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0 || value.length > 2) {
+    throw new Error(
+      "GAME_SESSION_INPUT_INVALID: text must be 1-2 characters (one code point).",
+    );
+  }
+  if (value.length === 2 && value.codePointAt(0)! < 0x10000) {
+    throw new Error(
+      "GAME_SESSION_INPUT_INVALID: text must be a single code point.",
+    );
+  }
+  return value;
+}
+
+function clampWaitFrames(value: number | undefined): number {
+  if (value === undefined) return 2;
+  if (!Number.isInteger(value) || value < 1 || value > 600) {
+    throw new Error("GAME_SESSION_INPUT_INVALID: waitFrames must be 1-600.");
+  }
+  return value;
+}
+
+function timingField(value: unknown): number | "unknown" {
+  return typeof value === "number" && Number.isFinite(value) ? value : "unknown";
+}
+
+function textOr(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function collectAssemblyFiles(root: string, depth = 0): string[] {
+  if (depth > 6) return [];
+  const found: string[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const full = join(root, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...collectAssemblyFiles(full, depth + 1));
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".dll")) {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
+function processGroupAlive(session: LiveSession): boolean {
+  if (!session.processGroupId || !session.processToken) return false;
+  return processGroupContainsToken(session.processGroupId, session.processToken);
 }
 
 

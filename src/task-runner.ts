@@ -49,6 +49,20 @@ import {
   terminateProcessTree,
 } from "./task-runner-types.js";
 import { resolveWorkspacePythonEnvironment } from "./task-runner-environment.js";
+import { RunnerRegistry } from "./runner-registry.js";
+import { parseTaskResult } from "./task-results.js";
+import {
+  ResourceLockBusyError,
+  requestsForCommand,
+  sharedResourceLocks,
+} from "./job-resource-locks.js";
+import {
+  captureTaskInputFingerprint,
+  compareTaskInputs,
+  type TaskInputFingerprint,
+} from "./task-fingerprint.js";
+import { type RunnerName } from "./runner-types.js";
+import { isRunnerName, withDotnetRuntime } from "./runner-validation.js";
 
 export {
   type TaskSessionStatus,
@@ -61,6 +75,30 @@ export {
   terminateProcessTree,
   resolveWorkspacePythonEnvironment,
 };
+
+/** Best-effort runner label for lock diagnostics. */
+function taskRunnerLabel(argv: string[]): RunnerName {
+  const joined = argv.join(" ").toLowerCase();
+  if (/(^|[\s/])godot(-mono)?([\s]|$)/.test(joined)) {
+    return joined.includes("godot-mono") || joined.includes("godot_mono")
+      ? "godot-mono"
+      : "godot";
+  }
+  for (const name of ["dotnet", "cargo", "npm", "pnpm", "yarn", "bun", "pytest"] as const) {
+    if (argv.some((entry) => entry.toLowerCase().endsWith(`/${name}`) || entry === name)) {
+      return name;
+    }
+  }
+  return "dotnet";
+}
+
+function captureSafely(workspaceRoot: string): TaskInputFingerprint | null {
+  try {
+    return captureTaskInputFingerprint(workspaceRoot);
+  } catch {
+    return null;
+  }
+}
 
 export class TaskRunner {
   private sessions = new Map<string, TaskSession>();
@@ -77,10 +115,14 @@ export class TaskRunner {
     TaskRunnerOptions["workspacePythonResolver"]
   >;
 
+  private readonly runners: TaskRunnerOptions["runnerRegistry"];
+
   constructor(options: TaskRunnerOptions = {}) {
     this.operatorPythonCommand = options.operatorPythonCommand;
     this.workspacePythonResolver =
       options.workspacePythonResolver ?? resolveWorkspacePythonEnvironment;
+    this.runners =
+      options.runnerRegistry ?? (new RunnerRegistry() as TaskRunnerOptions["runnerRegistry"]);
   }
 
   /**
@@ -204,9 +246,11 @@ export class TaskRunner {
     }
 
     // Resolve runtime
-    const runtime = this.resolveRuntime(task, input.workspaceRoot);
+    const runtime = await this.resolveRuntime(task, input.workspaceRoot);
 
-    const fullCommand = [...runtime.prefix, ...command];
+    const fullCommand = runtime.replaceArgv0
+      ? [runtime.replaceArgv0, ...command.slice(1)]
+      : [...runtime.prefix, ...command];
     const sessionId = `task_${randomUUID()}`;
     const startedAt = new Date().toISOString();
 
@@ -228,7 +272,41 @@ export class TaskRunner {
       errors: [],
     };
 
+    // Serialize against every other build/test/task that touches this
+    // workspace. Two concurrent writers would overwrite each other's obj/,
+    // bin/ and managed assembly, and a Phase 20 performance number produced
+    // under that race is worthless even when it prints PASS. Independent
+    // workspaces keep running in parallel because the lock is keyed per root.
+    // A Python bootstrap only creates a virtualenv; it writes no build output,
+    // so it must not take the build lock. Doing so would mask the more specific
+    // TASK_BOOTSTRAP_CONFLICT with a generic workspace-busy error.
+    const lockRequests =
+      task.runtime === "operator-python-bootstrap"
+        ? []
+        : requestsForCommand({
+            argv: fullCommand,
+            workspaceRoot: input.workspaceRoot,
+          });
+    // Every exit below runs through this finally: the bootstrap fast path and
+    // the error paths previously returned without releasing, which would have
+    // blocked the workspace forever.
+    try {
     if (task.mode === "session") {
+      // A detached session can write the same outputs as a run-mode task, so it
+      // holds the identical lock and releases it when the process settles.
+      try {
+        sharedResourceLocks.acquire({
+          jobId: sessionId,
+          runner: taskRunnerLabel(fullCommand),
+          workspaceRoot: input.workspaceRoot,
+          requests: lockRequests,
+        });
+      } catch (error) {
+        if (error instanceof ResourceLockBusyError) {
+          throw new Error(`TASK_WORKSPACE_BUSY: ${error.message}`);
+        }
+        throw error;
+      }
       // Merge resolved secrets into child env (NOT global process.env)
       const childEnv: Record<string, string | undefined> = {
         ...process.env,
@@ -273,6 +351,13 @@ export class TaskRunner {
         this.processes.delete(sessionId);
         // Clean up secret values — they are no longer needed after exit
         this.sessionSecretValues.delete(sessionId);
+        // A detached session held the workspace for its whole lifetime; the
+        // lock must not outlive the process, or the next task would be
+        // permanently blocked by a finished run.
+        sharedResourceLocks.release(sessionId);
+      });
+      proc.on("error", () => {
+        sharedResourceLocks.release(sessionId);
       });
 
       return {
@@ -288,6 +373,28 @@ export class TaskRunner {
     const timeoutMs =
       (task.timeout_seconds ?? input.timeoutSeconds ?? 600) * 1000;
     const startTime = performance.now();
+
+    try {
+      sharedResourceLocks.acquire({
+        jobId: sessionId,
+        runner: taskRunnerLabel(fullCommand),
+        workspaceRoot: input.workspaceRoot,
+        requests: lockRequests,
+      });
+    } catch (error) {
+      if (error instanceof ResourceLockBusyError) {
+        throw new Error(
+          `TASK_WORKSPACE_BUSY: ${error.message}`,
+        );
+      }
+      throw error;
+    }
+
+    // Fingerprint the source and assembly inputs this run will be judged
+    // against, so a parallel edit cannot be signed off by a stale result.
+    const inputsBefore: TaskInputFingerprint | null = captureSafely(
+      input.workspaceRoot,
+    );
 
     // Merge resolved secrets into child env for run mode
     const runEnv: Record<string, string | undefined> = { ...runtime.env };
@@ -427,6 +534,31 @@ export class TaskRunner {
       session.environmentInfo = environmentInfo;
       this.sessions.set(sessionId, session);
 
+      // Release before returning: the fingerprint must be taken while nothing
+      // else can be mid-write, and a held lock would block the next task.
+      sharedResourceLocks.release(sessionId);
+      const inputsAfter = captureSafely(input.workspaceRoot);
+      const inputStability = compareTaskInputs(inputsBefore, inputsAfter);
+      const structured = task.result_parser
+        ? parseTaskResult({
+            parser: task.result_parser,
+            output: `${redactedStdout}\n${redactedStderr}`,
+            exitCode: effectiveExitCode,
+            command: fullCommand,
+            timedOut: result.timedOut || session.status === "timed_out",
+          })
+        : undefined;
+      // A run whose inputs moved underneath it can never be used to sign off
+      // the new inputs, whatever its own verdict was.
+      if (inputStability.status === "changed_during_run" && structured) {
+        structured.reasons.push(
+          `inputs changed during the run: ${inputStability.changes.join("; ")}`,
+        );
+        structured.skippedChecks.push(
+          "this result does not sign off the changed inputs; re-run the task",
+        );
+      }
+
       return {
         taskId: input.taskId,
         mode: "run",
@@ -440,8 +572,11 @@ export class TaskRunner {
         environmentInfo,
         bootstrap: session.bootstrap,
         errors: [],
+        structured,
+        inputStability,
       };
     } catch (err) {
+      sharedResourceLocks.release(sessionId);
       if (bootstrapContext) this.cleanupFailedBootstrap(bootstrapContext);
       const durationMs = Math.round(performance.now() - startTime);
       const errorMsg = this.sanitizeOperatorPath(String(err));
@@ -465,11 +600,17 @@ export class TaskRunner {
         errors: [],
       };
     } finally {
+      sharedResourceLocks.release(sessionId);
       this.processes.delete(sessionId);
       this.sessionSecretValues.delete(sessionId);
       if (bootstrapContext) {
         this.bootstrapLocks.delete(bootstrapContext.key);
       }
+    }
+    } finally {
+      // Covers the bootstrap fast path and every earlier early return. Release
+      // is idempotent, so the inner finally may already have freed it.
+      sharedResourceLocks.release(sessionId);
     }
   }
 
@@ -524,6 +665,9 @@ export class TaskRunner {
       session.finishedAt = new Date().toISOString();
     }
     this.sessionSecretValues.delete(sessionId);
+    // The exit handler also releases, but an explicit stop must not depend on
+    // that callback ordering to free the workspace.
+    sharedResourceLocks.release(sessionId);
     return true;
   }
 
@@ -649,16 +793,23 @@ export class TaskRunner {
     }
   }
 
-  private resolveRuntime(
+  private async resolveRuntime(
     task: TaskDefinition,
     workspaceRoot: string,
-  ): {
+  ): Promise<{
     interpreter: string;
     prefix: string[];
     env: Record<string, string>;
     source: string;
     environmentInfo?: EnvironmentInfo;
-  } {
+    /**
+     * When set, argv[0] is replaced by this resolved absolute path instead of
+     * being appended to. Without it a declared tool would be spawned as
+     * `<abs path> <tool name> ...`, which real CLIs reject (npm reported
+     * `Unknown command: "npm"`).
+     */
+    replaceArgv0?: string;
+  }> {
     const rt = task.runtime ?? "workspace-python";
 
     if (rt === "workspace-python") {
@@ -706,13 +857,67 @@ export class TaskRunner {
       };
     }
 
-    // system runtime — use command's first element directly (no shell)
+    // system runtime — use the command's first element directly (no shell).
+    //
+    // DevSpace normally runs under launchd, whose minimal PATH is
+    // /usr/bin:/bin:/usr/sbin:/sbin. Declared tools such as `dotnet` and
+    // `godot-mono` live outside that PATH, so a task naming them would fail to
+    // spawn even though the tool is installed. When the first element is a
+    // known runner, resolve it through the same RunnerRegistry that backs
+    // start_job: that yields an absolute executable plus the augmented
+    // environment (dotnet PATH / DOTNET_ROOT for the Godot runners). Anything
+    // the registry cannot resolve still falls back to a plain PATH lookup, so
+    // behavior for ordinary commands is unchanged.
+    const declared = task.command[0];
+    if (isRunnerName(declared)) {
+      try {
+        const resolved = await this.runners!.resolve(declared as RunnerName);
+        return {
+          interpreter: resolved.executable,
+          prefix: [],
+          env: { ...resolved.environment } as Record<string, string>,
+          source: `system+runner:${declared}`,
+          replaceArgv0: resolved.executable,
+        };
+      } catch (error) {
+        throw new TaskError({
+          code: "TASK_EXECUTABLE_UNRESOLVED",
+          manifestPath: ".devspace/tasks.yaml",
+          field: "command[0]",
+          message: `Task command resolves to the ${declared} runner, but it is unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          recoverable: true,
+        });
+      }
+    }
+
+    // A declared command may be a project entrypoint script (for example
+    // `bash tools/triaregna.sh build`) that itself shells out to dotnet. DevSpace
+    // usually runs under launchd with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which
+    // does not contain the .NET SDK, so the child would fail even though the SDK
+    // is installed. Apply the same dotnet PATH/DOTNET_ROOT augmentation the
+    // Godot runners already use. This only prepends discovered SDK directories;
+    // it does not add a shell, relax argument validation, or widen the sandbox.
     return {
-      interpreter: task.command[0],
+      interpreter: declared,
       prefix: [],
-      env: {},
+      env: {
+        ...(withDotnetRuntime({ ...process.env }, process.platform) as Record<
+          string,
+          string
+        >),
+      },
       source: "system",
     };
+  }
+
+  private static captureInputs(workspaceRoot: string): TaskInputFingerprint | null {
+    try {
+      return captureTaskInputFingerprint(workspaceRoot);
+    } catch {
+      return null;
+    }
   }
 
   private runAndWait(

@@ -75,6 +75,16 @@ export class TestSuite {
   }
 }
 
+/**
+ * Destination branch used by the push fixtures.
+ *
+ * Remote write policy refuses protected default branches (`main`/`master`) in
+ * the standing allowlist, so the fixtures push to a scoped integration branch
+ * instead. The client's local HEAD stays on `main`; only the destination ref
+ * changes, which keeps every other assertion in these suites intact.
+ */
+export const TEST_DESTINATION_BRANCH = "devspace/integration/fixture";
+
 export async function createRemoteFixture(label: string): Promise<RemoteFixture> {
   const root = await mkdtemp(join(tmpdir(), `devspace-${label}-`));
   const bare = join(root, "remote.git");
@@ -88,7 +98,22 @@ export async function createRemoteFixture(label: string): Promise<RemoteFixture>
   await git(producer, ["commit", "-m", "initial"]);
   await git(producer, ["remote", "add", "origin", bare]);
   await git(producer, ["push", "-u", "origin", "main"]);
+  // Seed the scoped destination branch on the remote so a fast-forward target
+  // exists. It starts at the same commit as main.
+  await git(producer, [
+    "push",
+    "origin",
+    `main:refs/heads/${TEST_DESTINATION_BRANCH}`,
+  ]);
   await git(root, ["clone", "--branch", "main", "--", bare, client]);
+  await configureIdentity(client);
+  await git(client, ["fetch", "--no-tags", "origin"]);
+  await git(client, [
+    "branch",
+    "--track",
+    TEST_DESTINATION_BRANCH,
+    `origin/${TEST_DESTINATION_BRANCH}`,
+  ]);
   await configureIdentity(client);
   return {
     root,

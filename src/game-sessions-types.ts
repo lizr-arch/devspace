@@ -29,6 +29,28 @@ export interface GameTreeNode {
   visible: boolean | null;
 }
 
+/**
+ * Renderer identity reported by the in-engine Runtime Bridge. This is what
+ * separates real GPU evidence from a headless/dummy-renderer run: a headless
+ * Godot session reports `displayServer: "headless"` and a `dummy` driver, and
+ * must never be labelled GUI visual evidence.
+ */
+export interface GameRenderInfo {
+  displayServer: string;
+  renderingMethod: string;
+  renderingDriver: string;
+  projectRenderingMethod: string;
+  adapterName: string;
+  adapterVendor: string;
+  adapterApiVersion: string;
+  windowSize: [number, number];
+  viewportSize: [number, number];
+  isHeadless: boolean;
+  isDummyDriver: boolean;
+}
+
+export type GameGuiVerdict = "real_gpu" | "headless_not_gui" | "unknown";
+
 export interface GameSessionSnapshot {
   sessionId: string;
   workspaceId: string;
@@ -51,6 +73,71 @@ export interface GameSessionSnapshot {
   signal?: string;
   error?: string;
   nodes?: GameTreeNode[];
+  /** Additive: real-renderer identity and GUI evidence verdict. */
+  renderInfo?: GameRenderInfo;
+  guiVerdict?: GameGuiVerdict;
+  bridgeProtocol?: number;
+  sceneGeneration?: number;
+  /** Input still latched inside the engine; always empty on a clean stop. */
+  pressedInput?: { mouse: number[]; keys: number[]; actions: string[] };
+  /** Additive: how the session ended, including cleanup diagnostics. */
+  stopDiagnostics?: GameStopDiagnostics;
+}
+
+export interface GameStopDiagnostics {
+  releasedInputs: boolean;
+  residualPressedInput: { mouse: number[]; keys: number[]; actions: string[] };
+  processGroupReaped: boolean;
+  gracePath: "bridge_quit" | "sigterm" | "sigkill" | "already_exited";
+}
+
+/**
+ * Machine-readable sidecar written next to every captured frame. Fields that
+ * cannot be established are reported as `"unknown"` — never guessed.
+ */
+export interface GameCaptureManifest {
+  manifestVersion: 1;
+  frameId: string;
+  sessionId: string;
+  workspaceId: string;
+  capturedAt: string;
+  image: {
+    path: string;
+    sha256: string;
+    bytes: number;
+    width: number;
+    height: number;
+  };
+  scene: string;
+  sceneGeneration: number | "unknown";
+  /**
+   * Every PackedScene instance currently parented under the engine root. A
+   * healthy session has exactly one; more than one proves a replaced scene was
+   * left rendering underneath (the Phase 17 residue defect).
+   */
+  sceneInstances: string[];
+  projectPath: string;
+  workspaceRoot: string;
+  engine: string;
+  engineVersion: string;
+  bridgeProtocol: number | "unknown";
+  render: GameRenderInfo | "unknown";
+  guiVerdict: GameGuiVerdict;
+  git: {
+    headSha: string;
+    dirtyDiffSha256: string;
+    statusSha256: string;
+    untrackedCount: number;
+  };
+  assembly: {
+    path: string;
+    sha256: string;
+    bytes: number;
+  } | "unknown";
+  frameTiming: {
+    requestedAt: number | "unknown";
+    capturedAt: number | "unknown";
+  };
 }
 
 export interface LiveSession extends GameSessionSnapshot {
@@ -70,6 +157,87 @@ export interface LiveSession extends GameSessionSnapshot {
     }
   >;
   stopRequested?: boolean;
+  handshakeElapsedMs?: number;
+  logBytesAtHandshake?: number;
+  engineExecutable?: string;
+}
+
+/**
+ * Derive the GUI evidence verdict from in-engine renderer facts. Anything we
+ * cannot positively establish stays `unknown` rather than being optimistically
+ * reported as real.
+ */
+export function deriveGuiVerdict(
+  info: GameRenderInfo | undefined,
+): GameGuiVerdict {
+  if (!info) return "unknown";
+  const driver = info.renderingDriver.toLowerCase();
+  if (info.isHeadless || driver === "dummy" || driver === "") {
+    return "headless_not_gui";
+  }
+  if (info.displayServer.toLowerCase() === "headless") {
+    return "headless_not_gui";
+  }
+  return "real_gpu";
+}
+
+export function toRenderInfo(value: unknown): GameRenderInfo | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const pair = (input: unknown): [number, number] => {
+    if (!Array.isArray(input) || input.length < 2) return [0, 0];
+    return [numberField(input[0], 0), numberField(input[1], 0)];
+  };
+  const text = (input: unknown): string =>
+    typeof input === "string" ? input : "";
+  const driver = text(raw.renderingDriver);
+  const displayServer = text(raw.displayServer);
+  return {
+    displayServer,
+    renderingMethod: text(raw.renderingMethod),
+    renderingDriver: driver,
+    projectRenderingMethod: text(raw.projectRenderingMethod),
+    adapterName: text(raw.adapterName),
+    adapterVendor: text(raw.adapterVendor),
+    adapterApiVersion: text(raw.adapterApiVersion),
+    windowSize: pair(raw.windowSize),
+    viewportSize: pair(raw.viewportSize),
+    isHeadless: raw.isHeadless === true || displayServer === "headless",
+    isDummyDriver: raw.isDummyDriver === true || driver === "dummy",
+  };
+}
+
+export function toPressedState(
+  value: unknown,
+): { mouse: number[]; keys: number[]; actions: string[] } {
+  const empty = { mouse: [], keys: [], actions: [] };
+  if (!value || typeof value !== "object") return empty;
+  const raw = value as Record<string, unknown>;
+  const numbers = (input: unknown): number[] =>
+    Array.isArray(input)
+      ? input.map((entry) => numberField(entry, -1)).filter((n) => n >= 0)
+      : [];
+  const strings = (input: unknown): string[] =>
+    Array.isArray(input)
+      ? input.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  return {
+    mouse: numbers(raw.mouse),
+    keys: numbers(raw.keys),
+    actions: strings(raw.actions),
+  };
+}
+
+export function isEmptyPressedState(state: {
+  mouse: number[];
+  keys: number[];
+  actions: string[];
+}): boolean {
+  return (
+    state.mouse.length === 0 &&
+    state.keys.length === 0 &&
+    state.actions.length === 0
+  );
 }
 
 export function validateNodes(value: unknown): GameTreeNode[] {
@@ -111,6 +279,20 @@ export function publicSnapshot(session: LiveSession): GameSessionSnapshot {
     signal: session.signal,
     error: session.error,
     nodes: session.nodes?.map((node) => ({ ...node })),
+    renderInfo: session.renderInfo ? { ...session.renderInfo } : undefined,
+    guiVerdict: session.guiVerdict,
+    bridgeProtocol: session.bridgeProtocol,
+    sceneGeneration: session.sceneGeneration,
+    pressedInput: session.pressedInput
+      ? {
+          mouse: [...session.pressedInput.mouse],
+          keys: [...session.pressedInput.keys],
+          actions: [...session.pressedInput.actions],
+        }
+      : undefined,
+    stopDiagnostics: session.stopDiagnostics
+      ? { ...session.stopDiagnostics }
+      : undefined,
   };
 }
 

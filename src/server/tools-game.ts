@@ -20,6 +20,120 @@ function projectMemoryReceiptInputSchema() {
     );
 }
 
+const MOUSE_BUTTON_SCHEMA = z.enum(["left", "right", "middle"]);
+const MODIFIER_SCHEMA = z
+  .object({
+    shift: z.boolean().optional(),
+    ctrl: z.boolean().optional(),
+    alt: z.boolean().optional(),
+    meta: z.boolean().optional(),
+  })
+  .optional()
+  .describe("Modifier keys held for this event.");
+
+const POINTER_STEP_FIELDS = {
+  x: z.number().describe("Viewport-local X coordinate."),
+  y: z.number().describe("Viewport-local Y coordinate."),
+  button: MOUSE_BUTTON_SCHEMA.optional(),
+  wheelDirection: z.enum(["up", "down", "left", "right"]).optional(),
+  factor: z.number().optional().describe("Wheel notch strength."),
+  modifiers: MODIFIER_SCHEMA,
+};
+
+const KEY_STEP_FIELDS = {
+  key: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe('Godot key name, for example "W", "Escape", "Space", "Control".'),
+  text: z
+    .string()
+    .min(1)
+    .max(2)
+    .optional()
+    .describe(
+      "Character this key inserts into a focused text field. Required to type into dialogs, because Godot inserts from the key's unicode value. Defaults to the key when it is a single printable character.",
+    ),
+  physical: z
+    .boolean()
+    .optional()
+    .describe("Use the physical (layout-independent) keycode."),
+  echo: z.boolean().optional(),
+  modifiers: MODIFIER_SCHEMA,
+};
+
+function gameInputSchema() {
+  return z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("action"),
+      action: z.string().min(1).max(128),
+      operation: z.enum(["press", "release", "tap"]),
+      strength: z.number().min(0).max(1).optional(),
+      frames: z.number().int().min(1).max(120).optional(),
+    }),
+    z.object({
+      kind: z.literal("click"),
+      x: z.number(),
+      y: z.number(),
+      button: MOUSE_BUTTON_SCHEMA,
+    }),
+    z.object({
+      kind: z.literal("pointer"),
+      event: z.enum(["down", "up", "move", "wheel", "double_click"]),
+      ...POINTER_STEP_FIELDS,
+    }),
+    z.object({
+      kind: z.literal("key"),
+      event: z.enum(["press", "release", "tap"]),
+      ...KEY_STEP_FIELDS,
+    }),
+    z.object({
+      kind: z.literal("sequence"),
+      steps: z
+        .array(
+          z.discriminatedUnion("type", [
+            z.object({
+              type: z.literal("pointer"),
+              event: z.enum(["down", "up", "move", "wheel", "double_click"]),
+              frameDelay: z.number().int().min(0).max(600).optional(),
+              ...POINTER_STEP_FIELDS,
+            }),
+            z.object({
+              type: z.literal("key"),
+              event: z.enum(["press", "release", "tap"]),
+              frameDelay: z.number().int().min(0).max(600).optional(),
+              ...KEY_STEP_FIELDS,
+            }),
+            z.object({
+              type: z.literal("action"),
+              action: z.string().min(1).max(128),
+              operation: z.enum(["press", "release", "tap"]),
+              strength: z.number().min(0).max(1).optional(),
+              frames: z.number().int().min(1).max(120).optional(),
+              frameDelay: z.number().int().min(0).max(600).optional(),
+            }),
+            z.object({
+              type: z.literal("wait"),
+              frameDelay: z.number().int().min(0).max(600).optional(),
+            }),
+          ]),
+        )
+        .min(1)
+        .max(256)
+        .describe(
+          "Ordered steps, dispatched one per engine frame. Use this for drags, wheel bursts and modifier chords.",
+        ),
+      releaseAtEnd: z
+        .boolean()
+        .optional()
+        .describe(
+          "Release every latched key/button/action when the sequence finishes. Defaults to true.",
+        ),
+    }),
+    z.object({ kind: z.literal("release_all") }),
+  ]);
+}
+
 export function registerGameTools(
   server: McpServer,
   ctx: ServerContext,
@@ -118,28 +232,17 @@ export function registerGameTools(
     {
       title: "Send Godot game input",
       description:
-        "Inject exactly one InputMap action or viewport-local mouse click into a DevSpace-owned Godot Session. No global desktop event is generated.",
+        "Inject input into a DevSpace-owned Godot Session. Supports InputMap actions, single clicks, pointer down/up/move/wheel/double-click, keyboard press/release with modifiers, ordered multi-step sequences, and release_all. No global desktop event is generated. Latched keys and buttons are always released on sequence end, session stop, and host disconnect.",
       inputSchema: {
         workspaceId: z.string(),
         sessionId: z.string(),
-        input: z.discriminatedUnion("kind", [
-          z.object({
-            kind: z.literal("action"),
-            action: z.string().min(1).max(128),
-            operation: z.enum(["press", "release", "tap"]),
-            strength: z.number().min(0).max(1).optional(),
-            frames: z.number().int().min(1).max(120).optional(),
-          }),
-          z.object({
-            kind: z.literal("click"),
-            x: z.number(),
-            y: z.number(),
-            button: z.enum(["left", "right", "middle"]),
-          }),
-        ]),
+        input: gameInputSchema(),
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
-      outputSchema: resultOutputSchema({ accepted: z.literal(true) }),
+      outputSchema: resultOutputSchema({
+        accepted: z.literal(true),
+        pressedInput: z.unknown().optional(),
+      }),
       _meta: {},
       annotations: {
         readOnlyHint: false,
@@ -171,13 +274,25 @@ export function registerGameTools(
     {
       title: "Capture Godot game frame",
       description:
-        "Capture the running Session viewport as PNG evidence in DevSpace private state and return bounded image content.",
+        "Capture the running Session viewport as PNG evidence in DevSpace private state and return bounded image content. A machine-readable manifest is written beside the PNG with engine, renderer, scene, git, resolution, SHA256 and frame timing. Frames whose engine renderer is headless or dummy are reported as guiVerdict=headless_not_gui and are not GUI visual evidence.",
       inputSchema: {
         workspaceId: z.string(),
         sessionId: z.string(),
+        waitFrames: z
+          .number()
+          .int()
+          .min(1)
+          .max(600)
+          .optional()
+          .describe(
+            "Engine frames to let elapse before reading the framebuffer, so the capture reflects input already injected. Defaults to 2.",
+          ),
         projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
       },
-      outputSchema: resultOutputSchema({ frame: z.unknown() }),
+      outputSchema: resultOutputSchema({
+        frame: z.unknown(),
+        manifest: z.unknown(),
+      }),
       ...widgetMeta("capture_game_frame", "review"),
       annotations: {
         readOnlyHint: false,
@@ -186,23 +301,33 @@ export function registerGameTools(
         openWorldHint: false,
       },
     },
-    async ({ workspaceId, sessionId, projectMemoryReceiptId }) => {
+    async ({
+      workspaceId,
+      sessionId,
+      waitFrames,
+      projectMemoryReceiptId,
+    }) => {
       workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
         workspaceId,
         "capture_game_frame",
         projectMemoryReceiptId,
       );
-      const captured = await games.capture(workspaceId, sessionId);
-      const { data, path: _privatePath, ...frame } = captured;
-      const result = `Captured ${frame.frameId}: ${frame.width}x${frame.height}, sha256 ${frame.sha256}.`;
+      const captured = await games.capture(workspaceId, sessionId, {
+        waitFrames,
+      });
+      const { data, path: _privatePath, manifest, ...frame } = captured;
+      const result =
+        `Captured ${frame.frameId}: ${frame.width}x${frame.height}, sha256 ${frame.sha256}, ` +
+        `gui=${manifest.guiVerdict}, driver=${manifest.render === "unknown" ? "unknown" : manifest.render.renderingDriver}, ` +
+        `scene=${manifest.scene}, head=${manifest.git.headSha}, manifest=${frame.frameId}.manifest.json`;
       return {
         content: [
           textBlock(result),
           { type: "image", data, mimeType: "image/png" },
         ],
         _meta: { tool: "capture_game_frame", projectMemory },
-        structuredContent: { result, frame },
+        structuredContent: { result, frame, manifest },
       };
     },
   );

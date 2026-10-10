@@ -1,3 +1,5 @@
+import { isPathInsideRoot } from "../roots.js";
+import { describeAuthorizations } from "../git-branch-authorization.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import { registerAppTool as registerMcpAppTool } from "@modelcontextprotocol/ext-apps/server";
@@ -197,6 +199,7 @@ export function exposedToolNames(
       "project_task",
       "stop_task",
       "approve_task_manifest",
+      "reclaim_workspace",
     );
     if (config.gitRemoteWrite.enabled) {
       tools.splice(tools.indexOf("git_merge") + 1, 0, "git_push");
@@ -555,11 +558,31 @@ export function gitRemotePolicyForWorkspace(
       "GIT_REPOSITORY_NOT_APPROVED: Workspace repository is not approved for remote Git operations.",
     );
   }
+  // Resolve scoped authorizations at CALL time, so an expired or revoked grant
+  // stops working without a restart and without a stale cached allowlist.
+  const now = new Date();
+  const authorizedBranches = config.gitRemoteWrite.branchAuthorizations
+    .filter((entry) => {
+      if (entry.revokedAt) return false;
+      if (entry.expiresAt && !(now.getTime() < Date.parse(entry.expiresAt))) {
+        return false;
+      }
+      return (
+        isPathInsideRoot(repositoryRoot, entry.repositoryRoot) &&
+        isPathInsideRoot(entry.repositoryRoot, repositoryRoot)
+      );
+    })
+    .map((entry) => entry.branch);
+
   return {
     approvedRemotes: config.gitRemoteWrite.approvedRemotes,
     approvedRemoteUrls: config.gitRemoteWrite.approvedRemoteUrls,
-    approvedDestinationBranches:
-      config.gitRemoteWrite.approvedDestinationBranches,
+    approvedDestinationBranches: [
+      ...new Set([
+        ...config.gitRemoteWrite.approvedDestinationBranches,
+        ...authorizedBranches,
+      ]),
+    ],
   };
 }
 
@@ -609,6 +632,10 @@ export function gitRemoteWriteSummary(config: ServerConfig) {
     requireCleanWorkspace: policy.requireCleanWorkspace,
     requireExpectedRemoteSha: policy.requireExpectedRemoteSha,
     requireFastForward: policy.requireFastForward,
+    // Scoped grants are reported with their live state so an operator can see
+    // what is currently usable without reading the config file. Remote URLs are
+    // still deliberately omitted.
+    branchAuthorizations: describeAuthorizations(policy.branchAuthorizations),
   };
 }
 

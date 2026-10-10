@@ -36,6 +36,10 @@ export interface TaskSession {
   environmentInfo?: EnvironmentInfo;
   bootstrap?: BootstrapResult;
   errors: ParamValidationError[];
+  /** Structured parse of this run's output. Raw stdout/stderr are unaffected. */
+  structured?: import("./task-results.js").TaskStructuredResult;
+  /** Whether the source/assembly inputs moved while this run executed. */
+  inputStability?: import("./task-fingerprint.js").TaskInputStability;
 }
 
 export interface TaskRunResult {
@@ -51,6 +55,10 @@ export interface TaskRunResult {
   environmentInfo?: EnvironmentInfo;
   bootstrap?: BootstrapResult;
   errors: ParamValidationError[];
+  /** Structured parse of this run's output. Raw stdout/stderr are unaffected. */
+  structured?: import("./task-results.js").TaskStructuredResult;
+  /** Whether the source/assembly inputs moved while this run executed. */
+  inputStability?: import("./task-fingerprint.js").TaskInputStability;
 }
 
 export interface TaskSessionResult {
@@ -116,6 +124,18 @@ export interface TaskRunnerOptions {
     platform?: NodeJS.Platform,
     options?: WorkspacePythonResolutionOptions,
   ) => EnvironmentInfo;
+  /**
+   * Optional RunnerRegistry used to resolve declared tools (`dotnet`,
+   * `godot-mono`, ...) to an absolute executable with an augmented PATH.
+   * Injectable so tests can drive resolution without a real toolchain.
+   */
+  runnerRegistry?: {
+    resolve(name: string): Promise<{
+      executable: string;
+      environment: NodeJS.ProcessEnv;
+      version?: string;
+    }>;
+  };
 }
 
 export interface BootstrapContext {
