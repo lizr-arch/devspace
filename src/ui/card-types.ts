@@ -11,6 +11,8 @@ export const TOOL_NAMES = [
   "inspect_glb",
   "resume_workspace",
   "reclaim_workspace",
+  "close_workspace_session",
+  "git_delete_merged_branch",
   "open_workspace",
   "project_memory_preflight",
   "read",

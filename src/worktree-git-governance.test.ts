@@ -379,7 +379,10 @@ async function testAuditClassification(): Promise<void> {
   assert.equal(clean.untrackedFileCount, 0);
   assert.equal(clean.unmergedCommitCount, 0);
   assert.deepEqual(clean.risks, []);
-  assert.equal(clean.reclaimable, true);
+  // A normal checkout is never a reclamation candidate, however clean it is.
+  // The verdict is what the lifecycle plan reports; `reclaimable` follows it.
+  assert.equal(clean.verdict, "BLOCKED_NOT_MANAGED");
+  assert.equal(clean.reclaimable, false);
 
   // A dirty tree is never reclaimable, whatever the caller wants.
   writeFileSync(join(repo, "a.txt"), "two\n");
@@ -476,7 +479,13 @@ function testWorktreeDirectoryScan(): void {
     join(worktreeRoot, "known-one"),
   ]);
   assert.equal(scan.directories.length, 2);
-  assert.deepEqual(scan.orphaned, [join(worktreeRoot, "orphan-two")]);
+  // The scan canonicalises every directory so a record and a directory listing
+  // that spell the same path differently (macOS `/var` vs `/private/var`) still
+  // compare equal, which is what stops a live worktree being reported as an
+  // orphan. Compare canonical spellings here too.
+  assert.deepEqual(scan.orphaned, [
+    realpathSync(join(worktreeRoot, "orphan-two")),
+  ]);
 
   // The listing is read-only: nothing was removed by scanning.
   assert.equal(existsSync(join(worktreeRoot, "orphan-two")), true);

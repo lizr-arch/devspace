@@ -62,6 +62,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 8, name: "operations-idempotency" },
       { version: 9, name: "workspace-requested-additional-roots" },
       { version: 10, name: "oauth-authorization-codes" },
+      { version: 11, name: "workspace-session-lifecycle" },
     ]);
   } finally {
     database.close();

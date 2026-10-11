@@ -57,6 +57,11 @@ const migrations: Migration[] = [
     name: "oauth-authorization-codes",
     up: migrateOAuthAuthorizationCodes,
   },
+  {
+    version: 11,
+    name: "workspace-session-lifecycle",
+    up: migrateWorkspaceSessionLifecycle,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -453,6 +458,41 @@ function migrateOAuthAuthorizationCodes(sqlite: Database.Database): void {
 
     create index if not exists oauth_authorization_codes_expires_at_idx
       on oauth_authorization_codes(expires_at_ms);
+  `);
+}
+
+/**
+ * Persist a real lifecycle state per workspace record.
+ *
+ * Before this migration every row was written with `status = 'active'` at
+ * creation and never updated, so a restarted service could not tell a live
+ * session from a week-old finished one. `lifecycle_state` is the authoritative
+ * persisted value; the legacy `status` column is mirrored on every transition
+ * so anything still reading it cannot see a value that contradicts reality.
+ */
+function migrateWorkspaceSessionLifecycle(sqlite: Database.Database): void {
+  addColumnIfMissing(
+    sqlite,
+    "workspace_sessions",
+    "lifecycle_state",
+    "text not null default 'unknown'",
+  );
+  addColumnIfMissing(sqlite, "workspace_sessions", "closed_at", "text");
+  addColumnIfMissing(sqlite, "workspace_sessions", "closed_reason", "text");
+
+  // Existing rows claim "active" unconditionally. Nothing in the database can
+  // prove a session is live after a restart, so they are downgraded to
+  // `unknown` and are only promoted by a real observation at runtime. This is
+  // what makes the audit honest instead of reporting 100% active.
+  sqlite
+    .prepare(
+      "update workspace_sessions set lifecycle_state = 'unknown' where lifecycle_state = 'unknown' or lifecycle_state is null",
+    )
+    .run();
+
+  sqlite.exec(`
+    create index if not exists workspace_sessions_lifecycle_idx
+      on workspace_sessions(lifecycle_state, last_used_at desc);
   `);
 }
 

@@ -28,7 +28,7 @@ export const PACKAGE_VERSION = (
 ).version;
 
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1.2026-10-10+devspace-1.2";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1.2026-10-10+devspace-1.3";
 
 export const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 export const LEGACY_WORKSPACE_APP_RESOURCE_URI =
@@ -64,12 +64,6 @@ export const IMPORT_PNG_TOOL_ANNOTATIONS = {
   idempotentHint: false,
   openWorldHint: true,
 };
-
-export interface RunningServer {
-  app: ReturnType<typeof createMcpExpressApp>;
-  config: ServerConfig;
-  close(): void;
-}
 
 export interface ServiceRuntime {
   bootId: string;
@@ -182,6 +176,28 @@ export interface CreateServerOptions {
   };
 }
 
+/**
+ * The structured error every DevSpace tool returns when it refuses an action.
+ *
+ * Matches `DevSpaceErrorPayload` exactly. It is part of the tool output schema
+ * on purpose: a refusal must be a valid, inspectable payload rather than a
+ * transport-level failure the model cannot reason about.
+ */
+export const toolErrorOutputSchema = z
+  .object({
+    code: z.string(),
+    // The wrapper's `DevSpaceErrorPayload` carries all of these; the in-handler
+    // `gitToolFailure` helper carries only code+message. Both are valid.
+    layer: z.string().optional(),
+    message: z.string(),
+    retryable: z.boolean().optional(),
+    safeToRetry: z.boolean().optional(),
+    recoveryHint: z.string().optional(),
+    nextRecommendedTools: z.array(z.string()).optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
+  })
+  .optional();
+
 export function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
   return {
     result: z
@@ -260,6 +276,10 @@ export const workspaceContextOutputSchema: z.ZodRawShape = {
   workspaceId: z.string(),
   root: z.string(),
   mode: z.enum(["checkout", "worktree"]),
+  /** Authoritative lifecycle state of this session. */
+  lifecycleState: z
+    .enum(["active", "idle", "closing", "closed", "stale", "unknown"])
+    .optional(),
   sourceRoot: z.string().optional(),
   worktree: z
     .object({
@@ -287,6 +307,13 @@ export const workspaceSessionOutputSchema = z.object({
   root: z.string(),
   mode: z.enum(["checkout", "worktree"]),
   sourceRoot: z.string().optional(),
+  /**
+   * Authoritative persisted lifecycle state. The legacy `status` column is a
+   * mirror and must not be used to decide whether a session is live.
+   */
+  lifecycleState: z
+    .enum(["active", "idle", "closing", "closed", "stale", "unknown"])
+    .optional(),
   additionalRoots: z.array(effectiveAdditionalRootOutputSchema),
   ...additionalRootsAuthorizationOutputSchema,
   managed: z.boolean(),

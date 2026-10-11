@@ -505,8 +505,7 @@ export class GameSessionManager {
     sessionId: string,
     offsetBytes = 0,
     maxBytes = 64 * 1024,
-  ): {
-    output: string;
+  ): {    output: string;
     outputOffsetBytes: number;
     nextOutputOffsetBytes: number;
     totalBytes: number;
@@ -533,6 +532,24 @@ export class GameSessionManager {
       totalBytes: log.length,
       truncated: end < log.length,
     };
+  }
+
+  /**
+   * Non-terminal sessions, optionally filtered to one workspace.
+   *
+   * Read-only and side-effect free: it exists so the workspace lifecycle audit
+   * and `close_workspace_session` can see a live engine process without
+   * attaching to it or starting anything.
+   */
+  listActiveSessions(workspaceId?: string): GameSessionSnapshot[] {
+    this.initialize();
+    return Array.from(this.sessions.values())
+      .filter((session) => !isTerminal(session.status))
+      .filter(
+        (session) =>
+          workspaceId === undefined || session.workspaceId === workspaceId,
+      )
+      .map((session) => publicSnapshot(session));
   }
 
   async stop(

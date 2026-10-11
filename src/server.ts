@@ -31,7 +31,9 @@ import {
   serverInstructions,
   createServiceRuntime,
   toolNamesFor,
+  setToolLeaseRegistry,
 } from "./server/server-helpers.js";
+import { LsofWorktreeProcessProbe } from "./workspace-process-probe.js";
 import { registerInfoTools } from "./server/tools-info.js";
 import {
   registerWorkspaceListTools,
@@ -114,6 +116,12 @@ export {
 export interface RunningServer {
   app: express.Express;
   config: ServerConfig;
+  /**
+   * The fully wired server context, exposed so verification harnesses can drive
+   * the exact same registered tool surface the live service serves instead of
+   * re-implementing it.
+   */
+  ctx: ServerContext;
   close: () => void;
 }
 
@@ -137,6 +145,9 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   }
 
   registerInfoTools(server, ctx);
+  // The tool wrapper leases the workspace for the whole call so occupancy is
+  // observable rather than inferred. See setToolLeaseRegistry.
+  setToolLeaseRegistry(ctx.workspaces);
   registerWorkspaceListTools(server, ctx);
   registerArtifactInspectionTools(server, ctx);
   registerGitInspectionTools(server, ctx);
@@ -259,11 +270,6 @@ export function createServer(
     config.stateDir,
     options.projectMemoryRunner,
   );
-  const workspaces = new WorkspaceRegistry(
-    config,
-    workspaceStore,
-    projectMemory,
-  );
   const reviewCheckpoints = createReviewCheckpointManager();
   const artifacts = new ArtifactLedger(config.stateDir);
   const assetReceipts = new AssetReceiptStore(config.stateDir);
@@ -286,6 +292,36 @@ export function createServer(
   const inspectors = new ExternalInspectorManager(config.stateDir, runners);
   const requestMonitor = new LiveRequestMonitor();
   const resourceMonitor = new ProcessResourceMonitor();
+
+  /**
+   * The workspace registry needs to see every kind of live work, because
+   * "is this workspace actually in use?" cannot be answered from the workspace
+   * store alone. These probes are read-only and are consulted at decision time.
+   */
+  const workspaces = new WorkspaceRegistry(
+    config,
+    workspaceStore,
+    projectMemory,
+    {
+      activeJobIdsForRoot: (root) => jobs.activeJobIdsForRoot(root),
+      activeGameSessionIds: (workspaceId) =>
+        games
+          .listActiveSessions(workspaceId)
+          .map((session) => session.sessionId),
+      activeTaskSessionIds: (workspaceId) =>
+        tasks
+          .listSessions(workspaceId, 50)
+          .filter((session) => session.status === "running")
+          .map((session) => session.sessionId),
+      // Read-only OS probe: DevSpace cannot see a shell or editor the operator
+      // started by hand inside a worktree, and reclaiming over one is exactly
+      // the accident this lifecycle exists to prevent.
+      processProbe: new LsofWorktreeProcessProbe({
+        timeoutMs: config.worktreeCleanup.processProbeTimeoutMs,
+      }),
+      requireNoForeignProcess: config.worktreeCleanup.requireNoForeignProcess,
+    },
+  );
 
   const toolNames = toolNamesFor(config);
   const widgetMeta = (
@@ -344,6 +380,7 @@ export function createServer(
   return {
     app,
     config,
+    ctx,
     close: () => {
       if (closed) return;
       closed = true;

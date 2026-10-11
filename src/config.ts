@@ -6,6 +6,7 @@ import {
   isSafeAuthorizationBranch,
   type GitBranchAuthorization,
 } from "./git-branch-authorization.js";
+import { DEFAULT_PROTECTED_BRANCH_PATTERNS } from "./git-branch-cleanup.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import {
   DEFAULT_MAX_MCP_SESSIONS,
@@ -50,6 +51,38 @@ export interface GitRemoteWritePolicy {
   requireExpectedRemoteSha: true;
   requireFastForward: true;
 }
+export interface WorktreeCleanupPolicy {
+  /**
+   * Extra exact local branch names that must never be deleted by
+   * `git_delete_merged_branch`. `main`, `master` and the repository's own
+   * default branch are always protected and cannot be removed from this list.
+   */
+  protectedBranches: string[];
+  /**
+   * Glob-ish branch patterns (`feat/terrain-*`) that are still under
+   * development and must not be deleted even when merged. A remote backup is
+   * not evidence that a development branch is finished.
+   */
+  protectedBranchPatterns: string[];
+  /**
+   * Worktree directory basenames that must never be reported as reclamation
+   * candidates. Use this for long-lived parallel work such as a terrain
+   * tooling chain.
+   */
+  protectedWorktreePatterns: string[];
+  /** Ref that defines the "official mainline" for merge proof. */
+  mainlineRefs: string[];
+  /**
+   * Whether a reclamation candidate must also be free of foreign processes
+   * (a shell, an editor, a hand-started build) whose working directory is the
+   * worktree. Enabled by default: DevSpace cannot see those processes any other
+   * way, and reclaiming a worktree out from under one is destructive.
+   */
+  requireNoForeignProcess: boolean;
+  /** Hard bound on how long the process probe may take, in milliseconds. */
+  processProbeTimeoutMs: number;
+}
+
 export interface GodotImportPolicy {
   enabled: boolean;
   approvedProjectRoots: string[];
@@ -101,6 +134,7 @@ export interface ServerConfig {
   runners: RunnerRegistryConfig;
   gitRemoteWrite: GitRemoteWritePolicy;
   godotImport: GodotImportPolicy;
+  worktreeCleanup: WorktreeCleanupPolicy;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -895,7 +929,110 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       files.config.godotImport,
       allowedRoots,
     ),
+    worktreeCleanup: parseWorktreeCleanupPolicy(
+      env,
+      files.config.worktreeCleanup,
+    ),
   };
+}
+
+export const DEFAULT_CLEANUP_PROTECTED_BRANCHES: readonly string[] = [
+  "main",
+  "master",
+];
+export const DEFAULT_CLEANUP_PROTECTED_BRANCH_PATTERNS: readonly string[] =
+  DEFAULT_PROTECTED_BRANCH_PATTERNS;
+export const DEFAULT_CLEANUP_PROTECTED_WORKTREE_PATTERNS: readonly string[] = [];
+export const DEFAULT_CLEANUP_MAINLINE_REFS: readonly string[] = [
+  "refs/remotes/origin/main",
+  "refs/heads/main",
+  "refs/remotes/origin/master",
+  "refs/heads/master",
+];
+
+/**
+ * Cleanup policy defaults are intentionally conservative: with no
+ * configuration at all, only `main`/`master` and their remote counterparts are
+ * protected and nothing else is blessed. Operators widen the protection list
+ * for repositories with release branches or long-lived parallel work.
+ */
+function parseWorktreeCleanupPolicy(
+  env: NodeJS.ProcessEnv,
+  value:
+    | {
+        protectedBranches?: string[];
+        protectedBranchPatterns?: string[];
+        protectedWorktreePatterns?: string[];
+        mainlineRefs?: string[];
+        requireNoForeignProcess?: boolean;
+        processProbeTimeoutMs?: number;
+      }
+    | undefined,
+): WorktreeCleanupPolicy {
+  const protectedBranches = mergeCleanupList(
+    DEFAULT_CLEANUP_PROTECTED_BRANCHES,
+    env.DEVSPACE_CLEANUP_PROTECTED_BRANCHES,
+    value?.protectedBranches,
+  );
+  const protectedBranchPatterns = mergeCleanupList(
+    DEFAULT_CLEANUP_PROTECTED_BRANCH_PATTERNS,
+    env.DEVSPACE_CLEANUP_PROTECTED_BRANCH_PATTERNS,
+    value?.protectedBranchPatterns,
+  );
+  const protectedWorktreePatterns = mergeCleanupList(
+    DEFAULT_CLEANUP_PROTECTED_WORKTREE_PATTERNS,
+    env.DEVSPACE_CLEANUP_PROTECTED_WORKTREES,
+    value?.protectedWorktreePatterns,
+  );
+  const mainlineRefs = mergeCleanupList(
+    DEFAULT_CLEANUP_MAINLINE_REFS,
+    env.DEVSPACE_CLEANUP_MAINLINE_REFS,
+    value?.mainlineRefs,
+  );
+  for (const pattern of [
+    ...protectedBranches,
+    ...protectedBranchPatterns,
+    ...protectedWorktreePatterns,
+  ]) {
+    if (pattern.length === 0 || pattern.length > 255 || pattern.includes("\0")) {
+      throw new Error(`Invalid worktree cleanup pattern: ${pattern}`);
+    }
+  }
+  for (const ref of mainlineRefs) {
+    if (!ref.startsWith("refs/") || ref.includes("\0") || ref.includes(" ")) {
+      throw new Error(`Invalid worktree cleanup mainline ref: ${ref}`);
+    }
+  }
+  return {
+    protectedBranches,
+    protectedBranchPatterns,
+    protectedWorktreePatterns,
+    mainlineRefs,
+    requireNoForeignProcess:
+      env.DEVSPACE_CLEANUP_REQUIRE_NO_FOREIGN_PROCESS === undefined
+        ? true
+        : parseBoolean(env.DEVSPACE_CLEANUP_REQUIRE_NO_FOREIGN_PROCESS),
+    processProbeTimeoutMs: parsePositiveInteger(
+      env.DEVSPACE_CLEANUP_PROCESS_PROBE_TIMEOUT_MS,
+      4_000,
+      "DEVSPACE_CLEANUP_PROCESS_PROBE_TIMEOUT_MS",
+    ),
+  };
+}
+
+function mergeCleanupList(
+  defaults: readonly string[],
+  envValue: string | undefined,
+  configured: string[] | undefined,
+): string[] {
+  const extra = [
+    ...(configured ?? []),
+    ...(envValue
+      ?.split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean) ?? []),
+  ];
+  return [...new Set([...defaults, ...extra])];
 }
 
 function parsePublicBaseUrl(value: string): string {

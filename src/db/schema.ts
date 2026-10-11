@@ -12,6 +12,14 @@ export const workspaceSessions = sqliteTable(
     id: text("id").primaryKey(),
     root: text("root").notNull(),
     status: text("status").notNull().default("active"),
+    /**
+     * Authoritative lifecycle state. The legacy `status` column is mirrored on
+     * every transition and must never be used to decide whether a session is
+     * live: it was historically written `active` at creation and never updated.
+     */
+    lifecycleState: text("lifecycle_state").notNull().default("unknown"),
+    closedAt: text("closed_at"),
+    closedReason: text("closed_reason"),
     mode: text("mode").notNull().default("checkout"),
     sourceRoot: text("source_root"),
     baseRef: text("base_ref"),
@@ -26,6 +34,10 @@ export const workspaceSessions = sqliteTable(
   (table) => [
     index("workspace_sessions_root_idx").on(table.root, table.lastUsedAt),
     index("workspace_sessions_status_idx").on(table.status, table.lastUsedAt),
+    index("workspace_sessions_lifecycle_idx").on(
+      table.lifecycleState,
+      table.lastUsedAt,
+    ),
   ],
 );
 

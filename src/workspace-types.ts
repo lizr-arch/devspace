@@ -7,6 +7,12 @@ import type {
   ProjectMemoryActiveState,
   ProjectMemoryPreflightView,
 } from "./project-memory.js";
+import type { WorkspaceAuditRisk } from "./workspace-audit.js";
+import type {
+  BranchDeleteVerdict,
+  WorkspaceCleanupVerdict,
+  WorkspaceLifecycleState,
+} from "./workspace-lifecycle.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -82,10 +88,74 @@ export interface WorkspaceSessionSummary {
   detached?: boolean;
   branch?: string;
   status: string;
+  /** Authoritative persisted lifecycle state; `status` is the legacy mirror. */
+  lifecycleState: WorkspaceLifecycleState;
   createdAt: string;
   lastUsedAt: string;
   resumable: boolean;
   unavailableReason?: string;
+}
+
+/**
+ * One row of the unified, read-only cleanup plan.
+ *
+ * `verdict` is the single classification an operator acts on; the remaining
+ * fields are the evidence behind it. `branchDelete` answers the separate
+ * question of whether the local branch that this worktree sits on could be
+ * deleted with `git_delete_merged_branch`.
+ */
+export interface WorkspaceCleanupPlanEntry {
+  workspaceId: string | null;
+  root: string;
+  mode: WorkspaceMode;
+  managed: boolean;
+  branch: string | null;
+  detached: boolean;
+  headSha: string | null;
+  clean: boolean;
+  dirtyFileCount: number;
+  untrackedFileCount: number;
+  unmergedCommitCount: number;
+  hasRunningTask: boolean;
+  activeJobIds: string[];
+  activeGameSessionIds: string[];
+  activeTaskSessionIds: string[];
+  sessionState: WorkspaceLifecycleState | null;
+  sessionIsLive: boolean;
+  liveLeases: number;
+  staleRecord: boolean;
+  isManagedWorktree: boolean;
+  verdict: WorkspaceCleanupVerdict;
+  reclaimable: boolean;
+  blockedReasons: string[];
+  risks: WorkspaceAuditRisk[];
+  branchDelete?: {
+    branch: string;
+    sha: string | null;
+    verdict: BranchDeleteVerdict;
+    reasons: string[];
+    checkedOutAt: string[];
+    mainlineRef: string | null;
+    mainlineSha: string | null;
+    hasUpstream: boolean;
+  };
+}
+
+export interface WorkspaceCloseSessionResult {
+  workspaceId: string;
+  root: string;
+  lifecycleState: WorkspaceLifecycleState;
+  previousState: WorkspaceLifecycleState;
+  alreadyClosed: boolean;
+  headSha: string | null;
+  released: {
+    liveLeases: number;
+    activeJobIds: string[];
+    activeGameSessionIds: string[];
+    activeTaskSessionIds: string[];
+  };
+  reclaimEligible: boolean;
+  notes: string[];
 }
 
 export interface WorkspaceReadPath {

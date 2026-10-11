@@ -69,6 +69,19 @@ export async function rollbackImportedAsset(input: {
   }
 }
 
+/**
+ * Tools that manage the occupancy of a workspace themselves and therefore must
+ * not be counted as ordinary holders of it.
+ *
+ * `close_workspace_session` takes its own exclusive lease (so a concurrent
+ * caller is still detected) and would otherwise refuse every call because it
+ * would see itself as an in-flight operation.
+ */
+const SELF_LEASING_TOOLS = new Set([
+  "close_workspace_session",
+  "reclaim_workspace",
+]);
+
 export const registerAppTool: typeof registerMcpAppTool = ((
   server: Parameters<typeof registerMcpAppTool>[0],
   name: Parameters<typeof registerMcpAppTool>[1],
@@ -77,6 +90,18 @@ export const registerAppTool: typeof registerMcpAppTool = ((
 ) => {
   const capability = requiredCapabilityForTool(String(name));
   const meta = (definition as { _meta?: Record<string, unknown> })._meta ?? {};
+  /**
+   * Every workspace tool call holds a real lease for its whole duration.
+   *
+   * This is what makes `close_workspace_session` fail closed: a concurrent
+   * write, read or Git operation on the workspace is visible as an in-flight
+   * lease rather than an invisible promise, so the workspace can never be
+   * declared idle while another request is mid-flight in it.
+   */
+  const devspaceMeta = {
+    requiredCapability: capability,
+    autoLease: !SELF_LEASING_TOOLS.has(String(name)),
+  };
   return registerMcpAppTool(
     server,
     name,
@@ -84,16 +109,27 @@ export const registerAppTool: typeof registerMcpAppTool = ((
       ...definition,
       _meta: {
         ...meta,
-        devspace: { requiredCapability: capability },
+        devspace: devspaceMeta,
       },
     },
     (async (...args: unknown[]) => {
       try {
-        const result = await Reflect.apply(
-          handler as (...handlerArgs: unknown[]) => unknown,
-          undefined,
-          args,
-        );
+        const first = args[0] as { workspaceId?: unknown } | undefined;
+        const workspaceId =
+          first && typeof first.workspaceId === "string"
+            ? first.workspaceId
+            : undefined;
+        const registry = workspaceRegistryForToolCall();
+        const invoke = async () =>
+          await Reflect.apply(
+            handler as (...handlerArgs: unknown[]) => unknown,
+            undefined,
+            args,
+          );
+        const result =
+          workspaceId && registry && devspaceMeta.autoLease
+            ? await registry.leaseForToolCall(workspaceId, invoke)
+            : await invoke();
         return attachRegisteredToolName(String(name), result);
       } catch (error) {
         const { message, errorPayload } = formatErrorRemedy(error);
@@ -113,6 +149,33 @@ export const registerAppTool: typeof registerMcpAppTool = ((
     }) as typeof handler,
   );
 }) as typeof registerMcpAppTool;
+
+/**
+ * Set by the server at startup so the tool wrapper can hold a lease without
+ * every tool module importing the registry. Returns undefined before the
+ * registry exists, in which case the wrapper simply runs the handler.
+ */
+/**
+ * Set by the server at startup so the tool wrapper can hold a lease without
+ * every tool module importing the registry. Returns undefined before the
+ * registry exists, in which case the wrapper simply runs the handler.
+ *
+ * The registry is exposed through a deliberately narrow structural type; the
+ * wrapper never reads the workspace object itself.
+ */
+interface ToolLeaseRegistry {
+  leaseForToolCall(workspaceId: string, run: () => Promise<unknown>): Promise<unknown>;
+}
+
+let activeWorkspaceRegistry: ToolLeaseRegistry | undefined;
+
+export function setToolLeaseRegistry(registry: ToolLeaseRegistry): void {
+  activeWorkspaceRegistry = registry;
+}
+
+function workspaceRegistryForToolCall(): ToolLeaseRegistry | undefined {
+  return activeWorkspaceRegistry;
+}
 
 export function toolNamesFor(config: ServerConfig): ToolNames {
   return config.toolNaming === "short"
@@ -185,6 +248,7 @@ export function exposedToolNames(
       "git_unstage_paths",
       "git_commit",
       "git_branch",
+      "git_delete_merged_branch",
       "git_fetch",
       "git_merge",
       "start_game_session",
@@ -199,6 +263,7 @@ export function exposedToolNames(
       "project_task",
       "stop_task",
       "approve_task_manifest",
+      "close_workspace_session",
       "reclaim_workspace",
     );
     if (config.gitRemoteWrite.enabled) {
@@ -330,6 +395,7 @@ export function requiredCapabilityForTool(tool: string): ToolCapability {
       "git_unstage_paths",
       "git_commit",
       "git_branch",
+      "git_delete_merged_branch",
       "git_fetch",
       "git_merge",
       "git_push",
@@ -400,7 +466,7 @@ export function serverInstructions(
     return `Use DevSpace as a read-only local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later read, search, directory, and show-changes tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}${toolNames.write}, ${toolNames.edit}, and ${toolNames.shell} are disabled in this server mode.${projectMemory}`;
   }
 
-  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, job, capture, artifact, and Git tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or explicit complete rewrites, import_asset for binary asset intake, start_job followed by wait_job for named validation runners, list_jobs to recover jobs after a client interruption, poll_job only for explicit paginated log reads, cancel_job to stop a job, start_capture for a validated project capture profile, inspect_artifact and list_artifacts for evidence, and preview_artifact or publish_artifact for short-lived review URLs. Arbitrary shell command execution is not exposed.${showChanges}${projectMemory}`;
+  return `Use DevSpace as a local coding workspace. Call devspace_info when diagnosing tool discovery or server freshness. Use list_workspaces and resume_workspace to recover a persisted checkout or managed worktree by workspaceId after a server or client restart. Call ${toolNames.openWorkspace} once per new project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, job, capture, artifact, and Git tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. For Git lifecycle cleanup, always start read-only: call list_workspaces with audit=true and cleanupPlan=true, then close a session with close_workspace_session only when the workspace has no live operation, job, task or game session, then re-audit, then reclaim_workspace with the exact HEAD SHA, and finally git_delete_merged_branch only for a branch that is provably an ancestor of main. Each step can fail on its own; never cascade them blindly. ${agentsMd}${skills}${inspectionText}Prefer ${toolNames.edit} for targeted text modifications, ${toolNames.write} only for new text files or explicit complete rewrites, import_asset for binary asset intake, start_job followed by wait_job for named validation runners, list_jobs to recover jobs after a client interruption, poll_job only for explicit paginated log reads, cancel_job to stop a job, start_capture for a validated project capture profile, inspect_artifact and list_artifacts for evidence, and preview_artifact or publish_artifact for short-lived review URLs. Arbitrary shell command execution is not exposed.${showChanges}${projectMemory}`;
 }
 
 export function formatRunnerSummary(runners: RunnerInspection[]): string {

@@ -12,7 +12,12 @@ import {
   unstageGitPaths,
 } from "../git-tools.js";
 import {
+  deleteMergedBranch,
+  listLocalBranchVerdicts,
+} from "../git-branch-cleanup.js";
+import {
   resultOutputSchema,
+  toolErrorOutputSchema,
   type ServerContext,
 } from "./server-types.js";
 import {
@@ -175,16 +180,18 @@ export function registerGitMutationTools(
         },
       },
       async ({ workspaceId, paths, projectMemoryReceiptId }) => {
-        const workspace = workspaces.getWorkspace(workspaceId);
         const projectMemory = workspaces.observeProjectMemoryAccess(
           workspaceId,
           tool,
           projectMemoryReceiptId,
         );
-        const status =
+        // Holding a real lease is what lets close_workspace_session and the
+        // lifecycle audit see that this workspace is busy right now.
+        const status = await workspaces.withLease(workspaceId, (workspace) =>
           tool === "git_stage_paths"
-            ? await stageGitPaths(workspace.root, paths)
-            : await unstageGitPaths(workspace.root, paths);
+            ? stageGitPaths(workspace.root, paths)
+            : unstageGitPaths(workspace.root, paths),
+        );
         const result = `${tool === "git_stage_paths" ? "Staged" : "Unstaged"} ${paths.length} path(s). Index sha256 ${status.stagedDiffSha256}.`;
         return {
           content: [textBlock(result)],
@@ -223,17 +230,18 @@ export function registerGitMutationTools(
       expectedStagedDiffSha256,
       projectMemoryReceiptId,
     }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
         workspaceId,
         "git_commit",
         projectMemoryReceiptId,
       );
-      const commit = await commitGit({
-        workspaceRoot: workspace.root,
-        message,
-        expectedStagedDiffSha256,
-      });
+      const commit = await workspaces.withLease(workspaceId, (workspace) =>
+        commitGit({
+          workspaceRoot: workspace.root,
+          message,
+          expectedStagedDiffSha256,
+        }),
+      );
       const result = `Created local commit ${commit.headSha}.`;
       return {
         content: [textBlock(result)],
@@ -286,19 +294,20 @@ export function registerGitMutationTools(
       startPoint,
       projectMemoryReceiptId,
     }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
         workspaceId,
         "git_branch",
         projectMemoryReceiptId,
       );
-      const branch = await manageGitBranch({
-        workspaceRoot: workspace.root,
-        action,
-        name,
-        checkout,
-        startPoint,
-      });
+      const branch = await workspaces.withLease(workspaceId, (workspace) =>
+        manageGitBranch({
+          workspaceRoot: workspace.root,
+          action,
+          name,
+          checkout,
+          startPoint,
+        }),
+      );
       const statusLine = branch.detached
         ? "detached"
         : `on ${branch.currentBranch}`;
@@ -311,6 +320,148 @@ export function registerGitMutationTools(
     },
   );
 
+  registerAppTool(
+    server,
+    "git_delete_merged_branch",
+    {
+      title: "Delete a merged local Git branch",
+      description:
+        "Delete ONE local branch that is provably merged, using `git branch -d` only. Refuses protected or development branches (main, master, the repository default, release/*, feat/*, and any operator-configured pattern), branches checked out in any worktree, branches whose SHA or mainline SHA changed since inspection, branches with commits that are not ancestors of main, and branches that any live workspace depends on. Force deletion (-D), remote branch deletion, tag deletion and ref surgery are not available at all. Set action=list to only read branch verdicts. After deleting, the tool proves main, HEAD and every remote-tracking ref are unchanged.",
+      inputSchema: z.strictObject({
+        workspaceId: z
+          .string()
+          .describe(
+            "Workspace whose repository holds the branch. Any worktree of the repository works.",
+          ),
+        branchName: z
+          .string()
+          .max(255)
+          .optional()
+          .describe(
+            "Local branch to delete. Required unless action=list.",
+          ),
+        action: z
+          .enum(["list", "delete"])
+          .optional()
+          .describe(
+            "Defaults to delete. Use list for a read-only verdict per local branch.",
+          ),
+        expectedBranchSha: z
+          .string()
+          .regex(/^[0-9a-f]{40}$/)
+          .optional()
+          .describe(
+            "Exact current branch SHA from the cleanup plan. Required for action=delete.",
+          ),
+        expectedMainSha: z
+          .string()
+          .regex(/^[0-9a-f]{40}$/)
+          .optional()
+          .describe(
+            "Exact current mainline SHA from the cleanup plan. Required for action=delete.",
+          ),
+        confirmBranchName: z
+          .string()
+          .max(255)
+          .optional()
+          .describe(
+            "Must exactly equal branchName. Required for action=delete.",
+          ),
+        projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+      }),
+      outputSchema: resultOutputSchema({
+        branch: z.unknown().optional(),
+        branches: z.unknown().optional(),
+        error: toolErrorOutputSchema,
+      }),
+      _meta: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({
+      workspaceId,
+      branchName,
+      action,
+      expectedBranchSha,
+      expectedMainSha,
+      confirmBranchName,
+      projectMemoryReceiptId,
+    }) => {
+      try {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        if ((action ?? "delete") === "list") {
+          const branches = await listLocalBranchVerdicts({
+            workspaceRoot: workspace.root,
+            policy: workspaces.branchCleanupPolicy(),
+          });
+          const deletable = branches.filter(
+            (entry) => entry.verdict === "DELETABLE_MERGED",
+          );
+          const result = [
+            `Local branches: ${branches.length}; deletable (merged, unused): ${deletable.length}.`,
+            ...branches.map(
+              (entry) =>
+                `  ${entry.verdict} | ${entry.branch} | ${entry.sha ?? "missing"} | ${entry.reasons.join("; ")}`,
+            ),
+            "Read-only listing. Nothing was deleted.",
+          ].join("\n");
+          return {
+            content: [textBlock(result)],
+            _meta: { tool: "git_delete_merged_branch" },
+            structuredContent: { result, branches },
+          };
+        }
+
+        if (!branchName) {
+          throw new Error(
+            "GIT_BRANCH_NAME_REQUIRED: branchName is required for action=delete.",
+          );
+        }
+        if (!expectedBranchSha || !expectedMainSha || !confirmBranchName) {
+          throw new Error(
+            "GIT_BRANCH_CONFIRMATION_REQUIRED: action=delete requires expectedBranchSha, expectedMainSha and confirmBranchName.",
+          );
+        }
+        const activeDependents = await workspaces.branchActiveDependents(
+          workspace.root,
+          // This call holds a lease on `workspaceId` itself; excluding it keeps
+          // the dependency check about *other* workspaces.
+          { excludeWorkspaceId: workspaceId },
+        );
+        const branch = await deleteMergedBranch({
+          workspaceRoot: workspace.root,
+          branchName,
+          expectedBranchSha,
+          expectedMainSha,
+          confirmation: confirmBranchName,
+          policy: workspaces.branchCleanupPolicy(),
+          activeDependents,
+        });
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "git_delete_merged_branch",
+          projectMemoryReceiptId,
+        );
+        const result = [
+          `Deleted local branch ${branch.branch} (was ${branch.deletedSha}).`,
+          `Mainline ${branch.mainlineRef} unchanged at ${branch.mainlineShaAfter}.`,
+          `HEAD unchanged at ${branch.headShaAfter}.`,
+          `Remote-tracking refs unchanged: ${String(branch.remoteRefsUnchanged)}. No remote branch was touched.`,
+        ].join("\n");
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "git_delete_merged_branch", projectMemory },
+          structuredContent: { result, branch },
+        };
+      } catch (error) {
+        return gitToolFailure("git_delete_merged_branch", error, undefined);
+      }
+    },
+  );
   registerAppTool(
     server,
     "git_fetch",
@@ -330,7 +481,7 @@ export function registerGitMutationTools(
       }),
       outputSchema: resultOutputSchema({
         fetch: z.unknown().optional(),
-        error: z.object({ code: z.string(), message: z.string() }).optional(),
+        error: toolErrorOutputSchema,
       }),
       _meta: {},
       annotations: {
@@ -347,21 +498,22 @@ export function registerGitMutationTools(
       expectedHeadSha,
       projectMemoryReceiptId,
     }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
         workspaceId,
         "git_fetch",
         projectMemoryReceiptId,
       );
       try {
-        const policy = gitRemotePolicyForWorkspace(config, workspace);
-        const fetch = await fetchGit({
-          workspaceRoot: workspace.root,
-          approvedRemotes: policy.approvedRemotes,
-          approvedRemoteUrls: policy.approvedRemoteUrls,
-          remote,
-          prune,
-          expectedHeadSha,
+        const fetch = await workspaces.withLease(workspaceId, async (workspace) => {
+          const policy = gitRemotePolicyForWorkspace(config, workspace);
+          return fetchGit({
+            workspaceRoot: workspace.root,
+            approvedRemotes: policy.approvedRemotes,
+            approvedRemoteUrls: policy.approvedRemoteUrls,
+            remote,
+            prune,
+            expectedHeadSha,
+          });
         });
         const result = [
           `Fetched ${fetch.remote} (prune=${String(fetch.prune)}).`,
@@ -400,7 +552,7 @@ export function registerGitMutationTools(
       }),
       outputSchema: resultOutputSchema({
         merge: z.unknown().optional(),
-        error: z.object({ code: z.string(), message: z.string() }).optional(),
+        error: toolErrorOutputSchema,
       }),
       _meta: {},
       annotations: {
@@ -419,21 +571,22 @@ export function registerGitMutationTools(
       expectedSourceSha,
       projectMemoryReceiptId,
     }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
       const projectMemory = workspaces.observeProjectMemoryAccess(
         workspaceId,
         "git_merge",
         projectMemoryReceiptId,
       );
       try {
-        await assertManagedAttachedGitWorkspace(workspace);
-        const merge = await mergeGit({
-          workspaceRoot: workspace.root,
-          sourceRef,
-          mode,
-          expectedHeadSha,
-          commitMessage,
-          expectedSourceSha,
+        const merge = await workspaces.withLease(workspaceId, async (workspace) => {
+          await assertManagedAttachedGitWorkspace(workspace);
+          return mergeGit({
+            workspaceRoot: workspace.root,
+            sourceRef,
+            mode,
+            expectedHeadSha,
+            commitMessage,
+            expectedSourceSha,
+          });
         });
         const result = [
           `Merged ${merge.sourceRef} (${merge.sourceSha}) into ${merge.branch}.`,
@@ -499,26 +652,27 @@ export function registerGitMutationTools(
         verifyAncestor,
         projectMemoryReceiptId,
       }) => {
-        const workspace = workspaces.getWorkspace(workspaceId);
         const projectMemory = workspaces.observeProjectMemoryAccess(
           workspaceId,
           "git_push",
           projectMemoryReceiptId,
         );
         try {
-          await assertManagedAttachedGitWorkspace(workspace);
-          const policy = gitRemotePolicyForWorkspace(config, workspace);
-          const push = await pushGit({
-            workspaceRoot: workspace.root,
-            approvedRemotes: policy.approvedRemotes,
-            approvedRemoteUrls: policy.approvedRemoteUrls,
-            approvedDestinationBranches: policy.approvedDestinationBranches,
-            remote,
-            sourceRef,
-            destinationBranch,
-            expectedLocalSha,
-            expectedRemoteSha,
-            verifyAncestor,
+          const push = await workspaces.withLease(workspaceId, async (workspace) => {
+            await assertManagedAttachedGitWorkspace(workspace);
+            const policy = gitRemotePolicyForWorkspace(config, workspace);
+            return pushGit({
+              workspaceRoot: workspace.root,
+              approvedRemotes: policy.approvedRemotes,
+              approvedRemoteUrls: policy.approvedRemoteUrls,
+              approvedDestinationBranches: policy.approvedDestinationBranches,
+              remote,
+              sourceRef,
+              destinationBranch,
+              expectedLocalSha,
+              expectedRemoteSha,
+              verifyAncestor,
+            });
           });
           const result = [
             `Pushed ${push.localSha} to ${push.remote}/${push.destinationBranch}.`,

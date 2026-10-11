@@ -74,6 +74,20 @@ export interface DevspaceUserConfig {
     defaultTimeoutSeconds?: number;
     maxTimeoutSeconds?: number;
   };
+  worktreeCleanup?: {
+    /** Exact branch names that `git_delete_merged_branch` must never remove. */
+    protectedBranches?: string[];
+    /** Branch patterns such as `feat/terrain-*` that stay protected. */
+    protectedBranchPatterns?: string[];
+    /** Worktree directory basenames excluded from reclamation candidates. */
+    protectedWorktreePatterns?: string[];
+    /** Refs that count as the official mainline for merge proof. */
+    mainlineRefs?: string[];
+    /** Require reclamation candidates to have no foreign process inside them. */
+    requireNoForeignProcess?: boolean;
+    /** Hard bound on the read-only process probe, in milliseconds. */
+    processProbeTimeoutMs?: number;
+  };
 }
 
 export interface DevspaceAuthConfig {

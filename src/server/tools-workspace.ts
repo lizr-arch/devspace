@@ -3,6 +3,7 @@ import * as z from "zod/v4";
 import { normalizeAdditionalRoots } from "../roots.js";
 import {
   resultOutputSchema,
+  toolErrorOutputSchema,
   workspaceSessionOutputSchema,
   workspaceContextOutputSchema,
   projectMemoryPreflightOutputSchema,
@@ -29,7 +30,7 @@ export function registerWorkspaceListTools(
   server: McpServer,
   ctx: ServerContext,
 ): void {
-  const { config, workspaces, jobs } = ctx;
+  const { config, workspaces, jobs, games, tasks } = ctx;
 
   registerAppTool(
     server,
@@ -50,7 +51,13 @@ export function registerWorkspaceListTools(
           .boolean()
           .optional()
           .describe(
-            "Include a read-only lifecycle audit: real state derived from disk and Git, uncommitted/untracked/unmerged/active-job risks, and whether each workspace is a safe reclamation CANDIDATE. The persisted status column is never trusted.",
+            "Include a read-only lifecycle audit: real state derived from disk, Git and live runtime activity, uncommitted/untracked/unmerged/active-job risks, a single cleanup verdict, and whether each workspace is a safe reclamation CANDIDATE. The persisted status column is never trusted.",
+          ),
+        cleanupPlan: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return the unified, strictly read-only cleanup plan in structuredContent.cleanupPlan: one verdict per workspace plus the associated local branch's safe-delete eligibility. Selecting this never deletes anything.",
           ),
         includeOrphans: z
           .boolean()
@@ -63,6 +70,7 @@ export function registerWorkspaceListTools(
         workspaces: z.array(workspaceSessionOutputSchema),
         audits: z.array(z.unknown()).optional(),
         orphanedWorktrees: z.unknown().optional(),
+        cleanupPlan: z.unknown().optional(),
       }),
       _meta: {},
       annotations: {
@@ -71,7 +79,7 @@ export function registerWorkspaceListTools(
         openWorldHint: false,
       },
     },
-    async ({ limit, audit, includeOrphans }) => {
+    async ({ limit, audit, cleanupPlan, includeOrphans }) => {
       const startedAt = performance.now();
       const sessions = await workspaces.listWorkspaces(limit ?? 20);
       const audits = audit
@@ -86,13 +94,19 @@ export function registerWorkspaceListTools(
               activeJobRoots: (root) => jobs.activeJobIdsForRoot(root),
             })
           : undefined;
+      const plan = cleanupPlan
+        ? await workspaces.cleanupPlan({
+            limit: limit ?? 20,
+            includeOrphans: includeOrphans ?? false,
+          })
+        : undefined;
       const base =
         sessions.length === 0
           ? "No resumable workspace sessions are available."
           : sessions
               .map(
                 (session) =>
-                  `${session.workspaceId} | ${session.mode} | ${session.resumable ? "resumable" : "unavailable"} | ${session.root}`,
+                  `${session.workspaceId} | ${session.mode} | ${session.lifecycleState} | ${session.resumable ? "resumable" : "unavailable"} | ${session.root}`,
               )
               .join("\n");
       const auditText = audits?.length
@@ -100,9 +114,37 @@ export function registerWorkspaceListTools(
           audits
             .map((entry) => {
               const risks = entry.risks.map((risk) => risk.code).join(",") || "none";
-              return `${entry.workspaceId ?? "(orphan)"} | ${entry.lifecycle} | lastUsed=${entry.lastUsedAt ?? "unknown"} | dirty=${entry.dirtyFileCount} untracked=${entry.untrackedFileCount} unmerged=${entry.unmergedCommitCount} | risks=${risks} | ${entry.reclaimable ? "RECLAIM_CANDIDATE" : "keep"}`;
+              const activity = [
+                entry.hasActiveSession ? "live" : "no-live-owner",
+                entry.activeJobIds.length > 0
+                  ? `jobs=${entry.activeJobIds.join(",")}`
+                  : undefined,
+                entry.activeGameSessionIds.length > 0
+                  ? `games=${entry.activeGameSessionIds.join(",")}`
+                  : undefined,
+                entry.activeTaskSessionIds.length > 0
+                  ? `tasks=${entry.activeTaskSessionIds.join(",")}`
+                  : undefined,
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return `${entry.workspaceId ?? "(orphan)"} | ${entry.verdict} | ${entry.lifecycle} | session=${entry.sessionState ?? "none"} (${activity}) | lastUsed=${entry.lastUsedAt ?? "unknown"} | dirty=${entry.dirtyFileCount} untracked=${entry.untrackedFileCount} unmerged=${entry.unmergedCommitCount} | risks=${risks} | ${entry.reclaimable ? "RECLAIM_CANDIDATE" : `keep: ${entry.blockedReasons.join("; ") || "see risks"}`}`;
             })
             .join("\n")
+        : "";
+      const planText = plan
+        ? "\n\nCleanup plan (read-only; nothing is deleted by reading this):\n" +
+          [
+            `  auditedAt=${plan.auditedAt}`,
+            ...Object.entries(plan.summary)
+              .filter(([key]) => key !== "TOTAL")
+              .map(([key, value]) => `  ${key}=${value}`),
+            ...plan.entries.map(
+              (entry) =>
+                `  ${entry.verdict} | ${entry.workspaceId ?? "(orphan)"} | branch=${entry.branch ?? "(detached)"} | head=${entry.headSha ?? "unknown"} | branchDelete=${entry.branchDelete?.verdict ?? "n/a"}`,
+            ),
+            `  orphaned worktree directories: ${plan.orphans.orphanedCount} of ${plan.orphans.directoryCount} under ${plan.orphans.worktreeRoot}${plan.orphans.truncated ? " (truncated)" : ""}`,
+          ].join("\n")
         : "";
       const orphanText = orphanAudit
         ? "\n\n" +
@@ -111,7 +153,7 @@ export function registerWorkspaceListTools(
             ...orphanAudit.audits.map((entry) => {
               const risks =
                 entry.risks.map((risk) => risk.code).join(",") || "none";
-              return `  ${entry.root} | gitRegistered=${entry.risks.some((r) => r.code === "not_a_worktree") ? "no" : "yes"} | dirty=${entry.dirtyFileCount} untracked=${entry.untrackedFileCount} unmerged=${entry.unmergedCommitCount} | risks=${risks} | ${entry.reclaimable ? "RECLAIM_CANDIDATE" : "keep"}`;
+              return `  ${entry.root} | ${entry.verdict} | gitRegistered=${entry.risks.some((r) => r.code === "not_a_worktree") ? "no" : "yes"} | dirty=${entry.dirtyFileCount} untracked=${entry.untrackedFileCount} unmerged=${entry.unmergedCommitCount} | risks=${risks}`;
             }),
             orphanAudit.truncated
               ? "  (truncated; raise the limit for the full inventory)"
@@ -121,7 +163,7 @@ export function registerWorkspaceListTools(
             .filter(Boolean)
             .join("\n")
         : "";
-      const result = base + auditText + orphanText;
+      const result = base + auditText + orphanText + planText;
       logToolCall(config, {
         tool: "list_workspaces",
         success: true,
@@ -135,6 +177,7 @@ export function registerWorkspaceListTools(
           workspaces: sessions,
           audits,
           orphanedWorktrees: orphanAudit,
+          cleanupPlan: plan,
         },
       };
     },
@@ -165,7 +208,12 @@ export function registerWorkspaceListTools(
             ),
           projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
         },
-        outputSchema: resultOutputSchema({ reclaimed: z.unknown() }),
+        outputSchema: resultOutputSchema({
+          reclaimed: z.unknown().optional(),
+          // Present on refusal: a refusal is structured data the client can
+          // validate, not a transport-level failure.
+          error: toolErrorOutputSchema,
+        }),
         _meta: {},
         annotations: {
           readOnlyHint: false,
@@ -181,17 +229,29 @@ export function registerWorkspaceListTools(
         projectMemoryReceiptId,
       }) => {
         // The safety guards must observe the workspace as it was BEFORE this
-        // call. Both getWorkspace() and observeProjectMemoryAccess() attach a
-        // live session as a side effect, which would make the active-session
-        // guard reject a workspace the caller only wanted to inspect. So the
-        // guarded action runs first and the SHADOW observation is recorded
-        // afterwards.
-        const reclaimed = await workspaces.reclaimWorkspace({
+        // call. The reclaim itself does not attach a live session (it reads the
+        // store directly), and the SHADOW observation is recorded afterwards so
+        // it cannot influence the decision it is recording.
+        const reclaimed = await workspaces.withExclusiveLease(
           workspaceId,
-          expectedHeadSha,
-          confirmation: confirmWorkspaceId,
-          activeJobIdsForRoot: (root) => jobs.activeJobIdsForRoot(root),
-        });
+          (workspace, others) =>
+            workspaces.reclaimWorkspace({
+              workspaceId: workspace.id,
+              expectedHeadSha,
+              confirmation: confirmWorkspaceId,
+              activeJobIdsForRoot: (root) => jobs.activeJobIdsForRoot(root),
+              activeGameSessionIds: (id) =>
+                games
+                  .listActiveSessions(id)
+                  .map((session) => session.sessionId),
+              activeTaskSessionIds: (id) =>
+                tasks
+                  .listSessions(id, 50)
+                  .filter((session) => session.status === "running")
+                  .map((session) => session.sessionId),
+              othersHolding: others,
+            }),
+        );
         const projectMemory = workspaces.observeProjectMemoryAccess(
           workspaceId,
           "reclaim_workspace",
@@ -202,6 +262,97 @@ export function registerWorkspaceListTools(
           content: [textBlock(result)],
           _meta: { tool: "reclaim_workspace", projectMemory },
           structuredContent: { result, reclaimed },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "close_workspace_session",
+      {
+        title: "Close a workspace session",
+        description:
+          "Release DevSpace's session occupancy for ONE workspace and persist the lifecycle transition. This is NOT a delete: it never removes a worktree, a branch, a file, a log, an agent, a job or a Git ref, and it never resets or cleans anything. Refuses when an in-flight DevSpace operation, background job, task session or game session is still using the workspace, when the workspace identity or HEAD cannot be confirmed, or when HEAD does not match expectedHeadSha. Idempotent: closing an already-closed session reports alreadyClosed. After closing, re-run list_workspaces(audit=true, cleanupPlan=true) before reclaiming anything.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("The workspaceId whose session should be closed."),
+          confirmWorkspaceId: z
+            .string()
+            .describe(
+              "Must exactly equal workspaceId. Guards against acting on the wrong workspace.",
+            ),
+          expectedHeadSha: z
+            .string()
+            .regex(/^[0-9a-f]{40}$/)
+            .optional()
+            .describe(
+              "Optional exact HEAD SHA from list_workspaces(audit=true). When supplied, a mismatch refuses the close so a stale decision cannot release a workspace that has moved.",
+            ),
+          reason: z
+            .string()
+            .max(500)
+            .optional()
+            .describe(
+              "Optional short operator note recorded with the transition. Not a task description and not persisted as free-form content elsewhere.",
+            ),
+          projectMemoryReceiptId: projectMemoryReceiptInputSchema(),
+        },
+        outputSchema: resultOutputSchema({
+          session: z.unknown().optional(),
+          error: toolErrorOutputSchema,
+        }),
+        _meta: {},
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({
+        workspaceId,
+        confirmWorkspaceId,
+        expectedHeadSha,
+        reason,
+        projectMemoryReceiptId,
+      }) => {
+        const session = await workspaces.withExclusiveLease(
+          workspaceId,
+          (workspace, others) =>
+            workspaces.closeWorkspaceSession({
+              workspaceId: workspace.id,
+              confirmation: confirmWorkspaceId,
+              expectedHeadSha,
+              reason,
+              othersHolding: others,
+            }),
+        );
+        const projectMemory = workspaces.observeProjectMemoryAccess(
+          workspaceId,
+          "close_workspace_session",
+          projectMemoryReceiptId,
+        );
+        const result = [
+          session.alreadyClosed
+            ? `Session ${session.workspaceId} was already closed; no state was written.`
+            : `Closed session ${session.workspaceId} (${session.previousState} -> ${session.lifecycleState}).`,
+          `Workspace: ${session.root}`,
+          `HEAD ${session.headSha ?? "unknown"}.`,
+          `Reclaim eligible right now: ${String(session.reclaimEligible)}.`,
+          "Nothing was deleted: no worktree, branch, file, log, job or Git ref was removed.",
+          ...session.notes,
+        ].join("\n");
+        logToolCall(config, {
+          tool: "close_workspace_session",
+          workspaceId,
+          success: true,
+          durationMs: 0,
+        });
+        return {
+          content: [textBlock(result)],
+          _meta: { tool: "close_workspace_session", projectMemory },
+          structuredContent: { result, session },
         };
       },
     );

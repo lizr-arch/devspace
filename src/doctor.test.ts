@@ -27,7 +27,7 @@ assert.equal(
   TOOL_SCHEMA_REVISION,
   // Pinned deliberately: any change to the exposed tool surface must be an
   // explicit, reviewable bump of TOOL_SCHEMA_REVISION.
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1.2026-10-10+devspace-1.2",
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1.2026-10-10+devspace-1.3",
 );
 
 try {
@@ -408,10 +408,12 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionConcurrentCalls, 20);
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
-    assert.equal(probe.toolNames?.length, 60);
+    assert.equal(probe.toolNames?.length, 62);
     assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
     assert.equal(probe.workspaceAppTelemetryTool.ok, true);
     assert.equal(probe.toolNames?.includes("git_fetch"), true);
+    assert.equal(probe.toolNames?.includes("close_workspace_session"), true);
+    assert.equal(probe.toolNames?.includes("git_delete_merged_branch"), true);
     assert.equal(probe.toolNames?.includes("git_merge"), true);
     assert.equal(probe.toolNames?.includes("git_push"), true);
     assert.equal(probe.toolNames?.includes("archive_approved_image"), true);

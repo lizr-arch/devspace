@@ -2,13 +2,27 @@ import { desc, eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import { workspaceSessions, type WorkspaceSessionRow } from "./db/schema.js";
 import type { AdditionalRoot } from "./roots.js";
+import {
+  normalizeWorkspaceLifecycleState,
+  type WorkspaceLifecycleState,
+} from "./workspace-lifecycle.js";
 
 export type WorkspaceMode = "checkout" | "worktree";
+
+export type { WorkspaceLifecycleState };
 
 export interface WorkspaceSession {
   id: string;
   root: string;
+  /**
+   * Legacy column. Mirror of `lifecycleState`; kept only so nothing that still
+   * reads it observes a value contradicting reality.
+   */
   status: string;
+  /** Authoritative persisted lifecycle state. */
+  lifecycleState: WorkspaceLifecycleState;
+  closedAt?: string;
+  closedReason?: string;
   mode: WorkspaceMode;
   sourceRoot?: string;
   baseRef?: string;
@@ -39,6 +53,18 @@ export interface WorkspaceStore {
   touchSession(id: string): void;
   /** Remove a single workspace record. Returns true when a row was deleted. */
   deleteSession(id: string): boolean;
+  /**
+   * Persist a lifecycle transition. Returns the updated session, or undefined
+   * when the record no longer exists (a concurrent delete is not an error here;
+   * the caller decides how to report it).
+   */
+  setSessionLifecycle?(
+    id: string,
+    state: WorkspaceLifecycleState,
+    options?: { closedReason?: string; touch?: boolean },
+  ): WorkspaceSession | undefined;
+  /** Sessions whose directory no longer exists, for stale-record reconciliation. */
+  listMissingSessions?(limit?: number): WorkspaceSession[];
   updateSessionAdditionalRoots?(id: string, roots: AdditionalRoot[]): void;
   close?(): void;
 }
@@ -67,6 +93,11 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       id: input.id,
       root: input.root,
       status: "active",
+      // A brand new session is only active in the sense that its first request
+      // is still in flight. The registry promotes it to `idle` when that
+      // request finishes, so a crash mid-request leaves `active` behind — which
+      // is exactly the fail-closed state we want.
+      lifecycleState: "active",
       mode: input.mode ?? "checkout",
       sourceRoot: input.sourceRoot,
       baseRef: input.baseRef,
@@ -89,6 +120,9 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
         id: session.id,
         root: session.root,
         status: session.status,
+        lifecycleState: session.lifecycleState,
+        closedAt: null,
+        closedReason: null,
         mode: session.mode,
         sourceRoot: session.sourceRoot ?? null,
         baseRef: session.baseRef ?? null,
@@ -141,6 +175,28 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .run();
   }
 
+  setSessionLifecycle(
+    id: string,
+    state: WorkspaceLifecycleState,
+    options: { closedReason?: string; touch?: boolean } = {},
+  ): WorkspaceSession | undefined {
+    const closedAt = state === "closed" ? new Date().toISOString() : null;
+    this.database.db
+      .update(workspaceSessions)
+      .set({
+        lifecycleState: state,
+        status: state,
+        closedAt,
+        closedReason: state === "closed" ? (options.closedReason ?? null) : null,
+        ...(options.touch === false
+          ? {}
+          : { lastUsedAt: new Date().toISOString() }),
+      })
+      .where(eq(workspaceSessions.id, id))
+      .run();
+    return this.getSession(id);
+  }
+
   updateSessionAdditionalRoots(id: string, roots: AdditionalRoot[]): void {
     const requestedJson = roots.length > 0 ? JSON.stringify(roots) : null;
     this.database.db
@@ -176,6 +232,9 @@ function rowToWorkspaceSession(row: WorkspaceSessionRow): WorkspaceSession {
     id: row.id,
     root: row.root,
     status: row.status,
+    lifecycleState: normalizeWorkspaceLifecycleState(row.lifecycleState),
+    closedAt: row.closedAt ?? undefined,
+    closedReason: row.closedReason ?? undefined,
     mode: row.mode === "worktree" ? "worktree" : "checkout",
     sourceRoot: row.sourceRoot ?? undefined,
     baseRef: row.baseRef ?? undefined,
