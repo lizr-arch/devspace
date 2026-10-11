@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync,mkdtempSync, readFileSync,rmSync,writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
@@ -17,8 +17,9 @@ if(process.argv[2]==="--lock-owner-child"){
  const state=process.argv[3],ready=process.argv[4];
  const lease=new DevSpaceInstanceLock(state);
  writeFileSync(ready,JSON.stringify({pid:process.pid}));
- setInterval(()=>{},200);
- void lease;
+ // Keep the owned SQLite connection strongly reachable for the lifetime
+ // of the child process; otherwise GC may finalize it before SIGKILL.
+ setInterval(()=>{assert.ok(lease.path)},200);
 }else{
  const root=mkdtempSync(join(tmpdir(),"coach-release-lock-"));
  const state=join(root,"state");
@@ -31,23 +32,23 @@ if(process.argv[2]==="--lock-owner-child"){
   resumed.release();
   // A real child holding the native SQLite file must block this process.
   const ready=join(root,"child-ready.json");
-  const node="/Users/liz/.local/bin/node",tsx="/Users/liz/agy/devspace/node_modules/.bin/tsx";
-  child=spawn(node,[tsx,fileURLToPath(import.meta.url),"--lock-owner-child",state,ready],{
-   cwd:root,stdio:["ignore","pipe","pipe"],env:{...process.env},
+  // Run the TS child directly in the exact OS process that holds SQLite.
+  // Launching the tsx CLI adds a wrapper PID and can leave an unobserved
+  // worker running after its wrapper exits, making the SIGKILL test flaky.
+  child=spawn(process.execPath,["--import","tsx",fileURLToPath(import.meta.url),
+    "--lock-owner-child",state,ready],{
+   cwd:dirname(fileURLToPath(import.meta.url)),
+   stdio:["ignore","pipe","pipe"],env:{...process.env},
   });
   assert.ok(child.pid);
   await wait(()=>existsSync(ready));
   const ownerPid=JSON.parse(readFileSync(ready,"utf8")).pid as number;
   assert.ok(Number.isSafeInteger(ownerPid) && ownerPid>1);
-  // tsx may fork a worker Node process: its actual lock holder can differ
-  // from the wrapper process PID, so test the lock rather than equating PIDs.
+  assert.equal(ownerPid,child.pid,"the lock holder must be our direct child");
   assert.throws(()=>new DevSpaceInstanceLock(state),/DEVSPACE_INSTANCE_ALREADY_RUNNING/);
-  // The exact ChildProcess is owned by this fixture. Never signal other PIDs.
-  // Signal the exact test-owned lock-holder identity emitted by our fixture;
-  // the outer tsx wrapper can use a different PID. This PID was created in
-  // the same isolated child flow, and must never come from machine discovery.
-  process.kill(ownerPid,"SIGKILL");
-  child.kill("SIGTERM");
+  // ChildProcess PID identity is proven by the ready handshake. No broad
+  // process searches, and no signaling any process outside the fixture.
+  child.kill("SIGKILL");
   await new Promise<void>(resolve=>child!.once("close",()=>resolve()));
   const afterKill=new DevSpaceInstanceLock(state);
   afterKill.release();
@@ -83,7 +84,8 @@ if(process.argv[2]==="--lock-owner-child"){
   }finally{await restarted.close();}
   console.log("COACH006_RELEASE_INSTANCE_EXCLUSIVE_DUAL_SERVER_SIGKILL_RECOVERY_PASS");
  }finally{
-  if(child && child.exitCode===null)try{child.kill("SIGKILL")}catch{}
+  if(child && child.exitCode===null && child.signalCode===null)
+    try{child.kill("SIGKILL")}catch{}
   rmSync(root,{recursive:true,force:true});
  }
 }
