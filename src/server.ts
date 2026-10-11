@@ -32,6 +32,7 @@ import {
   createServiceRuntime,
   toolNamesFor,
   setToolLeaseRegistry,
+  setToolQuarantineGuard,
 } from "./server/server-helpers.js";
 import { LsofWorktreeProcessProbe } from "./workspace-process-probe.js";
 import { registerInfoTools } from "./server/tools-info.js";
@@ -74,6 +75,7 @@ import {
   registerTaskSessionMutationTools,
 } from "./server/tools-tasks.js";
 import { registerGodotImportTool } from "./server/tools-godot.js";
+import { registerSidecarTools } from "./server/tools-sidecar.js";
 import { setupExpressRoutes } from "./server/express-routes.js";
 import { OperationRegistry } from "./operation-registry.js";
 import { MonitorEventStore } from "./monitor-events.js";
@@ -94,6 +96,12 @@ import { BackgroundJobManager } from "./background-jobs.js";
 import { GodotImportRegistry } from "./godot-import.js";
 import { GameSessionManager } from "./game-sessions.js";
 import { ExternalInspectorManager } from "./inspectors.js";
+import { ManagedCoachSidecar } from "./managed-coach-sidecar.js";
+import { CoachReviewEventStore } from "./coach-review-events.js";
+import { NativeCodexAgentRunner } from "./codex-agent-runner.js";
+import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
+import { registerCodexAgentTools } from "./server/tools-codex-agent.js";
+import { registerCodexReviewTools } from "./server/tools-codex-review.js";
 import {
   LiveRequestMonitor,
   ProcessResourceMonitor,
@@ -122,7 +130,7 @@ export interface RunningServer {
    * re-implementing it.
    */
   ctx: ServerContext;
-  close: () => void;
+  close: () => Promise<void>;
 }
 
 export function createMcpServer(ctx: ServerContext): McpServer {
@@ -148,6 +156,7 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   // The tool wrapper leases the workspace for the whole call so occupancy is
   // observable rather than inferred. See setToolLeaseRegistry.
   setToolLeaseRegistry(ctx.workspaces);
+  setToolQuarantineGuard((workspaceId)=>ctx.coachReviewEvents.hasInterruptedRun(workspaceId));
   registerWorkspaceListTools(server, ctx);
   registerArtifactInspectionTools(server, ctx);
   registerGitInspectionTools(server, ctx);
@@ -173,6 +182,9 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   registerTaskSessionReadOnlyTools(server, ctx);
   registerTaskSessionMutationTools(server, ctx);
   registerGodotImportTool(server, ctx);
+  registerSidecarTools(server, ctx);
+  registerCodexAgentTools(server, ctx);
+  registerCodexReviewTools(server, ctx);
 
   return server;
 }
@@ -180,6 +192,25 @@ export function createMcpServer(ctx: ServerContext): McpServer {
 export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
+): RunningServer {
+  // Acquire BEFORE creating any shared-state readers or writers, especially
+  // before reconciling persisted RUNNING Codex operations after a crash.
+  const owner = new DevSpaceInstanceLock(config.stateDir);
+  try {
+    const server = createServerWithOwnedState(config, options);
+    const close = server.close;
+    let pending: Promise<void> | undefined;
+    return {...server, close: () => pending ??= Promise.resolve()
+      .then(() => close()).finally(() => owner.release())};
+  } catch (error) {
+    owner.release();
+    throw error;
+  }
+}
+
+function createServerWithOwnedState(
+  config: ServerConfig,
+  options: CreateServerOptions,
 ): RunningServer {
   const monitorEvents = new MonitorEventStore(config.stateDir);
   const workspaceApp =
@@ -292,6 +323,21 @@ export function createServer(
   const inspectors = new ExternalInspectorManager(config.stateDir, runners);
   const requestMonitor = new LiveRequestMonitor();
   const resourceMonitor = new ProcessResourceMonitor();
+  // Native stateDir event persistence; the workspace-local COACH005 database
+  // remains an isolated legacy fixture, never a production event source.
+  const coachReviewEvents = new CoachReviewEventStore(config.stateDir);
+  // On a controlled fresh server start, quarantine unknown old runs. No
+  // process auto-replay, signal, PID-based kill or invented success status.
+  coachReviewEvents.reconcileInterruptedRuns();
+  const managedCoachSidecar = new ManagedCoachSidecar(undefined, coachReviewEvents.path);
+  // Lazy: unsupported hosts may still start DevSpace; Codex is only resolved
+  // after an explicitly authorized Agent tool invocation.
+  let nativeCodexRunner: NativeCodexAgentRunner | undefined;
+  const getNativeCodexRunner = () => nativeCodexRunner ??= new NativeCodexAgentRunner({
+    events: coachReviewEvents,
+    nodePath: "/Users/liz/.local/bin/node",
+    codexPath: "/Users/liz/.local/bin/codex",
+  });
 
   /**
    * The workspace registry needs to see every kind of live work, because
@@ -303,16 +349,26 @@ export function createServer(
     workspaceStore,
     projectMemory,
     {
-      activeJobIdsForRoot: (root) => jobs.activeJobIdsForRoot(root),
+      // Managed in-process sidecars occupy their source workspace for cleanup
+      // purposes, but DO NOT hold the code/build workspace resource mutex.
+      activeJobIdsForRoot: (root) => [
+        ...jobs.activeJobIdsForRoot(root),
+        ...managedCoachSidecar.activeServiceIdsForRoot(root).map((id) => `sidecar:${id}`),
+      ],
       activeGameSessionIds: (workspaceId) =>
         games
           .listActiveSessions(workspaceId)
           .map((session) => session.sessionId),
       activeTaskSessionIds: (workspaceId) =>
-        tasks
-          .listSessions(workspaceId, 50)
-          .filter((session) => session.status === "running")
-          .map((session) => session.sessionId),
+        [
+          ...tasks.listSessions(workspaceId, 50)
+            .filter((session) => session.status === "running")
+            .map((session) => session.sessionId),
+          ...(nativeCodexRunner?.activeOperationsForWorkspace(workspaceId)
+            .map((id) => "codex:" + id) ?? []),
+          ...(coachReviewEvents.hasInterruptedRun(workspaceId)
+            ? ["codex:quarantined-interrupted-operation"] : []),
+        ],
       // Read-only OS probe: DevSpace cannot see a shell or editor the operator
       // started by hand inside a worktree, and reclaiming over one is exactly
       // the accident this lifecycle exists to prevent.
@@ -359,6 +415,9 @@ export function createServer(
     workspaceApp,
     tasks,
     godotImport,
+    managedCoachSidecar,
+    coachReviewEvents,
+    getNativeCodexRunner,
     toolNames,
     widgetMeta,
     interactiveWidgetMeta,
@@ -377,12 +436,13 @@ export function createServer(
   });
 
   let closed = false;
+  let closePending: Promise<void> | undefined;
   return {
     app,
     config,
     ctx,
     close: () => {
-      if (closed) return;
+      if (closed) return closePending ?? Promise.resolve();
       closed = true;
       mcpSessions.close();
       resourceMonitor.close();
@@ -392,7 +452,16 @@ export function createServer(
       operations.close();
       oauthProvider.close();
       projectMemory.close();
+      // In-process listeners are not detached. Release them as part of server
+      // shutdown rather than on individual MCP session expiry.
       workspaceStore.close?.();
+      closePending = Promise.allSettled([
+        managedCoachSidecar.close(),
+        nativeCodexRunner?.close(),
+      ]).then(() => {
+        coachReviewEvents.close();
+      });
+      return closePending;
     },
   };
 }

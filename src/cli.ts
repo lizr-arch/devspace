@@ -316,10 +316,15 @@ async function serve(): Promise<void> {
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
   });
 
+  let stopping = false;
   const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
     httpServer.close(() => {
-      close();
-      process.exit(0);
+      void close().then(() => process.exit(0), (error) => {
+        console.error("DevSpace shutdown failed:", error);
+        process.exit(1);
+      });
     });
   };
   process.once("SIGINT", shutdown);

@@ -1,0 +1,579 @@
+/**
+ * Trusted Codex CLI runner CORE. Not exposed through MCP until independently reviewed.
+ * A successful CLI turn is not proof that its claimed tests passed.
+ */
+import { createHash, randomUUID } from "node:crypto";
+import { spawn as nativeSpawn, execFileSync, type ChildProcess } from "node:child_process";
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { join, relative, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
+import {
+  requestsForCommand, JobResourceLocks, sharedResourceLocks,
+} from "./job-resource-locks.js";
+import type { CoachReviewEventStore } from "./coach-review-events.js";
+import { GUARDIAN_SOURCE, createGuardianMarker, readGuardianIdentity } from "./coach-agent-guardian.js";
+
+const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+// Codex currently emits time-ordered UUIDv7 thread IDs; keep valid RFC versions.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MODEL = "gpt-5.6-luna";
+const NODE = "/Users/liz/.local/bin/node";
+const CODEX = "/Users/liz/.local/bin/codex";
+const DEFAULT_MAX_OUTPUT = 256 * 1024;
+const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024;
+const MAX_SNAPSHOT_FILES = 2000;
+const MAX_EVIDENCE_BYTES = 64 * 1024;
+type State = "RUNNING" | "COMPLETED" | "FAILED" | "STOPPED" | "INTERRUPTED" | "CLEARED";
+type ProcessLike = Pick<ChildProcess, "pid" | "stdin" | "stdout" | "stderr" | "on" | "kill"> & { guardianFd?: ChildProcess["stdio"][3] };
+/** Terminate the dedicated process group on Unix, not only the Codex parent. */
+function terminateAgent(proc:ProcessLike | undefined, signal:NodeJS.Signals):void {
+  if (!proc) return;
+  if (process.platform !== "win32" && proc.pid && proc.pid > 0) {
+    try {process.kill(-proc.pid,signal);return;}
+    catch { /* Fall back to direct process termination. */ }
+  }
+  try {proc.kill(signal);} catch { /* It may already have exited. */ }
+}
+type Spawn = (file: string, argv: string[], opts: {
+  cwd: string; stdio: ["pipe", "pipe", "pipe"] | ["pipe", "pipe", "pipe", "pipe"]; detached: boolean;
+}) => ProcessLike;
+export interface RunnerInput {
+  workspaceId: string;
+  workspaceRoot: string;
+  operationId: string;
+  prompt: string;
+  model: typeof MODEL;
+  reasoningEffort: "none" | "low";
+  sessionId?: string;
+  parentOperationId?: string;
+  /** Rework may only begin against its parent source snapshot. */
+  expectedFingerprint?: string;
+  sandbox: "workspace-write" | "read-only";
+  timeoutMs?: number;
+}
+export interface RunnerStatus {
+  operationId: string;
+  workspaceId: string;
+  state: State;
+  startedAt: string;
+  finishedAt?: string;
+  threadId?: string;
+  exitCode?: number | null;
+  evidenceSha256?: string;
+  eventId?: number;
+  elapsedMs?: number;
+  tokenUsage?: unknown;
+  reason?: string;
+}
+export interface EvidencePacket {
+  operationId: string;
+  workspaceId: string;
+  threadId: string;
+  exitCode: number;
+  eventTypes: string[];
+  inputFingerprint: string;
+  finalFingerprint: string;
+  gitSummary: string | null;
+  sourceDiff: string | null;
+  stdoutSha256: string;
+  stderrSha256: string;
+  capturedAt: string;
+  invocation: {
+    sandbox: RunnerInput["sandbox"];
+    reasoningEffort: RunnerInput["reasoningEffort"];
+    resumed: boolean;
+    parentOperationId?: string;
+  };
+  tokenUsage?: unknown;
+  evidenceSha256: string;
+}
+export interface NativeRunnerOptions {
+  events: CoachReviewEventStore;
+  nodePath: string;
+  codexPath: string;
+  locks?: JobResourceLocks;
+  maxOutputBytes?: number;
+  /** Test-only injection; a production caller must never expose it via MCP. */
+  spawn?: Spawn;
+  /** Test-only fingerprint injection; never used by production MCP wiring. */
+  fingerprint?: (root: string) => Promise<{ sha: string; gitSummary: string | null }>;
+}
+interface RecordEntry {
+  input: RunnerInput;
+  status: RunnerStatus;
+  promise?: Promise<RunnerStatus>;
+  process?: ProcessLike;
+  evidence?: EvidencePacket;
+  stop?: boolean;
+}
+const hash = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
+function assertId(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || !ID.test(value)) {
+    throw new TypeError("CODEX_INVALID_" + field.toUpperCase());
+  }
+}
+function validate(input: RunnerInput): void {
+  assertId(input.workspaceId, "workspace_id");
+  assertId(input.operationId, "operation_id");
+  if (typeof input.prompt !== "string" || !input.prompt.trim() || input.prompt.length > 10000)
+    throw new TypeError("CODEX_INVALID_PROMPT");
+  if (input.model !== MODEL || !["none", "low"].includes(input.reasoningEffort) ||
+      !["workspace-write", "read-only"].includes(input.sandbox))
+    throw new TypeError("CODEX_INVALID_OPTIONS");
+  if (input.sessionId !== undefined && !UUID.test(input.sessionId))
+    throw new TypeError("CODEX_INVALID_SESSION");
+  if(input.expectedFingerprint!==undefined &&
+      (!/^[a-f0-9]{64}$/.test(input.expectedFingerprint) || !input.parentOperationId))
+    throw new TypeError("CODEX_INVALID_REWORK_FINGERPRINT");
+  if (input.parentOperationId !== undefined &&
+      (!ID.test(input.parentOperationId) || !input.sessionId || !input.expectedFingerprint ||
+       input.parentOperationId === input.operationId))
+    throw new TypeError("CODEX_INVALID_REWORK_PARENT");
+  if (input.timeoutMs !== undefined &&
+      (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 3000 || input.timeoutMs > 180000))
+    throw new TypeError("CODEX_INVALID_TIMEOUT");
+}
+function directory(root: string): string {
+  const path = realpathSync(root);
+  if (!statSync(path).isDirectory()) throw new TypeError("CODEX_WORKSPACE_NOT_DIRECTORY");
+  return path;
+}
+function executable(path: string, expected: string, testOnly: boolean): string {
+  const actual = realpathSync(path);
+  const st = statSync(actual);
+  if (!st.isFile() || (process.platform !== "win32" && (st.mode & 0o111) === 0))
+    throw new TypeError("CODEX_EXECUTABLE_NOT_ALLOWED");
+  if ((!testOnly || path === NODE) && actual !== realpathSync(expected))
+    throw new TypeError("CODEX_EXECUTABLE_NOT_ALLOWED");
+  return path;
+}
+function operationIdentity(input: RunnerInput): string {
+  return hash(JSON.stringify({ ...input, prompt: hash(input.prompt) }));
+}
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value);
+}
+function fileHash(path: string): string {
+  const st = lstatSync(path);
+  if (st.isSymbolicLink()) return hash("symlink:" + readlinkSync(path));
+  if (!st.isFile()) return hash("special:" + st.mode);
+  if (st.size > MAX_SNAPSHOT_BYTES) throw new Error("CODEX_SNAPSHOT_TOO_LARGE");
+  return hash(readFileSync(path));
+}
+/** Capture actual Git HEAD/index/modified and untracked contents, or a bounded file tree. */
+export async function captureCodexFingerprint(root: string): Promise<{sha: string; gitSummary: string | null}> {
+  const workspace = directory(root);
+  const runGit = (...args: string[]) => execFileSync("/usr/bin/git", args, {
+    cwd: workspace, timeout: 5000, maxBuffer: 8 * 1024 * 1024, encoding: "buffer",
+    stdio: ["ignore", "pipe", "ignore"],
+  }) as Buffer;
+  const h = createHash("sha256");
+  let gitRoot: string | undefined;
+  try {
+    gitRoot = (runGit("rev-parse", "--show-toplevel").toString("utf8").trim());
+  } catch { /* Scratch directories without .git are supported. */ }
+  if (gitRoot === workspace) {
+    // Fresh Git repositories can have an unborn HEAD. Still hash index and
+    // untracked bytes rather than rejecting a valid first-edit workspace.
+    let head:Buffer;
+    try {head=runGit("rev-parse", "HEAD");}
+    catch {head=Buffer.from("UNBORN_HEAD");}
+    const index = runGit("ls-files", "-s", "-z");
+    const status = runGit("status", "--porcelain=v1", "-z", "--untracked-files=all");
+    const dirty = runGit("ls-files", "-m", "-o", "--exclude-standard", "-z");
+    const deleted = runGit("ls-files", "-d", "-z");
+    h.update("git:"); h.update(head); h.update(index); h.update(status); h.update(deleted);
+    const paths = dirty.toString("utf8").split("\0").filter(Boolean).sort();
+    if (paths.length > MAX_SNAPSHOT_FILES) throw new Error("CODEX_SNAPSHOT_TOO_MANY_FILES");
+    let size = 0;
+    for (const entry of paths) {
+      const path = join(workspace, entry);
+      const rel = relative(workspace, path);
+      if (rel === ".." || rel.startsWith(".." + sep)) throw new Error("CODEX_SNAPSHOT_UNSAFE_PATH");
+      const st = lstatSync(path);
+      size += st.isFile() ? st.size : 0;
+      if (size > MAX_SNAPSHOT_BYTES) throw new Error("CODEX_SNAPSHOT_TOO_LARGE");
+      h.update(entry); h.update(fileHash(path));
+    }
+    return { sha:h.digest("hex"), gitSummary: "HEAD=" + head.toString("utf8").trim() +
+      "; status_entries=" + status.toString("utf8").split("\0").filter(Boolean).length +
+      "; modified_or_untracked=" + paths.length };
+  }
+  // Include .devspace in the fingerprint to detect manifest/config edits,
+  // even though its administrative contents are never returned as source diff.
+  const skip = new Set([".git", "node_modules", "dist", ".next", ".venv", "venv"]);
+  let count = 0, bytes = 0;
+  const walk = (dir: string, prefix = "") => {
+    for (const name of readdirSync(dir).sort()) {
+      if (skip.has(name)) continue;
+      const rel = prefix ? prefix + "/" + name : name;
+      const abs = join(dir,name);
+      const st = lstatSync(abs);
+      if (st.isDirectory()) { walk(abs,rel); continue; }
+      count++; bytes += st.isFile() ? st.size : 0;
+      if (count > MAX_SNAPSHOT_FILES || bytes > MAX_SNAPSHOT_BYTES)
+        throw new Error("CODEX_SNAPSHOT_LIMIT");
+      h.update(rel); h.update(fileHash(abs));
+    }
+  };
+  walk(workspace);
+  return { sha:h.digest("hex"), gitSummary:"non-git snapshot; files=" + count };
+}
+
+/** Bounded Git diff or small non-Git source snapshot; never silently discard evidence. */
+export function captureCodexSourceDiff(root: string): string {
+  const workspace = directory(root);
+  const runGit = (...args: string[]) => execFileSync("/usr/bin/git", args, {
+    cwd: workspace, timeout: 5000, maxBuffer: MAX_EVIDENCE_BYTES * 2,
+    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+  }) as string;
+  const denied = (path:string) =>
+    /(^|\/)(?:\.devspace|\.env(?:\..*)?|[^/]*(?:secret|token|password|credential|apikey|private)[^/]*)(?:$|\/)/i.test(path);
+  const safeText=(path:string)=>{
+    if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+    const file=join(workspace,path);
+    const rel=relative(workspace,file);
+    if(rel===".."||rel.startsWith(".."+sep))throw new Error("CODEX_EVIDENCE_PATH_ESCAPE");
+    const st=lstatSync(file);
+    if(!st.isFile()||st.size>MAX_EVIDENCE_BYTES)throw new Error("CODEX_EVIDENCE_UNSAFE_FILE");
+    const bytes=readFileSync(file);
+    if(bytes.includes(0))throw new Error("CODEX_EVIDENCE_BINARY_SOURCE");
+    return bytes.toString("utf8");
+  };
+  let gitRoot:string|undefined;
+  try { gitRoot=runGit("rev-parse","--show-toplevel").trim(); }
+  catch { /* A directory outside Git is supported by a small content snapshot. */ }
+  let result="";
+  if(gitRoot!==undefined && gitRoot!==workspace)
+    throw new Error("CODEX_EVIDENCE_WORKSPACE_NOT_GIT_ROOT");
+  if(gitRoot){
+    const changes=runGit("status","--porcelain=v1","-z","--untracked-files=all")
+      .split("\0").filter(Boolean);
+    const paths:string[]=[];
+    for(let i=0;i<changes.length;i++){
+      const record=changes[i];
+      if(record.length<4 || record[2]!==" ")throw new Error("CODEX_EVIDENCE_INVALID_STATUS");
+      if(record.startsWith("R")||record.startsWith("C")||record[1]==="R"||record[1]==="C")
+        throw new Error("CODEX_EVIDENCE_RENAME_REQUIRES_MANUAL_REVIEW");
+      const path=record.slice(3);
+      if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+      paths.push(path);
+    }
+    let hasHead=true;
+    try { runGit("rev-parse","HEAD"); }
+    catch {hasHead=false;}
+    if(hasHead){
+      result=runGit("diff","--no-ext-diff","--no-color","HEAD","--",...paths);
+    }else{
+      result=runGit("diff","--no-ext-diff","--no-color","--cached","--",...paths)+
+        runGit("diff","--no-ext-diff","--no-color","--",...paths);
+    }
+    const untracked=runGit("ls-files","--others","--exclude-standard","-z")
+      .split("\0").filter(Boolean);
+    for(const path of untracked)result+="\n--- /dev/null\n+++ b/"+path+"\n"+safeText(path);
+  }else{
+    const skip=new Set([".git",".devspace","node_modules","dist",".next",".venv","venv"]);
+    let count=0;
+    const walk=(dir:string,prefix="")=>{
+      for(const name of readdirSync(dir).sort()){
+        if(skip.has(name))continue;
+        const path=prefix?prefix+"/"+name:name;
+        const st=lstatSync(join(dir,name));
+        if(st.isDirectory()){walk(join(dir,name),path);continue;}
+        if(++count>MAX_SNAPSHOT_FILES)throw new Error("CODEX_EVIDENCE_TOO_MANY_FILES");
+        result+="\n--- /dev/null\n+++ b/"+path+"\n"+safeText(path);
+        if(Buffer.byteLength(result,"utf8")>MAX_EVIDENCE_BYTES)
+          throw new Error("CODEX_EVIDENCE_TOO_LARGE");
+      }
+    };
+    walk(workspace);
+  }
+  if(Buffer.byteLength(result,"utf8")>MAX_EVIDENCE_BYTES)
+    throw new Error("CODEX_EVIDENCE_TOO_LARGE");
+  return result;
+}
+
+export class NativeCodexAgentRunner {
+  private readonly records = new Map<string, RecordEntry>();
+  private readonly locks: JobResourceLocks;
+  private readonly spawn: Spawn;
+  private readonly maxOutput: number;
+  private readonly nodePath: string;
+  private readonly codexPath: string;
+  constructor(private readonly options: NativeRunnerOptions) {
+    this.locks = options.locks ?? sharedResourceLocks;
+    this.spawn = options.spawn ?? ((file,args,opts) => nativeSpawn(file,args,opts));
+    const test = Boolean(options.spawn);
+    this.nodePath = executable(options.nodePath, NODE, test);
+    this.codexPath = executable(options.codexPath, CODEX, test);
+    this.maxOutput = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
+    if (!Number.isInteger(this.maxOutput) || this.maxOutput < 4096 || this.maxOutput > DEFAULT_MAX_OUTPUT)
+      throw new TypeError("CODEX_INVALID_OUTPUT_LIMIT");
+  }
+  run(input: RunnerInput): Promise<RunnerStatus> {
+    validate(input);
+    const root = directory(input.workspaceRoot);
+    const canonical = { ...input, workspaceRoot:root };
+    if(this.options.events.hasInterruptedRun(input.workspaceId))
+      throw new Error("CODEX_WORKSPACE_QUARANTINED_UNRESOLVED_AGENT");
+    const old = this.records.get(input.operationId);
+    if (old) {
+      if (operationIdentity(old.input) !== operationIdentity(canonical))
+        throw new Error("CODEX_OPERATION_ID_CONFLICT");
+      return old.promise ?? Promise.resolve({ ...old.status });
+    }
+    const durable=this.options.events.getAgentRun(input.workspaceId,input.operationId);
+    if(durable){
+      if(durable.requestSha256!==operationIdentity(canonical))
+        throw new Error("CODEX_OPERATION_DURABLE_IDENTITY_CONFLICT");
+      throw new Error("CODEX_OPERATION_PREVIOUSLY_RECORDED_NO_REPLAY");
+    }
+    const record: RecordEntry = {
+      input: canonical,
+      status: { operationId: input.operationId, workspaceId:input.workspaceId,
+        state:"RUNNING", startedAt:new Date().toISOString() },
+    };
+    this.records.set(input.operationId,record);
+    record.promise = this.execute(record);
+    return record.promise;
+  }
+  /** Begin a bounded task without waiting for model completion. */
+  start(input: RunnerInput): RunnerStatus {
+    const running=this.run(input);
+    // execute() records failure status internally; never leak an unhandled rejection.
+    void running.catch(()=>{});
+    return this.status(input.operationId);
+  }
+  status(operationId: string,workspaceId?:string): RunnerStatus {
+    assertId(operationId,"operation_id");
+    const record=this.records.get(operationId);
+    if (record) {
+      if(workspaceId && record.status.workspaceId!==workspaceId)
+        throw new Error("CODEX_WORKSPACE_MISMATCH");
+      return {...record.status};
+    }
+    if(workspaceId){
+      const durable=this.options.events.getAgentRun(workspaceId,operationId);
+      if(durable)return {operationId,workspaceId,state:durable.state,
+        startedAt:durable.startedAt,...(durable.finishedAt?{finishedAt:durable.finishedAt}:{}),
+        ...(durable.threadId?{threadId:durable.threadId}:{}),
+        ...(durable.eventId?{eventId:durable.eventId}:{}),
+        ...(durable.reason?{reason:durable.reason}:{})};
+    }
+    throw new Error("CODEX_OPERATION_NOT_FOUND");
+  }
+  activeOperationsForWorkspace(workspaceId:string):string[] {
+    return [...this.records.values()].filter(r=>r.input.workspaceId===workspaceId &&
+      r.status.state==="RUNNING").map(r=>r.input.operationId);
+  }
+  getEvidence(operationId: string): EvidencePacket | undefined {
+    assertId(operationId,"operation_id");
+    const evidence=this.records.get(operationId)?.evidence;
+    return evidence ? {...evidence,eventTypes:[...evidence.eventTypes]} : undefined;
+  }
+  async stop(operationId: string): Promise<boolean> {
+    assertId(operationId,"operation_id");
+    const r=this.records.get(operationId);
+    if (!r || r.status.state!=="RUNNING") return false;
+    r.stop=true;
+    terminateAgent(r.process,"SIGTERM");
+    const escalation=r.process ? setTimeout(()=>terminateAgent(r.process,"SIGKILL"),1500) : undefined;
+    try {
+      if (r.promise) await r.promise;
+    } catch { /* status has the recorded failure. */ }
+    finally {if(escalation)clearTimeout(escalation);}
+    return true;
+  }
+  async close(): Promise<void> {
+    await Promise.all([...this.records.values()].filter(r=>r.status.state==="RUNNING")
+      .map(r=>this.stop(r.input.operationId)));
+  }
+  private async execute(r:RecordEntry): Promise<RunnerStatus> {
+    const input=r.input;
+    const args=["exec","--json","--sandbox",input.sandbox,"--skip-git-repo-check",
+      "--ignore-user-config","--disable","chronicle","--model",MODEL,"-c",
+      'model_reasoning_effort="' + input.reasoningEffort + '"'];
+    if (input.sessionId) args.push("resume",input.sessionId);
+    args.push("-"); // Codex documented stdin-prompt sentinel.
+    const leaseId="codex-agent:"+randomUUID();
+    let locked=false;
+    let journalClaimed=false;
+    let timer:NodeJS.Timeout|undefined;
+    let killTimer:NodeJS.Timeout|undefined;
+    let exitCode=-1;
+    let completed=false, failed=false, oversize=false, threadId:string|undefined, usage:unknown;
+    const types:string[]=[];
+    const stdout:Buffer[]=[];
+    const stderr:Buffer[]=[];
+    let outSize=0,errSize=0;
+    let remaining="";
+    const decoder=new StringDecoder("utf8");
+    const parseLine=(line:string)=>{
+      if (!line.trim()) return;
+      if (types.length >= 4000) { failed=true; return; }
+      try {
+        const raw=JSON.parse(line) as Record<string,unknown>;
+        const type=typeof raw.type==="string" ? raw.type : "";
+        if (!type) {failed=true;return;}
+        types.push(type);
+        if (type==="thread.started") {
+          if (threadId || typeof raw.thread_id!=="string" || !UUID.test(raw.thread_id)) failed=true;
+          else threadId=raw.thread_id;
+        }
+        if (type==="turn.completed") {
+          completed=true;
+          const u=raw.usage;
+          if(u && typeof u==="object" && !Array.isArray(u)) {
+            const fields=["input_tokens","cached_input_tokens","output_tokens","reasoning_output_tokens"];
+            const cleaned:Record<string,number>={};
+            for(const key of fields) {
+              const v=(u as Record<string,unknown>)[key];
+              if(typeof v==="number" && Number.isSafeInteger(v) && v>=0)cleaned[key]=v;
+            }
+            usage=cleaned;
+          }
+        }
+        if (type==="turn.failed" || type==="error") failed=true;
+      } catch { failed=true; }
+    };
+    const append=(c:Buffer,target:Buffer[],isStdout:boolean)=>{
+      const size=isStdout?outSize:errSize;
+      const cap=Math.min(this.maxOutput-size,c.length);
+      if (cap>0)target.push(c.subarray(0,cap));
+      if (isStdout)outSize+=cap; else errSize+=cap;
+      if (c.length>cap) {oversize=true;failed=true;}
+      if(isStdout && !oversize) {
+        remaining+=decoder.write(c);
+        if (remaining.length>65536) {failed=true;remaining="";return;}
+        const lines=remaining.split(/\r?\n/);
+        remaining=lines.pop() ?? "";
+        for(const line of lines)parseLine(line);
+      }
+    };
+    const started=Date.now();
+    try {
+      this.locks.acquire({jobId:leaseId,runner:"npm",workspaceRoot:input.workspaceRoot,
+        requests:requestsForCommand({argv:[this.codexPath,...args],workspaceRoot:input.workspaceRoot})});
+      locked=true;
+      this.options.events.claimAgentRun({workspaceId:input.workspaceId,
+        operationId:input.operationId,requestSha256:operationIdentity(input)});
+      journalClaimed=true;
+      const before=this.options.fingerprint
+        ? await this.options.fingerprint(input.workspaceRoot)
+        : await captureCodexFingerprint(input.workspaceRoot);
+      if(input.expectedFingerprint && before.sha!==input.expectedFingerprint)
+        throw new Error("CODEX_REWORK_STALE_WORKTREE");
+      if(r.stop) throw new Error("CODEX_CANCELLED_BEFORE_SPAWN");
+      const marker=createGuardianMarker();
+      const spawnArgs = this.options.spawn
+        ? [this.codexPath,...args]
+        : ["-e",GUARDIAN_SOURCE,"--",marker,this.codexPath,...args];
+      const child=this.spawn(this.nodePath,spawnArgs,
+        {cwd:input.workspaceRoot,stdio:this.options.spawn ? ["pipe","pipe","pipe"] : ["pipe","pipe","pipe","pipe"],detached:process.platform!=="win32"});
+      r.process=child;
+      child.on("error",()=>{failed=true;});
+      // Attach output capture BEFORE identity polling; Codex may emit its
+      // thread.started JSON prior to consuming stdin.
+      child.stdout?.on("data",(c:Buffer)=>append(c,stdout,true));
+      child.stderr?.on("data",(c:Buffer)=>append(c,stderr,false));
+      if (!this.options.spawn) {
+        let identity=readGuardianIdentity(child.pid ?? -1,marker);
+        // ps may observe the new process before node -e has populated argv.
+        const deadline=Date.now()+1000;
+        while(!identity && !failed && Date.now()<deadline){
+          await new Promise<void>(resolve=>setTimeout(resolve,25));
+          identity=readGuardianIdentity(child.pid ?? -1,marker);
+        }
+        if(!identity) throw new Error("COACH_GUARDIAN_IDENTITY_UNVERIFIED");
+        this.options.events.recordGuardian({workspaceId:input.workspaceId,operationId:input.operationId,identity});
+      }
+      // The runner sends only the authorized prompt via stdin, never in process argv.
+      child.stdin?.on("error",()=>{failed=true;});
+      child.stdin?.end(input.prompt);
+      const code=await new Promise<number>(resolve=>{
+        let settled=false;
+        const done=(value:number)=>{
+          if(settled)return;
+          settled=true;
+          resolve(value);
+        };
+        child.on("error",()=>{failed=true;done(-1);});
+        child.on("close",(value:number|null)=>done(value ?? -1));
+        timer=setTimeout(()=>{
+          r.stop=true;
+          terminateAgent(child,"SIGTERM");
+          killTimer=setTimeout(()=>{terminateAgent(child,"SIGKILL");},1500);
+        },input.timeoutMs ?? 180000);
+      });
+      exitCode=code;
+      if(!oversize && remaining.trim())parseLine(remaining);
+      if(input.sessionId && threadId!==input.sessionId)failed=true;
+      const after=this.options.fingerprint
+        ? await this.options.fingerprint(input.workspaceRoot)
+        : await captureCodexFingerprint(input.workspaceRoot);
+      const success= !r.stop && !failed && !oversize && code===0 &&
+        completed && Boolean(threadId);
+      if(success) {
+        const sourceDiff = captureCodexSourceDiff(input.workspaceRoot);
+        const evidenceBase={
+          operationId:input.operationId,workspaceId:input.workspaceId,
+          threadId:threadId!,exitCode:code,eventTypes:types,
+          inputFingerprint:before.sha,finalFingerprint:after.sha,
+          gitSummary:after.gitSummary,
+          sourceDiff,
+          stdoutSha256:hash(Buffer.concat(stdout)),
+          stderrSha256:hash(Buffer.concat(stderr)),
+          capturedAt:new Date().toISOString(),
+          invocation:{sandbox:input.sandbox,reasoningEffort:input.reasoningEffort,
+            resumed:Boolean(input.sessionId),
+            ...(input.parentOperationId?{parentOperationId:input.parentOperationId}:{})},
+          ...(usage!==undefined?{tokenUsage:usage}:{}),
+        };
+        const evidenceSha256=hash(stableStringify(evidenceBase));
+        const evidence={...evidenceBase,evidenceSha256};
+        if (Buffer.byteLength(JSON.stringify(evidence), "utf8") > MAX_EVIDENCE_BYTES)
+          throw new Error("CODEX_EVIDENCE_TOO_LARGE");
+        const recorded=this.options.events.recordCompletedWithEvidence({
+          workspaceId:input.workspaceId,operationId:input.operationId,evidenceSha256,
+          packetJson:JSON.stringify(evidence),
+        });
+        r.evidence=evidence;
+        r.status.evidenceSha256=evidenceSha256;
+        r.status.eventId=recorded.event_id;
+        r.status.state="COMPLETED";
+      } else {
+        r.status.state=r.stop?"STOPPED":"FAILED";
+        r.status.reason = r.stop?"cancelled_or_timed_out":"codex_completion_not_verified";
+      }
+      r.status.threadId=threadId;
+      r.status.exitCode=exitCode;
+      if(usage!==undefined)r.status.tokenUsage=usage;
+    }catch(error){
+      r.status.state=r.stop?"STOPPED":"FAILED";
+      r.status.reason=error instanceof Error?error.message:"codex_execution_failed";
+      terminateAgent(r.process,"SIGKILL");
+      // Never fabricate a completion event on a failure.
+    }finally{
+      if(timer)clearTimeout(timer);
+      if(killTimer)clearTimeout(killTimer);
+      if(journalClaimed){
+        try {
+          this.options.events.finishAgentRun({workspaceId:input.workspaceId,
+            operationId:input.operationId,
+            state:r.status.state==="COMPLETED"?"COMPLETED":r.status.state==="STOPPED"?"STOPPED":"FAILED",
+            ...(r.status.threadId?{threadId:r.status.threadId}:{}),
+            ...(r.status.eventId?{eventId:r.status.eventId}:{}),
+            ...(r.status.reason?{reason:r.status.reason}:{}),
+          });
+        } catch {
+          r.status.state="FAILED";
+          r.status.reason="COACH_AGENT_RUN_JOURNAL_FINALIZATION_FAILED";
+        }
+      }
+      if(locked)this.locks.release(leaseId);
+      r.status.finishedAt=new Date().toISOString();
+      r.status.elapsedMs=Date.now()-started;
+    }
+    return {...r.status};
+  }
+}

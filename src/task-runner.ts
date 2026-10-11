@@ -342,14 +342,20 @@ export class TaskRunner {
       proc.stderr?.on("data", (d: Buffer) => {
         session.stderr += d.toString();
       });
-      proc.on("exit", (code) => {
+      // close fires only after stdout/stderr streams have finished; exit can
+      // precede a final data chunk. Keep the secret mask until then.
+      proc.on("close", (code) => {
         if (session.status === "running") {
           session.status = code === 0 ? "succeeded" : "failed";
         }
         session.exitCode = code ?? undefined;
         session.finishedAt = new Date().toISOString();
         this.processes.delete(sessionId);
-        // Clean up secret values — they are no longer needed after exit
+        const secrets = this.sessionSecretValues.get(sessionId) ?? [];
+        session.stdout = redactSecrets(session.stdout, secrets);
+        session.stderr = redactSecrets(session.stderr, secrets);
+        // The terminal snapshot is now permanently sanitized, so clearing
+        // the in-memory secrets cannot reveal historic output on later polls.
         this.sessionSecretValues.delete(sessionId);
         // A detached session held the workspace for its whole lifetime; the
         // lock must not outlive the process, or the next task would be
@@ -664,8 +670,9 @@ export class TaskRunner {
       session.status = "stopped";
       session.finishedAt = new Date().toISOString();
     }
-    this.sessionSecretValues.delete(sessionId);
-    // The exit handler also releases, but an explicit stop must not depend on
+    // Keep redaction material until proc.close: buffered output may still
+    // arrive after a stop signal. The close handler sanitizes before clearing.
+    // The close handler also releases, but an explicit stop must not depend on
     // that callback ordering to free the workspace.
     sharedResourceLocks.release(sessionId);
     return true;

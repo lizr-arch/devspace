@@ -70,6 +70,8 @@ export function registerProjectTaskTool(
     }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
+      if(ctx.coachReviewEvents.hasInterruptedRun(workspaceId))
+        throw new Error("COACH_WORKSPACE_QUARANTINED_UNRESOLVED_AGENT");
       const projectMemory = workspaces.observeProjectMemoryAccess(
         workspaceId,
         "project_task",

@@ -120,6 +120,13 @@ export const registerAppTool: typeof registerMcpAppTool = ((
             ? first.workspaceId
             : undefined;
         const registry = workspaceRegistryForToolCall();
+        // The one explicit reviewed clearance tool must be allowed to run
+        // while quarantined; it independently checks guardian and worktree.
+        if (workspaceId && String(name)!=="codex_agent_clear_quarantine" &&
+            activeWorkspaceQuarantineGuard?.(workspaceId) &&
+            (["workspace.write","git.write","runner.execute","game.control","artifact.publish"].includes(capability) ||
+             ["close_workspace_session","reclaim_workspace","move_to_trash"].includes(String(name))))
+          throw new Error("COACH_WORKSPACE_QUARANTINED_UNRESOLVED_AGENT");
         const invoke = async () =>
           await Reflect.apply(
             handler as (...handlerArgs: unknown[]) => unknown,
@@ -168,6 +175,10 @@ interface ToolLeaseRegistry {
 }
 
 let activeWorkspaceRegistry: ToolLeaseRegistry | undefined;
+let activeWorkspaceQuarantineGuard: ((workspaceId:string)=>boolean)|undefined;
+export function setToolQuarantineGuard(guard:((workspaceId:string)=>boolean)|undefined):void {
+  activeWorkspaceQuarantineGuard=guard;
+}
 
 export function setToolLeaseRegistry(registry: ToolLeaseRegistry): void {
   activeWorkspaceRegistry = registry;
@@ -226,6 +237,11 @@ export function exposedToolNames(
     "list_task_sessions",
     "wait_task",
     "poll_task",
+    "coach_sidecar_status",
+    "codex_agent_status",
+    "codex_agent_quarantine_status",
+    "codex_agent_evidence",
+    "codex_agent_source_diff",
   ];
   if (!config.readOnly) {
     tools.splice(3, 0, "publish_artifact");
@@ -265,6 +281,14 @@ export function exposedToolNames(
       "approve_task_manifest",
       "close_workspace_session",
       "reclaim_workspace",
+      "start_coach_sidecar",
+      "stop_coach_sidecar",
+      "codex_agent_start",
+      "codex_agent_stop",
+      "codex_agent_start_rework",
+      "codex_agent_verify_test",
+      "codex_agent_submit_review",
+      "codex_agent_clear_quarantine",
     );
     if (config.gitRemoteWrite.enabled) {
       tools.splice(tools.indexOf("git_merge") + 1, 0, "git_push");
@@ -413,6 +437,14 @@ export function requiredCapabilityForTool(tool: string): ToolCapability {
       "poll_job",
       "cancel_job",
       "project_task",
+      "start_coach_sidecar",
+      "stop_coach_sidecar",
+      "codex_agent_start",
+      "codex_agent_stop",
+      "codex_agent_clear_quarantine",
+      "codex_agent_start_rework",
+      "codex_agent_verify_test",
+      "codex_agent_submit_review",
       "stop_task",
       "bash",
       "run_shell",

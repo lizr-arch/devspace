@@ -1,0 +1,195 @@
+import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { spawn as nativeSpawn, execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CoachReviewEventStore } from "./coach-review-events.js";
+import { JobResourceLocks } from "./job-resource-locks.js";
+import { NativeCodexAgentRunner, captureCodexFingerprint, type RunnerInput } from "./codex-agent-runner.js";
+
+const NODE = "/Users/liz/.local/bin/node";
+const UUID = "11111111-1111-4111-8111-111111111111";
+const root = mkdtempSync(join(tmpdir(), "coach-b1-native-tests-"));
+const fixture = join(root, "fake-codex.cjs");
+const fixtureSource=[
+'const fs=require("node:fs");',
+'let text="";',
+'process.stdin.on("data",c=>text+=c);',
+'process.stdin.on("end",()=>{',
+' const mode=text.trim();',
+' const thread={type:"thread.started",thread_id:"11111111-1111-4111-8111-111111111111"};',
+' const completed={type:"turn.completed",usage:{input_tokens:12,cached_input_tokens:7,output_tokens:3}};',
+' if(mode==="timeout")return setInterval(()=>{},1000);',
+' if(mode==="spawn-child"){',
+'  const {spawn}=require("node:child_process");',
+'  spawn(process.execPath,["-e","setTimeout(()=>require(\\"node:fs\\").writeFileSync(\\"child-survived.txt\\",\\"unsafe\\"),1200)"],{stdio:"ignore"});',
+'  return setInterval(()=>{},1000);',
+' }',
+' if(mode==="early")return process.exit(7);',
+' if(mode==="bad-json")return process.stdout.write("not-json\\n");',
+' if(mode==="missing-thread")return process.stdout.write(JSON.stringify(completed)+"\\n");',
+' if(mode==="turn-failed"){process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"turn.failed"})+"\\n");process.exitCode=1;return;}',
+' if(mode==="huge")return process.stdout.write("X".repeat(400000));',
+' if(mode==="edit")fs.writeFileSync("edited-result.txt","changes-from-agent");',
+' const lines=JSON.stringify(thread)+"\\n"+JSON.stringify(completed)+"\\n";',
+' process.stdout.write(lines.slice(0,19));',
+' setTimeout(()=>process.stdout.write(lines.slice(19)),5);',
+'});',
+].join("\n");
+writeFileSync(fixture,fixtureSource,{mode:0o700});
+chmodSync(fixture,0o700);
+const runners:NativeCodexAgentRunner[]=[];
+const stores:CoachReviewEventStore[]=[];
+const fakeSpawn=(file:string,args:string[],opts:any)=>nativeSpawn(file,args,opts);
+function create(locks = new JobResourceLocks(), workspace?:string) {
+  const space=workspace ?? mkdtempSync(join(root,"workspace-"));
+  const state=mkdtempSync(join(root,"state-"));
+  const events=new CoachReviewEventStore(state);
+  stores.push(events);
+  const runner=new NativeCodexAgentRunner({
+    events,nodePath:NODE,codexPath:fixture,locks,spawn:fakeSpawn,
+  });
+  runners.push(runner);
+  return {space,events,runner,locks};
+}
+function makeInput(operationId:string,space:string,prompt="success",extra:Partial<RunnerInput>={}):RunnerInput {
+  return {workspaceId:"workspace-one",workspaceRoot:space,operationId,prompt,
+    model:"gpt-5.6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000,...extra};
+}
+async function gates(){
+  // A real (non-Git) file-change changes the actual snapshot hash.
+  const scratch=mkdtempSync(join(root,"snapshot-"));
+  writeFileSync(join(scratch,"sample.txt"),"original");
+  const h1=await captureCodexFingerprint(scratch);
+  writeFileSync(join(scratch,"sample.txt"),"changed-content");
+  const h2=await captureCodexFingerprint(scratch);
+  assert.notEqual(h1.sha,h2.sha,"file content changes must change evidence hash");
+  mkdirSync(join(scratch,".devspace"));
+  writeFileSync(join(scratch,".devspace","tasks.yaml"),"version: 1\n");
+  const adminA=await captureCodexFingerprint(scratch);
+  writeFileSync(join(scratch,".devspace","tasks.yaml"),"version: 2\n");
+  const adminB=await captureCodexFingerprint(scratch);
+  assert.notEqual(adminA.sha,adminB.sha,"administrative manifest modification escaped fingerprint");
+  // New Git repos with no initial commit must still capture real untracked
+  // file bytes, not regress to hashing only the workspace path.
+  const gitScratch=mkdtempSync(join(root,"unborn-git-"));
+  execFileSync("/usr/bin/git",["init","-q",gitScratch],{stdio:"ignore"});
+  writeFileSync(join(gitScratch,"new-feature.ts"),"export const n=1;");
+  const gh1=await captureCodexFingerprint(gitScratch);
+  writeFileSync(join(gitScratch,"new-feature.ts"),"export const n=2;");
+  const gh2=await captureCodexFingerprint(gitScratch);
+  assert.notEqual(gh1.sha,gh2.sha,"unborn Git repo edit did not change digest");
+
+  const a=create();
+  const input=makeInput("successful-edit",a.space,"edit");
+  const first=await a.runner.run(input);
+  assert.equal(first.state,"COMPLETED",JSON.stringify(first));
+  assert.equal(first.threadId,UUID);
+  assert.ok(first.evidenceSha256?.match(/^[0-9a-f]{64}$/));
+  assert.ok(existsSync(join(a.space,"edited-result.txt")));
+  assert.equal(a.events.listPending("workspace-one").pending_count,1);
+  const evidence=a.runner.getEvidence("successful-edit");
+  assert.ok(evidence);
+  assert.notEqual(evidence.inputFingerprint,evidence.finalFingerprint);
+  assert.equal(evidence.evidenceSha256,first.evidenceSha256);
+  assert.ok(evidence.eventTypes.includes("turn.completed"));
+  assert.equal((await a.runner.run(input)).eventId,first.eventId);
+  assert.equal(a.events.listPending("workspace-one").pending_count,1);
+  assert.throws(()=>a.runner.run({...input,prompt:"different"}),/CODEX_OPERATION_ID_CONFLICT/);
+  assert.equal(a.runner.status("successful-edit").state,"COMPLETED");
+  assert.equal(a.locks.snapshot().length,0);
+
+  // All failures are from real isolated child processes; never charge the model.
+  for(const mode of ["turn-failed","early","missing-thread","bad-json","huge","timeout"]){
+    const item=create();
+    const failed=await item.runner.run(makeInput("fail-"+mode,item.space,mode));
+    assert.ok(["FAILED","STOPPED"].includes(failed.state),
+      mode+" returned "+JSON.stringify(failed));
+    assert.equal(item.events.listPending("workspace-one").pending_count,0,mode);
+    assert.equal(item.locks.snapshot().length,0,mode);
+  }
+  const cancelled=create();
+  const pending=cancelled.runner.run(makeInput("cancel-operation",cancelled.space,"timeout"));
+  await new Promise(resolve=>setTimeout(resolve,65));
+  assert.equal(await cancelled.runner.stop("cancel-operation"),true);
+  assert.equal((await pending).state,"STOPPED");
+  assert.equal(cancelled.events.listPending("workspace-one").pending_count,0);
+  assert.equal(cancelled.locks.snapshot().length,0);
+
+  // A grandchild inherited from Codex must be killed along with its parent.
+  // A parent-only SIGTERM would leave a delayed child write behind.
+  const descendants=create();
+  const childRun=descendants.runner.run(makeInput("descendant-stop",descendants.space,"spawn-child"));
+  await new Promise(resolve=>setTimeout(resolve,230));
+  assert.equal(await descendants.runner.stop("descendant-stop"),true);
+  assert.equal((await childRun).state,"STOPPED");
+  await new Promise(resolve=>setTimeout(resolve,1330));
+  assert.equal(existsSync(join(descendants.space,"child-survived.txt")),false,
+    "agent grandchild survived process-group cancellation");
+  assert.equal(descendants.locks.snapshot().length,0);
+
+  // Rework rechecks the parent fingerprint AFTER acquiring its workspace
+  // lease and BEFORE spawning any process, closing an edit/launch race.
+  const stale=create();
+  let launched=false;
+  const staleRunner=new NativeCodexAgentRunner({events:stale.events,
+    nodePath:NODE,codexPath:fixture,locks:new JobResourceLocks(),
+    spawn:(file,args,opts)=>{launched=true;return nativeSpawn(file,args,opts);},
+    fingerprint:async()=>({sha:"b".repeat(64),gitSummary:null}),
+  });
+  runners.push(staleRunner);
+  const blocked=await staleRunner.run(makeInput("rework-race",stale.space,"success",{
+    parentOperationId:"previous-rework",sessionId:UUID,expectedFingerprint:"a".repeat(64),
+  }));
+  assert.equal(blocked.state,"FAILED");
+  assert.match(blocked.reason??"",/STALE_WORKTREE/);
+  assert.equal(launched,false);
+  assert.equal(stale.events.listPending("workspace-one").pending_count,0);
+
+  // Same-workspace conflict, and retry with a NEW operation id after unlock.
+  const locks=new JobResourceLocks();
+  const firstOwner=create(locks);
+  const secondOwner=create(locks,firstOwner.space);
+  const running=firstOwner.runner.run(makeInput("first-lock",firstOwner.space,"timeout"));
+  await new Promise(resolve=>setTimeout(resolve,80));
+  const denied=await secondOwner.runner.run(makeInput("second-lock",secondOwner.space,"success"));
+  assert.equal(denied.state,"FAILED");
+  assert.match(denied.reason ?? "",/JOB_RESOURCE_BUSY/);
+  await firstOwner.runner.stop("first-lock");
+  await running;
+  assert.equal(locks.snapshot().length,0);
+  const recovered=await secondOwner.runner.run(makeInput("after-lock",secondOwner.space,"success"));
+  assert.equal(recovered.state,"COMPLETED");
+  assert.equal(secondOwner.events.listPending("workspace-one").pending_count,1);
+
+  const independentLocks=new JobResourceLocks();
+  const p=create(independentLocks),q=create(independentLocks);
+  const [pa,qa]=await Promise.all([
+    p.runner.run(makeInput("parallel-A",p.space,"success")),
+    q.runner.run(makeInput("parallel-B",q.space,"success",{workspaceId:"workspace-two"})),
+  ]);
+  assert.equal(pa.state,"COMPLETED");assert.equal(qa.state,"COMPLETED");
+  assert.equal(p.events.listPending("workspace-one").pending_count,1);
+  assert.equal(q.events.listPending("workspace-two").pending_count,1);
+
+  const invalid=create();
+  for(const [name,extra] of [
+    ["bad-id",{operationId:"bad op"}],
+    ["bad-prompt",{prompt:"x".repeat(10001)}],
+    ["empty-prompt",{prompt:" "}],
+    ["bad-model",{model:"arbitrary-agent"}],
+    ["bad-session",{sessionId:"not-a-uuid"}],
+    ["bad-timeout",{timeoutMs:100}],
+    ["bad-sandbox",{sandbox:"danger-full-access"}],
+    ["bad-workspace",{workspaceRoot:join(root,"not-a-directory")}],
+  ] as Array<[string,Partial<RunnerInput>]>){
+    assert.throws(()=>invalid.runner.run(makeInput(name,invalid.space,"success",extra)));
+  }
+  console.log("COACH006B1_NATIVE_CODEX_RUNNER_CORE_GATES_PASS");
+}
+try { await gates(); }
+finally {
+  await Promise.all(runners.map(async r=>r.close()));
+  stores.forEach(s=>s.close());
+  rmSync(root,{recursive:true,force:true});
+}

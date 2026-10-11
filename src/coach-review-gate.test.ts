@@ -1,0 +1,25 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { CoachReviewEventStore } from "./coach-review-events.js";
+import { CoachReviewGate } from "./coach-review-gate.js";
+import { JobResourceLocks } from "./job-resource-locks.js";
+
+const root = mkdtempSync(join(tmpdir(), "coach-b2-gate-"));
+const workspace = join(root, "workspace"); mkdirSync(workspace); mkdirSync(join(workspace, ".devspace"));
+const state = join(root, "state"); const events = new CoachReviewEventStore(state);
+const finalFingerprint = "a".repeat(64); const outputSha256 = "b".repeat(64);
+const operationId = "op-b2";
+const base = { operationId, workspaceId: "ws-b2", threadId: "11111111-1111-4111-8111-111111111111", exitCode: 0, eventTypes: ["thread.started", "turn.completed"], inputFingerprint: finalFingerprint, finalFingerprint, gitSummary: null, sourceDiff: "diff --git a/x b/x", stdoutSha256: outputSha256, stderrSha256: outputSha256, capturedAt: new Date().toISOString(), invocation: { sandbox: "workspace-write", reasoningEffort: "none", resumed: false } };
+const { createHash } = await import("node:crypto"); const evidenceSha256 = createHash("sha256").update(JSON.stringify(base)).digest("hex");
+const event = events.recordCompletedWithEvidence({ workspaceId: "ws-b2", operationId, evidenceSha256, packetJson: JSON.stringify({ ...base, evidenceSha256 }) });
+const tasks = { runTask: async () => ({ taskId: "test", mode: "run", sessionId: "task-1", status: "succeeded", exitCode: 0, stdout: "ok", stderr: "", durationMs: 1, runtime: { interpreter: "fake", environmentSource: "system" }, errors: [] }) } as any;
+const gate = new CoachReviewGate({ events, tasks, locks: new JobResourceLocks(), fingerprint: async () => ({ sha: finalFingerprint, gitSummary: null }) });
+const proof = await gate.verifyTest({ workspaceId: "ws-b2", workspaceRoot: workspace, eventId: event.event_id, taskId: "test" });
+assert.equal(proof.testedFingerprint, finalFingerprint);
+const receipt = await gate.submit({ workspaceId: "ws-b2", workspaceRoot: workspace, operationId, eventId: event.event_id, decision: "APPROVED", evidenceSha256 });
+assert.equal((receipt as any).decision, "APPROVED");
+await assert.rejects(() => gate.submit({ workspaceId: "ws-b2", workspaceRoot: workspace, operationId, eventId: event.event_id, decision: "BLOCKED", evidenceSha256 }), /CONFLICT/);
+events.close(); rmSync(root, { recursive: true, force: true });
+console.log("COACH006B2_REVIEW_GATE_PASS");

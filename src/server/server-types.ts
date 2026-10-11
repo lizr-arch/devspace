@@ -18,6 +18,9 @@ import type { AssetReceiptStore } from "../asset-receipts.js";
 import type { ArtifactPublisher } from "../artifact-publisher.js";
 import type { TaskRunner } from "../task-runner.js";
 import type { GodotImportRegistry } from "../godot-import.js";
+import type { ManagedCoachSidecar } from "../managed-coach-sidecar.js";
+import type { CoachReviewEventStore } from "../coach-review-events.js";
+import type { NativeCodexAgentRunner } from "../codex-agent-runner.js";
 
 export type Transport = StreamableHTTPServerTransport;
 
@@ -28,7 +31,7 @@ export const PACKAGE_VERSION = (
 ).version;
 
 export const TOOL_SCHEMA_REVISION =
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1.2026-10-10+devspace-1.3";
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-11+devspace-1.3";
 
 export const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 export const LEGACY_WORKSPACE_APP_RESOURCE_URI =
@@ -491,6 +494,9 @@ export interface ServerContext {
   workspaceApp: WorkspaceAppBuild | undefined;
   tasks: TaskRunner;
   godotImport: GodotImportRegistry;
+  managedCoachSidecar: ManagedCoachSidecar;
+  coachReviewEvents: CoachReviewEventStore;
+  getNativeCodexRunner: () => NativeCodexAgentRunner;
   toolNames: ToolNames;
   widgetMeta: (
     toolName: string,

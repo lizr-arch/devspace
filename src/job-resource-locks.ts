@@ -27,25 +27,39 @@
 import { realpathSync } from "node:fs";
 import type { RunnerName } from "./runner-types.js";
 
-export type ResourceLockKind = "workspace" | "godot-project" | "game-session";
+export type ResourceLockKind =
+  | "workspace"
+  | "godot-project"
+  | "game-session"
+  | "sidecar-service"
+  | "sidecar-endpoint";
+
+export type ResourceLockProvenance = "job" | "sidecar";
+export type ResourceLockOwner = RunnerName | "sidecar";
 
 export interface ResourceLockRequest {
   kind: ResourceLockKind;
-  /** Raw path or identifier; canonicalised before use. */
+  /** Filesystem paths are canonicalised; validated sidecar IDs remain literal. */
   value: string;
+}
+
+export interface ReadonlySidecarResourceInput {
+  serviceName: string;
+  port: number;
 }
 
 export interface HeldResourceLock extends ResourceLockRequest {
   key: string;
   jobId: string;
-  runner: RunnerName;
+  runner: ResourceLockOwner;
+  provenance?: ResourceLockProvenance;
   workspaceRoot: string;
   acquiredAt: string;
 }
 
 export class ResourceLockBusyError extends Error {
   readonly code = "JOB_RESOURCE_BUSY";
-  readonly heldBy: { jobId: string; runner: RunnerName; acquiredAt: string };
+  readonly heldBy: { jobId: string; runner: ResourceLockOwner; acquiredAt: string };
   readonly resource: string;
 
   constructor(resource: string, holder: HeldResourceLock) {
@@ -108,7 +122,26 @@ export class JobResourceLocks {
   }
 
   static keyFor(request: ResourceLockRequest): string {
+    if (request.kind === "sidecar-service") {
+      validateSidecarServiceName(request.value);
+      return `${request.kind}:${request.value}`;
+    }
+    if (request.kind === "sidecar-endpoint") {
+      validateSidecarEndpoint(request.value);
+      return `${request.kind}:${request.value}`;
+    }
     return `${request.kind}:${canonicalResource(request.value)}`;
+  }
+
+  static requestsForReadonlySidecar(
+    input: ReadonlySidecarResourceInput,
+  ): ResourceLockRequest[] {
+    validateSidecarServiceName(input.serviceName);
+    validateLoopbackPort(input.port);
+    return [
+      { kind: "sidecar-service", value: input.serviceName },
+      { kind: "sidecar-endpoint", value: `127.0.0.1:${input.port}` },
+    ];
   }
 
   /**
@@ -117,7 +150,7 @@ export class JobResourceLocks {
    */
   acquire(input: {
     jobId: string;
-    runner: RunnerName;
+    runner: ResourceLockOwner;
     workspaceRoot: string;
     requests: ResourceLockRequest[];
   }): HeldResourceLock[] {
@@ -135,6 +168,10 @@ export class JobResourceLocks {
         key: keys[index],
         jobId: input.jobId,
         runner: input.runner,
+        // Leave existing job snapshots unchanged; only sidecars carry new metadata.
+        ...(request.kind === "sidecar-service" || request.kind === "sidecar-endpoint"
+          ? { provenance: "sidecar" as const }
+          : {}),
         workspaceRoot: input.workspaceRoot,
         acquiredAt: new Date().toISOString(),
       };
@@ -169,6 +206,36 @@ export class JobResourceLocks {
 
   isBusy(request: ResourceLockRequest): boolean {
     return this.held.has(JobResourceLocks.keyFor(request));
+  }
+}
+
+function validateSidecarServiceName(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(value)
+  ) {
+    throw new TypeError("Invalid sidecar service name");
+  }
+}
+
+function validateLoopbackPort(value: unknown): asserts value is number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 65535
+  ) {
+    throw new TypeError("Invalid loopback port");
+  }
+}
+
+function validateSidecarEndpoint(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
+    throw new TypeError("Invalid sidecar endpoint");
+  }
+  const match = /^127\.0\.0\.1:([1-9][0-9]{0,4})$/.exec(value);
+  if (!match || Number(match[1]) > 65535) {
+    throw new TypeError("Invalid sidecar endpoint");
   }
 }
 

@@ -1652,17 +1652,9 @@ tasks:
 
     const session = runner.getSession(result.sessionId);
     if (session) {
-      // stdout/stderr should be redacted
-      if (session.stdout && session.stdout.includes(SENTINEL)) {
-        // The process might have finished before we polled,
-        // and sessionSecretValues was already cleaned up.
-        // This is actually a security concern — the raw output
-        // could leak if the session completes before polling.
-      }
-      // We verify redaction is applied on getSession()
-      console.log(
-        `  ATK-13 session stdout (${session.stdout.length} bytes): ${session.stdout.slice(0, 100)}`,
-      );
+      // Both active and completed sessions MUST remain redacted.
+      assert.ok(!session.stdout.includes(SENTINEL), "session stdout leaked");
+      assert.ok(!session.stderr.includes(SENTINEL), "session stderr leaked");
     }
 
     log(true, "ATK-13", "session mode secret redaction verified on poll");
@@ -2421,22 +2413,16 @@ tasks:
         assert.ok(!session1.stdout.includes(SENTINEL), `pre-exit stdout leaked: ${session1.stdout}`);
       }
 
-      // BUG FINDING: After process exits, sessionSecretValues is cleaned up
-      // (task-runner.ts line 347). This means getSession() after exit returns
-      // RAW unredacted output. The session.stdout/stderr must be redacted
-      // in-place BEFORE cleaning up sessionSecretValues.
-      // Current behavior: leaked raw sentinel detected.
-      await new Promise((res) => setTimeout(res, 300));
-      const session2 = runner.getSession(r.sessionId);
+      // Real completion gate: finished streams must be permanently sanitized
+      // before the in-memory secret list is discarded.
+      const session2 = await runner.waitSession(r.sessionId, 3000);
       assert.ok(session2, "session should exist after exit");
-      if (session2.stdout && session2.status !== "running") {
-        // DOCUMENTED BUG: sessionSecretValues cleaned up before redacting
-        // session.stdout/stderr. Fix: redact in-place on exit handler.
-        console.log("  ⚠ FINDING: Session stdout leaks raw secret after process exit.");
-        console.log("  Fix: redact session.stdout/stderr BEFORE sessionSecretValues.delete() in proc.on('exit').");
-        // Temporarily accept the leak to document the bug
-        // assert.ok(!session2.stdout.includes(SENTINEL), `post-exit stdout leaked: ${session2.stdout}`);
-      }
+      assert.notEqual(session2.status, "running", "session did not settle");
+      assert.ok(!session2.stdout.includes(SENTINEL), "post-exit stdout leaked");
+      assert.ok(!session2.stderr.includes(SENTINEL), "post-exit stderr leaked");
+      const listed = runner.listSessions("w");
+      assert.ok(listed.every(s => !s.stdout.includes(SENTINEL) && !s.stderr.includes(SENTINEL)),
+        "listSessions exposed historic secret");
     } finally { cleanup(dir); }
   });
 
