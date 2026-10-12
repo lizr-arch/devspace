@@ -25,11 +25,13 @@ export function registerSidecarTools(
       {
         title: "Start coach feed",
         description:
-          "Start a dedicated, token-protected, in-process readonly event feed on 127.0.0.1. The one-time pairing token is returned only on successful start.",
+          "Start loopback read-only coach feed. Optional adminObserverScope=all_native_worktrees explicitly grants the paired extension access to redacted native Codex events across THIS DevSpace instance; default is disabled. The pairing token is returned only on successful start.",
         inputSchema: {
           workspaceId: workspaceIdSchema,
           port: portSchema,
           pairedExtensionId: extensionIdSchema,
+          // Explicit elevated scope. Existing v0.2 starts default to off.
+          adminObserverScope: z.literal("all_native_worktrees").optional(),
         },
         outputSchema: resultOutputSchema({
           sidecar: z.unknown().optional(),
@@ -44,13 +46,14 @@ export function registerSidecarTools(
           openWorldHint: false,
         },
       },
-      async ({ workspaceId, port, pairedExtensionId }) => {
+      async ({ workspaceId, port, pairedExtensionId, adminObserverScope }) => {
         const workspace = workspaces.getWorkspace(workspaceId);
         const started = await managedCoachSidecar.start({
           workspaceId,
           workspaceRoot: workspace.root,
           port,
           pairedExtensionId,
+          observeAllNativeAgents: adminObserverScope === "all_native_worktrees",
         });
         const { token, ...sidecar } = started;
         const result =

@@ -12,6 +12,7 @@ import {
 } from "./job-resource-locks.js";
 import type { CoachReviewEventStore } from "./coach-review-events.js";
 import { GUARDIAN_SOURCE, createGuardianMarker, readGuardianIdentity } from "./coach-agent-guardian.js";
+import { AgentObserverStore, normalizeCodexNativeEvent } from "./agent-observer.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 // Codex currently emits time-ordered UUIDv7 thread IDs; keep valid RFC versions.
@@ -97,6 +98,7 @@ export interface NativeRunnerOptions {
   spawn?: Spawn;
   /** Test-only fingerprint injection; never used by production MCP wiring. */
   fingerprint?: (root: string) => Promise<{ sha: string; gitSummary: string | null }>;
+  observer?: AgentObserverStore;
 }
 interface RecordEntry {
   input: RunnerInput;
@@ -416,6 +418,10 @@ export class NativeCodexAgentRunner {
         const type=typeof raw.type==="string" ? raw.type : "";
         if (!type) {failed=true;return;}
         types.push(type);
+        // Security-critical native JSONL projection is separately fixture-tested.
+        // Unknown or sensitive event categories intentionally yield no observer record.
+        const projected=normalizeCodexNativeEvent(input.workspaceId,input.operationId,raw);
+        if(projected)this.options.observer?.emit(projected);
         if (type==="thread.started") {
           if (threadId || typeof raw.thread_id!=="string" || !UUID.test(raw.thread_id)) failed=true;
           else threadId=raw.thread_id;
@@ -570,6 +576,12 @@ export class NativeCodexAgentRunner {
           r.status.reason="COACH_AGENT_RUN_JOURNAL_FINALIZATION_FAILED";
         }
       }
+      // The native turn.complete message is NOT proof that the runner passed its
+      // durable evidence checks. Emit the authoritative final outcome here.
+      this.options.observer?.emit({
+        workspaceId:input.workspaceId,operationId:input.operationId,
+        kind:"end",phase:"runner.finalized",status:r.status.state,
+      });
       if(locked)this.locks.release(leaseId);
       r.status.finishedAt=new Date().toISOString();
       r.status.elapsedMs=Date.now()-started;

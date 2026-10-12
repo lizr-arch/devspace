@@ -5,7 +5,8 @@
   "description": "Paired, read-only DevSpace review notifications. Never sends ChatGPT messages.",
   "permissions": [
     "alarms",
-    "storage"
+    "storage",
+    "sidePanel"
   ],
   "host_permissions": [
     "http://127.0.0.1/*"
@@ -16,5 +17,6 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "DevSpace review queue"
-  }
+  },
+  "side_panel": { "default_path": "panel.html" }
 }

@@ -97,6 +97,7 @@ import { GodotImportRegistry } from "./godot-import.js";
 import { GameSessionManager } from "./game-sessions.js";
 import { ExternalInspectorManager } from "./inspectors.js";
 import { ManagedCoachSidecar } from "./managed-coach-sidecar.js";
+import { AgentObserverStore } from "./agent-observer.js";
 import { CoachReviewEventStore } from "./coach-review-events.js";
 import { NativeCodexAgentRunner } from "./codex-agent-runner.js";
 import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
@@ -329,12 +330,14 @@ function createServerWithOwnedState(
   // On a controlled fresh server start, quarantine unknown old runs. No
   // process auto-replay, signal, PID-based kill or invented success status.
   coachReviewEvents.reconcileInterruptedRuns();
-  const managedCoachSidecar = new ManagedCoachSidecar(undefined, coachReviewEvents.path);
+  const agentObserver = new AgentObserverStore();
+  const managedCoachSidecar = new ManagedCoachSidecar(undefined, coachReviewEvents.path, agentObserver);
   // Lazy: unsupported hosts may still start DevSpace; Codex is only resolved
   // after an explicitly authorized Agent tool invocation.
   let nativeCodexRunner: NativeCodexAgentRunner | undefined;
   const getNativeCodexRunner = () => nativeCodexRunner ??= new NativeCodexAgentRunner({
     events: coachReviewEvents,
+    observer: agentObserver,
     nodePath: "/Users/liz/.local/bin/node",
     codexPath: "/Users/liz/.local/bin/codex",
   });

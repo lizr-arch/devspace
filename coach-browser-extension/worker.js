@@ -48,6 +48,23 @@ async function feedCheck() {
     await saveStatus(status); return status;
   }
 }
+async function observer(cursor=0) {
+  const pair=await pairing();
+  if(!pair||!validPort(pair.port)||!TOKEN.test(pair.token))
+    return {paired:false,online:false,events:[],nextCursor:cursor,gap:0,reset:false};
+  try {
+    const r=await fetch("http://127.0.0.1:"+pair.port+"/agent/events?cursor="+encodeURIComponent(cursor),{
+      method:"GET",cache:"no-store",headers:{Authorization:"Bearer "+pair.token}
+    });
+    if(!r.ok)throw new Error("offline");
+    const b=await r.json();
+    if(!Array.isArray(b.events)||b.events.length>100||
+       !Number.isSafeInteger(b.nextCursor)||b.nextCursor<0||
+       !Number.isSafeInteger(b.gap)||b.gap<0||typeof b.reset!=="boolean")
+      throw new Error("invalid_feed");
+    return {paired:true,online:true,events:b.events,nextCursor:b.nextCursor,gap:b.gap,reset:b.reset};
+  } catch {return {paired:true,online:false,events:[],nextCursor:cursor,gap:0,reset:false};}
+}
 async function pairNow(port,token) {
   if (!validPort(port) || typeof token !== "string" || !TOKEN.test(token)) {
     return { ok:false, message:"invalid_pairing_parameters" };
@@ -88,6 +105,7 @@ chrome.runtime.onMessage.addListener((message,_sender,sendResponse) => {
     void feedCheck().then(sendResponse).catch(()=>sendResponse({paired:true,online:false,pending:0,events:[],message:"refresh_failed"}));
     return true;
   }
+  if(message.type === "COACH_AGENT_EVENTS") { void observer(Number.isSafeInteger(message.cursor)?message.cursor:0).then(sendResponse).catch(()=>sendResponse({paired:true,online:false,events:[]})); return true; }
   if(message.type === "COACH_STATUS") {
     void chrome.storage.session.get(STATUS).then(o =>
       sendResponse({extensionId:chrome.runtime.id,status:o[STATUS]||{paired:false,online:false,pending:0,events:[]}})
