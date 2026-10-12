@@ -43,7 +43,7 @@ function harness(){
 }
 test("manifest narrow extension-only and no ChatGPT access",()=>{
  assert.equal(manifest.manifest_version,3);
- assert.deepEqual(manifest.permissions,["alarms","storage"]);
+ assert.deepEqual(manifest.permissions,["alarms","storage","sidePanel"]);
  assert.deepEqual(manifest.host_permissions,["http://127.0.0.1/*"]);
  assert.equal(manifest.content_scripts,undefined);
  assert.doesNotMatch(code,/chatgpt.com|chrome.scripting|chrome.tabs/);

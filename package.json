@@ -41,7 +41,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc --noEmit --strict",
     "format:check": "npx prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "test:save-reload": "tsx tests/test_godot_save_reload_roundtrip.ts"
+    "test:save-reload": "tsx tests/test_godot_save_reload_roundtrip.ts",
+    "test:coach:observer": "tsx src/agent-observer.test.ts && tsx src/agent-observer.integration.test.ts && node --test src/coach-browser-extension.test.cjs src/coach-observer-panel.test.cjs"
   },
   "keywords": [],
   "author": "",

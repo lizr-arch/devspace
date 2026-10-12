@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { isPathInsideRoot } from "./roots.js";
 import Database from "better-sqlite3";
 import { JobResourceLocks, sharedResourceLocks } from "./job-resource-locks.js";
+import { AgentObserverStore } from "./agent-observer.js";
 
 const SERVICE_NAME = "coach-feed";
 const MAX_EVENTS = 50;
 const EXTENSION_ID = /^[a-p]{32}$/;
 
-type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string };
+type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean };
 type EventRow = { event_id: string | number; operation_id: string; event_type: string; created_at: string };
 type Entry = SidecarInput & { token: Buffer; server: Server; database: Database.Database; jobId: string; startedAt: string };
 
@@ -54,6 +55,7 @@ export class ManagedCoachSidecar {
   constructor(
     private readonly locks: JobResourceLocks = sharedResourceLocks,
     private readonly nativeEventDatabasePath?: string,
+    private readonly observer?: AgentObserverStore,
   ) {}
 
   async start(input: SidecarInput): Promise<CoachSidecarStartResult> {
@@ -61,6 +63,9 @@ export class ManagedCoachSidecar {
     validPort(input.port);
     if (!input.workspaceId || !input.workspaceRoot) throw new TypeError("workspaceId and workspaceRoot are required");
     if (input.pairedExtensionId !== undefined && !EXTENSION_ID.test(input.pairedExtensionId)) throw new TypeError("Invalid paired extension id");
+    // Elevated cross-worktree observer scope must be explicitly granted at
+    // sidecar startup, never implicitly inherited from the existing v0.2 token.
+    if (input.observeAllNativeAgents && !input.pairedExtensionId) throw new TypeError("Admin observer requires a paired extension");
     if (this.services.has(input.workspaceId) || this.services.size > 0) throw new Error("coach-feed sidecar is already running");
     if (this.starting) throw new Error("coach-feed start already in progress");
     this.starting = this.startInternal(input);
@@ -133,6 +138,20 @@ export class ManagedCoachSidecar {
     if (req.method !== "GET") return send(res, 405, { error: "method not allowed" }, cors);
     if (!tokenMatches(entry.token, req.headers.authorization)) return send(res, 401, { error: "unauthorized" }, cors);
     if (req.url === "/health") return send(res, 200, { ok: true, service: SERVICE_NAME, status: "ok" }, cors);
+    if (req.url) {
+      const parsed=new URL(req.url,"http://127.0.0.1");
+      if (parsed.pathname === "/agent/events") {
+      if (!entry.observeAllNativeAgents) return send(res,403,{error:"observer admin scope not enabled"},cors);
+      if (!this.observer) return send(res, 503, { error:"observer unavailable" }, cors);
+      for (const key of parsed.searchParams.keys()) if(key!=="cursor") return send(res,400,{error:"invalid query"},cors);
+      const value=parsed.searchParams.get("cursor")??"0";
+      if(!/^\d+$/.test(value)) return send(res,400,{error:"invalid cursor"},cors);
+      const cursor=Number(value); if(!Number.isSafeInteger(cursor)||cursor<0) return send(res,400,{error:"invalid cursor"},cors);
+      const feed=this.observer.readGlobal(cursor);
+      res.setHeader("cache-control","no-store");
+      return send(res,200,feed,cors);
+      }
+    }
     if (req.url !== "/events") return send(res, 404, { error: "not found" }, cors);
     try {
       const native = Boolean(this.nativeEventDatabasePath);

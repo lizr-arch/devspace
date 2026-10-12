@@ -47,4 +47,5 @@ el("copy").addEventListener("click",async()=>{
   try{await navigator.clipboard.writeText(instruction);el("feedback").textContent="已复制，请自行发送到 ChatGPT。";}
   catch{el("feedback").textContent="复制失败，请手动记录事件 ID。";}
 });
+el("open-panel").addEventListener("click",()=>chrome.sidePanel.open({windowId:chrome.windows.WINDOW_ID_CURRENT}).catch(()=>{}));
 void reload();

@@ -21,7 +21,8 @@ button{padding:8px;cursor:pointer;border:1px solid #b7c2cc;border-radius:6px;bac
 <button id="pair">配对</button><button id="unpair">清除配对</button>
 <p id="status" role="status">读取中…</p>
 <pre id="tasks">—</pre>
-<button id="refresh">刷新</button><button id="copy">复制审核指令</button>
+<button id="refresh">刷新</button><button id="open-panel">打开 Agent 观察面板</button><button id="copy">复制审核指令</button>
+<p><strong>观察范围说明：</strong>观察面板可能显示此 DevSpace 服务启动的所有工作树中 Codex CLI 的脱敏事件、任务 ID 和执行状态。必须由本地 Sidecar 启动时显式授权 <code>all_native_worktrees</code> 范围；既有审核队列配对不会自动获得该权限。</p>
 <p id="feedback" aria-live="polite"></p>
 <p>不会自动向 ChatGPT 发送消息，也不会读取 ChatGPT 对话内容。</p>
 <script src="popup.js"></script>
