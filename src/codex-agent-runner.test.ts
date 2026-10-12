@@ -29,6 +29,7 @@ const fixtureSource=[
 ' if(mode==="bad-json")return process.stdout.write("not-json\\n");',
 ' if(mode==="missing-thread")return process.stdout.write(JSON.stringify(completed)+"\\n");',
 ' if(mode==="turn-failed"){process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"turn.failed"})+"\\n");process.exitCode=1;return;}',
+' if(mode==="large-valid"){const big={type:"item.completed",content:"X".repeat(350000)};return process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify(big)+"\\n"+JSON.stringify(completed)+"\\n");}',
 ' if(mode==="huge")return process.stdout.write("X".repeat(400000));',
 ' if(mode==="edit")fs.writeFileSync("edited-result.txt","changes-from-agent");',
 ' const lines=JSON.stringify(thread)+"\\n"+JSON.stringify(completed)+"\\n";',
@@ -98,6 +99,14 @@ async function gates(){
   assert.throws(()=>a.runner.run({...input,prompt:"different"}),/CODEX_OPERATION_ID_CONFLICT/);
   assert.equal(a.runner.status("successful-edit").state,"COMPLETED");
   assert.equal(a.locks.snapshot().length,0);
+
+  // A valid Codex transcript above the old 256 KiB cap must retain completion evidence.
+  const verbose=create();
+  const longRun=await verbose.runner.run(makeInput("large-valid-stream",verbose.space,"large-valid"));
+  assert.equal(longRun.state,"COMPLETED",JSON.stringify(longRun));
+  const longProof=verbose.events.getEvidence("workspace-one","large-valid-stream") as {stdoutSha256:string;eventTypes:string[]}|undefined;
+  assert.match(longProof?.stdoutSha256??"",/^[0-9a-f]{64}$/);
+  assert.ok(longProof?.eventTypes.includes("turn.completed"));
 
   // All failures are from real isolated child processes; never charge the model.
   for(const mode of ["turn-failed","early","missing-thread","bad-json","huge","timeout"]){

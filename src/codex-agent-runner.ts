@@ -19,7 +19,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MODEL = "gpt-5.6-luna";
 const NODE = "/Users/liz/.local/bin/node";
 const CODEX = "/Users/liz/.local/bin/codex";
-const DEFAULT_MAX_OUTPUT = 256 * 1024;
+// Bound long Codex JSON streams without silently truncating their completion events.
+const DEFAULT_MAX_OUTPUT = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 const MAX_SNAPSHOT_FILES = 2000;
 const MAX_EVIDENCE_BYTES = 64 * 1024;
@@ -402,19 +403,21 @@ export class NativeCodexAgentRunner {
     let killTimer:NodeJS.Timeout|undefined;
     let exitCode=-1;
     let completed=false, failed=false, oversize=false, threadId:string|undefined, usage:unknown;
+    let malformedEvents=false, agentErrorEvent=false;
     const types:string[]=[];
-    const stdout:Buffer[]=[];
-    const stderr:Buffer[]=[];
+    // Incremental hashes avoid buffering several megabytes of tool output.
+    const stdoutDigest=createHash("sha256");
+    const stderrDigest=createHash("sha256");
     let outSize=0,errSize=0;
     let remaining="";
     const decoder=new StringDecoder("utf8");
     const parseLine=(line:string)=>{
       if (!line.trim()) return;
-      if (types.length >= 4000) { failed=true; return; }
+      if (types.length >= 4000) { failed=true; malformedEvents=true; return; }
       try {
         const raw=JSON.parse(line) as Record<string,unknown>;
         const type=typeof raw.type==="string" ? raw.type : "";
-        if (!type) {failed=true;return;}
+        if (!type) {failed=true;malformedEvents=true;return;}
         types.push(type);
         if (type==="thread.started") {
           if (threadId || typeof raw.thread_id!=="string" || !UUID.test(raw.thread_id)) failed=true;
@@ -433,20 +436,20 @@ export class NativeCodexAgentRunner {
             usage=cleaned;
           }
         }
-        if (type==="turn.failed" || type==="error") failed=true;
-      } catch { failed=true; }
+        if (type==="turn.failed" || type==="error") {failed=true;agentErrorEvent=true;}
+      } catch { failed=true;malformedEvents=true; }
     };
-    const append=(c:Buffer,target:Buffer[],isStdout:boolean)=>{
-      const size=isStdout?outSize:errSize;
-      const cap=Math.min(this.maxOutput-size,c.length);
-      if (cap>0)target.push(c.subarray(0,cap));
-      if (isStdout)outSize+=cap; else errSize+=cap;
-      if (c.length>cap) {oversize=true;failed=true;}
+    const append=(c:Buffer,isStdout:boolean)=>{
+      if (isStdout) {stdoutDigest.update(c);outSize+=c.length;}
+      else {stderrDigest.update(c);errSize+=c.length;}
+      // Keep a hard resource budget while hashing the actual bytes, never a truncated prefix.
+      if ((isStdout?outSize:errSize)>this.maxOutput) {oversize=true;failed=true;return;}
       if(isStdout && !oversize) {
         remaining+=decoder.write(c);
-        if (remaining.length>65536) {failed=true;remaining="";return;}
+        // Drain complete JSON lines before enforcing a bound on the unfinished line.
         const lines=remaining.split(/\r?\n/);
         remaining=lines.pop() ?? "";
+        if (remaining.length>this.maxOutput) {failed=true;malformedEvents=true;remaining="";return;}
         for(const line of lines)parseLine(line);
       }
     };
@@ -474,8 +477,8 @@ export class NativeCodexAgentRunner {
       child.on("error",()=>{failed=true;});
       // Attach output capture BEFORE identity polling; Codex may emit its
       // thread.started JSON prior to consuming stdin.
-      child.stdout?.on("data",(c:Buffer)=>append(c,stdout,true));
-      child.stderr?.on("data",(c:Buffer)=>append(c,stderr,false));
+      child.stdout?.on("data",(c:Buffer)=>append(c,true));
+      child.stderr?.on("data",(c:Buffer)=>append(c,false));
       if (!this.options.spawn) {
         let identity=readGuardianIdentity(child.pid ?? -1,marker);
         // ps may observe the new process before node -e has populated argv.
@@ -521,8 +524,8 @@ export class NativeCodexAgentRunner {
           inputFingerprint:before.sha,finalFingerprint:after.sha,
           gitSummary:after.gitSummary,
           sourceDiff,
-          stdoutSha256:hash(Buffer.concat(stdout)),
-          stderrSha256:hash(Buffer.concat(stderr)),
+          stdoutSha256:stdoutDigest.digest("hex"),
+          stderrSha256:stderrDigest.digest("hex"),
           capturedAt:new Date().toISOString(),
           invocation:{sandbox:input.sandbox,reasoningEffort:input.reasoningEffort,
             resumed:Boolean(input.sessionId),
@@ -543,7 +546,14 @@ export class NativeCodexAgentRunner {
         r.status.state="COMPLETED";
       } else {
         r.status.state=r.stop?"STOPPED":"FAILED";
-        r.status.reason = r.stop?"cancelled_or_timed_out":"codex_completion_not_verified";
+        r.status.reason = r.stop?"cancelled_or_timed_out"
+          : oversize?"codex_json_output_limit_exceeded"
+          : malformedEvents?"codex_invalid_json_events"
+          : agentErrorEvent?"codex_error_event"
+          : code!==0?"codex_nonzero_exit"
+          : !threadId?"codex_thread_started_missing"
+          : !completed?"codex_turn_completed_missing"
+          : "codex_completion_not_verified";
       }
       r.status.threadId=threadId;
       r.status.exitCode=exitCode;
