@@ -1,4 +1,4 @@
-import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
+import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -40,6 +40,7 @@ function schemaCheck(database: Database.Database, native: boolean): void {
   if (native) {
     database.prepare("select event_id,workspace_id,operation_id,event_type,created_at from coach_review_events where 1=0").all();
     database.prepare("select event_id from coach_review_decisions where 1=0").all();
+    database.prepare("select snapshot_json from agent_efficiency_audits where 1=0").all();
     return;
   }
   const tables = database.prepare("select name from sqlite_master where type = 'table' and name in ('events','review_decisions')").all() as { name: string }[];
@@ -150,6 +151,32 @@ export class ManagedCoachSidecar {
       const feed=this.observer.readGlobal(cursor);
       res.setHeader("cache-control","no-store");
       return send(res,200,feed,cors);
+      }
+      if (parsed.pathname === "/agent/audit") {
+        if (!entry.observeAllNativeAgents) return send(res,403,{error:"observer admin scope not enabled"},cors);
+        const workspaceId=parsed.searchParams.get("workspaceId"), operationId=parsed.searchParams.get("operationId");
+        const names=[...parsed.searchParams.keys()];
+        if (!workspaceId || !operationId ||
+            !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(workspaceId) ||
+            !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(operationId) ||
+            names.length!==2 || names.some(k=>k!=="workspaceId" && k!=="operationId"))
+          return send(res,400,{error:"invalid query"},cors);
+        try {
+          const row=entry.database.prepare(
+            "SELECT snapshot_json,snapshot_sha256 FROM agent_efficiency_audits WHERE workspace_id=? AND operation_id=?"
+          ).get(workspaceId,operationId) as {snapshot_json:string;snapshot_sha256:string}|undefined;
+          if(!row)return send(res,404,{error:"audit unavailable"},cors);
+          if(Buffer.byteLength(row.snapshot_json,"utf8")>48*1024 ||
+             !row.snapshot_sha256 ||
+             createHash("sha256").update(row.snapshot_json).digest("hex")!==row.snapshot_sha256)
+            return send(res,503,{error:"audit integrity failure"},cors);
+          const snapshot=JSON.parse(row.snapshot_json);
+          if(snapshot?.version!==1 || snapshot.identity?.workspaceId!==workspaceId ||
+             snapshot.identity?.operationId!==operationId)
+            return send(res,503,{error:"audit integrity failure"},cors);
+          res.setHeader("cache-control","no-store");
+          return send(res,200,{snapshot},cors);
+        } catch { return send(res,503,{error:"audit unavailable"},cors); }
       }
     }
     if (req.url !== "/events") return send(res, 404, { error: "not found" }, cors);

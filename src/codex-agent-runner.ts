@@ -13,6 +13,7 @@ import {
 import type { CoachReviewEventStore } from "./coach-review-events.js";
 import { GUARDIAN_SOURCE, createGuardianMarker, readGuardianIdentity } from "./coach-agent-guardian.js";
 import { AgentObserverStore, normalizeCodexNativeEvent } from "./agent-observer.js";
+import { analyzeAgentEfficiency, type AuditTrace } from "./agent-efficiency-audit.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 // Codex currently emits time-ordered UUIDv7 thread IDs; keep valid RFC versions.
@@ -100,6 +101,7 @@ export interface NativeRunnerOptions {
   /** Test-only fingerprint injection; never used by production MCP wiring. */
   fingerprint?: (root: string) => Promise<{ sha: string; gitSummary: string | null }>;
   observer?: AgentObserverStore;
+  auditStore?: import("./coach-review-events.js").CoachReviewEventStore;
 }
 interface RecordEntry {
   input: RunnerInput;
@@ -407,6 +409,8 @@ export class NativeCodexAgentRunner {
     let completed=false, failed=false, oversize=false, threadId:string|undefined, usage:unknown;
     let malformedEvents=false, agentErrorEvent=false;
     const types:string[]=[];
+    const auditTrace: AuditTrace[]=[];
+    let beforeSha:string|undefined, afterSha:string|undefined;
     // Incremental hashes avoid buffering several megabytes of tool output.
     const stdoutDigest=createHash("sha256");
     const stderrDigest=createHash("sha256");
@@ -424,7 +428,11 @@ export class NativeCodexAgentRunner {
         // Security-critical native JSONL projection is separately fixture-tested.
         // Unknown or sensitive event categories intentionally yield no observer record.
         const projected=normalizeCodexNativeEvent(input.workspaceId,input.operationId,raw);
-        if(projected)this.options.observer?.emit(projected);
+        if(projected){
+          const event=this.options.observer?.emit(projected);
+          const p=projected as typeof projected & {actionId?:string;inputHash?:string;sourceMutation?:boolean};
+          auditTrace.push({id:String(event?.cursor ?? types.length),actionId:p.actionId,kind:p.kind,at:new Date().toISOString(),phase:p.phase,status:p.status,tool:p.tool,inputHash:p.inputHash,sourceMutation:p.sourceMutation});
+        }
         if (type==="thread.started") {
           if (threadId || typeof raw.thread_id!=="string" || !UUID.test(raw.thread_id)) failed=true;
           else threadId=raw.thread_id;
@@ -520,6 +528,7 @@ export class NativeCodexAgentRunner {
       const after=this.options.fingerprint
         ? await this.options.fingerprint(input.workspaceRoot)
         : await captureCodexFingerprint(input.workspaceRoot);
+      beforeSha=before.sha; afterSha=after.sha;
       const success= !r.stop && !failed && !oversize && code===0 &&
         completed && Boolean(threadId);
       if(success) {
@@ -586,15 +595,26 @@ export class NativeCodexAgentRunner {
           r.status.reason="COACH_AGENT_RUN_JOURNAL_FINALIZATION_FAILED";
         }
       }
-      // The native turn.complete message is NOT proof that the runner passed its
-      // durable evidence checks. Emit the authoritative final outcome here.
+      r.status.finishedAt=new Date().toISOString();
+      r.status.elapsedMs=Date.now()-started;
+      // Persist the task audit before publishing the final observer event,
+      // so a panel click after "runner.finalized" sees a complete snapshot.
+      // This secondary observability path must not overturn verified code results.
+      if (this.options.auditStore) try {
+        this.options.auditStore.recordEfficiencyAudit(analyzeAgentEfficiency({
+          workspaceId: input.workspaceId, operationId: input.operationId, status: r.status.state,
+          start: r.status.startedAt, finish: r.status.finishedAt, tokenUsage: r.status.tokenUsage,
+          sourceChange: beforeSha !== undefined && afterSha !== undefined ? beforeSha !== afterSha : undefined,
+          trace: auditTrace,
+        }));
+      } catch { r.status.reason = r.status.reason ?? "audit_unavailable"; }
+      // A native turn.completed is NOT proof that the runner's safety and
+      // evidence checks succeeded. This terminal state is authoritative.
       this.options.observer?.emit({
         workspaceId:input.workspaceId,operationId:input.operationId,
         kind:"end",phase:"runner.finalized",status:r.status.state,
       });
       if(locked)this.locks.release(leaseId);
-      r.status.finishedAt=new Date().toISOString();
-      r.status.elapsedMs=Date.now()-started;
     }
     return {...r.status};
   }

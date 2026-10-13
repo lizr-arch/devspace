@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { isPathInsideRoot } from "./roots.js";
+import type { AgentEfficiencySnapshot } from "./agent-efficiency-audit.js";
 const FILE = "coach-review-events.sqlite";
 const SHA = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -112,9 +113,34 @@ export class CoachReviewEventStore {
             this.db.exec(`ALTER TABLE coach_agent_runs ADD COLUMN ${name} ${name.includes("pid")||name==="guardian_uid"?"INTEGER":"TEXT"}`);
         }
       }
-      this.db.exec("CREATE TABLE IF NOT EXISTS coach_agent_quarantine_audit (audit_id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, explanation TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(workspace_id, operation_id, action));");
+      this.db.exec("CREATE TABLE IF NOT EXISTS coach_agent_quarantine_audit (audit_id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, explanation TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(workspace_id, operation_id, action)); CREATE TABLE IF NOT EXISTS agent_efficiency_audits (workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, snapshot_json TEXT NOT NULL, snapshot_sha256 TEXT, created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, operation_id));");
+      const af=new Set((this.db.pragma("table_info(agent_efficiency_audits)") as {name:string}[]).map(x=>x.name)); if(!af.has("snapshot_sha256")) this.db.exec("ALTER TABLE agent_efficiency_audits ADD COLUMN snapshot_sha256 TEXT");
       this.db.pragma("user_version = 4");
     }).immediate();
+  }
+  recordEfficiencyAudit(snapshot: AgentEfficiencySnapshot): void {
+    const json = JSON.stringify(snapshot);
+    if (Buffer.byteLength(json, "utf8") > 48 * 1024) throw new Error("COACH_AUDIT_TOO_LARGE");
+    const digest=createHash("sha256").update(json).digest("hex");
+    this.db.transaction(() => {
+      this.db.prepare("INSERT INTO agent_efficiency_audits(workspace_id,operation_id,snapshot_json,snapshot_sha256,created_at) VALUES (?,?,?,?,?) ON CONFLICT(workspace_id,operation_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,snapshot_sha256=excluded.snapshot_sha256,created_at=excluded.created_at")
+        .run(snapshot.identity.workspaceId, snapshot.identity.operationId, json, digest, new Date().toISOString());
+      // The audit is observational; keep a bounded history, never an
+      // unbounded secondary journal. Core COACH evidence is not deleted.
+      this.db.exec("DELETE FROM agent_efficiency_audits WHERE rowid NOT IN (SELECT rowid FROM agent_efficiency_audits ORDER BY created_at DESC,rowid DESC LIMIT 512)");
+    }).immediate();
+  }
+  getEfficiencyAudit(workspaceId: string, operationId: string): AgentEfficiencySnapshot | undefined {
+    if (!ID.test(workspaceId) || !ID.test(operationId)) throw new TypeError("COACH_AUDIT_INVALID_SCOPE");
+    const row = this.db.prepare("SELECT snapshot_json,snapshot_sha256 FROM agent_efficiency_audits WHERE workspace_id=? AND operation_id=?").get(workspaceId, operationId) as { snapshot_json: string,snapshot_sha256:string } | undefined;
+    if (!row) return undefined;
+    if (Buffer.byteLength(row.snapshot_json, "utf8") > 48 * 1024 ||
+        !row.snapshot_sha256 || createHash("sha256").update(row.snapshot_json).digest("hex") !== row.snapshot_sha256)
+      throw new Error("COACH_AUDIT_INTEGRITY_FAILURE");
+    const parsed=JSON.parse(row.snapshot_json) as AgentEfficiencySnapshot;
+    if (!parsed || parsed.identity?.workspaceId !== workspaceId || parsed.identity?.operationId !== operationId || parsed.version !== 1)
+      throw new Error("COACH_AUDIT_INTEGRITY_FAILURE");
+    return parsed;
   }
   recordCompleted(input: {workspaceId:string;operationId:string;evidenceSha256:string}): CoachEvent {
     if (!ID.test(input.workspaceId) || !ID.test(input.operationId) || !SHA.test(input.evidenceSha256))

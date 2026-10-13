@@ -103,6 +103,7 @@ import { NativeCodexAgentRunner } from "./codex-agent-runner.js";
 import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
 import { registerCodexAgentTools } from "./server/tools-codex-agent.js";
 import { registerCodexReviewTools } from "./server/tools-codex-review.js";
+import { registerAgentAuditTools } from "./server/tools-agent-audit.js";
 import {
   LiveRequestMonitor,
   ProcessResourceMonitor,
@@ -186,6 +187,7 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   registerSidecarTools(server, ctx);
   registerCodexAgentTools(server, ctx);
   registerCodexReviewTools(server, ctx);
+  registerAgentAuditTools(server, ctx);
 
   return server;
 }
@@ -338,6 +340,7 @@ function createServerWithOwnedState(
   const getNativeCodexRunner = () => nativeCodexRunner ??= new NativeCodexAgentRunner({
     events: coachReviewEvents,
     observer: agentObserver,
+    auditStore: coachReviewEvents,
     nodePath: "/Users/liz/.local/bin/node",
     codexPath: "/Users/liz/.local/bin/codex",
   });

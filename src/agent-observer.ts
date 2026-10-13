@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 /** Bounded, redacted live view of native Codex execution. Never stores prompts or output. */
 export type ObserverKind = "start"|"status"|"tool"|"command"|"file-change"|"test"|"end";
-export interface ObserverEvent { cursor:number; workspaceId:string; operationId:string; kind:ObserverKind; at:string; phase?:string; status?:string; tool?:string; basename?:string; count?:number; elapsedMs?:number; }
+export interface ObserverEvent { cursor:number; workspaceId:string; operationId:string; kind:ObserverKind; at:string; phase?:string; status?:string; tool?:string; actionId?:string; inputHash?:string; sourceMutation?:boolean; basename?:string; count?:number; elapsedMs?:number; }
 const ID=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const SAFE=/^[A-Za-z0-9_.:-]{1,64}$/;
 
@@ -31,7 +32,19 @@ export function normalizeCodexNativeEvent(workspaceId:string,operationId:string,
   };
   if(typeof itemType!=="string"||!Object.prototype.hasOwnProperty.call(types,itemType))return undefined;
   const result=types[itemType];
-  return {workspaceId,operationId,kind:result.kind,tool:result.tool,
+  const data=item as Record<string,unknown>;
+  const nativeId=data.id;
+  const normalizedId=typeof nativeId==="string"?nativeId:
+    Number.isSafeInteger(nativeId)&&Number(nativeId)>=0?String(nativeId):undefined;
+  // Native item identity is only for the PRIVATE audit correlation path. The
+  // AgentObserverStore deliberately drops it from the public live feed.
+  const actionId=normalizedId && ID.test(normalizedId) ? normalizedId : undefined;
+  const command=data.command;
+  const inputHash=type==="item.started" && itemType==="command_execution" &&
+    typeof command==="string" && command.length>0 && command.length<=32768
+    ? createHash("sha256").update(command).digest("hex") : undefined;
+  return {workspaceId,operationId,kind:result.kind,tool:result.tool,actionId,inputHash,
+    sourceMutation:type==="item.completed" && itemType==="file_change" && data.status!=="failed",
     phase:type,status:type==="item.completed"?"COMPLETED":"RUNNING"};
 }
 export class AgentObserverStore {

@@ -65,6 +65,41 @@ async function observer(cursor=0) {
     return {paired:true,online:true,events:b.events,nextCursor:b.nextCursor,gap:b.gap,reset:b.reset};
   } catch {return {paired:true,online:false,events:[],nextCursor:cursor,gap:0,reset:false};}
 }
+async function audit(workspaceId,operationId) {
+  const pair=await pairing();
+  if(!pair||!validPort(pair.port)||!TOKEN.test(pair.token))
+    return {ok:false,error:"pairing_required"};
+  const id=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+  if(typeof workspaceId!=="string"||typeof operationId!=="string"||
+     !id.test(workspaceId)||!id.test(operationId))
+    return {ok:false,error:"invalid_scope"};
+  try {
+    const r=await fetch("http://127.0.0.1:"+pair.port+
+      "/agent/audit?workspaceId="+encodeURIComponent(workspaceId)+
+      "&operationId="+encodeURIComponent(operationId),{
+        method:"GET",headers:{Authorization:"Bearer "+pair.token},cache:"no-store"
+      });
+    if(!r.ok)return {ok:false,error:"http_"+r.status};
+    if(!(r.headers.get("content-type")||"").startsWith("application/json"))
+      return {ok:false,error:"invalid_mime"};
+    const raw=await r.text();
+    if(raw.length>64*1024)return {ok:false,error:"oversized_audit"};
+    const b=JSON.parse(raw),a=b?.snapshot;
+    if(!a||a.version!==1||a.identity?.workspaceId!==workspaceId||
+       a.identity?.operationId!==operationId||
+       !["COMPLETED","FAILED","STOPPED","INTERRUPTED","UNKNOWN"].includes(a.status)||
+       !Number.isSafeInteger(a.elapsedMs)||a.elapsedMs<0||
+       !Number.isSafeInteger(a.confirmedToolStarts)||a.confirmedToolStarts<0||
+       !Number.isSafeInteger(a.confirmedToolCompletions)||a.confirmedToolCompletions<0||
+       !Array.isArray(a.observations)||a.observations.length>16||
+       !a.dataCoverage||typeof a.dataCoverage.complete!=="boolean"||
+       !Array.isArray(a.dataCoverage.missingEvidence)||a.dataCoverage.missingEvidence.length>24||
+       !a.tokenUsage||typeof a.tokenUsage!=="object"||
+       !Array.isArray(a.evidenceTimeline)||a.evidenceTimeline.length>120)
+      return {ok:false,error:"invalid_audit"};
+    return {ok:true,snapshot:a};
+  } catch { return {ok:false,error:"offline"}; }
+}
 async function pairNow(port,token) {
   if (!validPort(port) || typeof token !== "string" || !TOKEN.test(token)) {
     return { ok:false, message:"invalid_pairing_parameters" };
@@ -106,6 +141,7 @@ chrome.runtime.onMessage.addListener((message,_sender,sendResponse) => {
     return true;
   }
   if(message.type === "COACH_AGENT_EVENTS") { void observer(Number.isSafeInteger(message.cursor)?message.cursor:0).then(sendResponse).catch(()=>sendResponse({paired:true,online:false,events:[]})); return true; }
+  if(message.type === "COACH_AGENT_AUDIT") { void audit(message.workspaceId,message.operationId).then(sendResponse).catch(()=>sendResponse({ok:false,error:"unavailable"})); return true; }
   if(message.type === "COACH_STATUS") {
     void chrome.storage.session.get(STATUS).then(o =>
       sendResponse({extensionId:chrome.runtime.id,status:o[STATUS]||{paired:false,online:false,pending:0,events:[]}})
