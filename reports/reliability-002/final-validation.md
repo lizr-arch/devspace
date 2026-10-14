@@ -4,8 +4,8 @@ Status: **PARTIAL / NOT ACCEPTED**. No production deployment, push, or full reli
 
 ## Baseline and safety
 
-- Work is on isolated branch `feat/devspace-reliability-002` in `/Users/liz/agy/devspace-reliability-002`, rebased on source `main` at `ca21f2da2b573dae16a8829542e30a96566b617d`. Development files are uncommitted. The original checkout and its untracked `.devspace/` were not modified.
-- Source production checkout was read-only inspected: local `main` is three commits ahead of `origin/main`; do not push directly from this feature branch until safe integration and remote verification.
+- Work is on isolated branch `feat/devspace-reliability-002` in `/Users/liz/agy/devspace-reliability-002`, based on source `main` at `ca21f2da2b573dae16a8829542e30a96566b617d`. Implementation commit: `4c24a578988c4c49dc5955b5bad5ce3eb84c7efd`. The original checkout and its untracked `.devspace/` were not modified.
+- GitHub `origin/main` was read-only verified with `git ls-remote` at `71196e8852c615b9efb2829c6fac2a78440cb816`; source checkout main is three commits ahead. The feature branch has not been pushed because it includes those unpushed source commits and remaining acceptance work is incomplete. No merge or force push occurred.
 - Current production API was healthy at `127.0.0.1:7676/healthz`, Boot ID `e7ddcf4b-1b53-4bda-9384-42a202908172`, stateless sessions active 0 / capacity evictions 0. Production Coach still shared the API PID; no production service changes were made.
 - The live task inventory showed no RUNNING native Codex rows at inspection. Historical R4 remains interrupted and was not read, changed, replayed, or used as a test fixture. No unrelated process was signalled.
 - Browser automation initialization timed out. No claim of Chrome extension or ChatGPT Web UI verification is made.
@@ -19,6 +19,7 @@ Status: **PARTIAL / NOT ACCEPTED**. No production deployment, push, or full reli
 - SQLite persists worker identity/generation, operation fingerprint, lease heartbeat/cursor, Guardian identity, result/evidence, and cancellation state. Same ID/same fingerprint is idempotent; conflicting fingerprint is rejected; unknown side effects are never replayed.
 - Worker restart only proceeds when the prior Worker is proven dead and all prior active Guardian process groups are verified gone. Missing, live, or uncertain Guardian identity fails closed. Guardian still owns its child process group and closes that group when the Worker owner pipe disappears.
 - API can connect through `DEVSPACE_CODEX_WORKER_SOCKET`; API-side control client close does not stop the independent Worker. Native observer events persist in SQLite with bounded retention and cursor gap/reset semantics.
+- Scope limitation: existing `BackgroundJobManager` still marks running jobs interrupted and terminates their process groups when the API closes. The independent Worker implementation and real API-restart E2E cover Native Codex operations, not the broader existing Background Job API. Full M1 remains partial until those jobs are independently supervised or a verified drain waits for them safely.
 - Real private UDS, normal API restart, API `SIGKILL`, real Worker `SIGKILL`, and restart recovery passed in the same isolated end-to-end harness. Worker crash closes Guardian's owner pipe; the Guardian process group was verified gone. Replacement Worker acquired generation 2 and quarantined the operation as `INTERRUPTED / unknown_outcome_no_automatic_replay`; same-ID start did not spawn a second Guardian or write the requested file.
 - **Not yet verified:** separate production Worker launchd installation, all remaining E01–E16 fault injections, and production activation.
 
@@ -62,14 +63,14 @@ No Cloudflare public test, deployment, push, production build from the deploy ch
 
 | Gate | Status | Evidence / remaining work |
 |---|---|---|
-| `WORKER_LIFECYCLE_PASS` | PASS (local E2E) | Two real Codex tasks survived normal API restart and controlled API `SIGKILL`; new API queried old IDs, event cursor, and Evidence. |
-| `WORKER_RECOVERY_PASS` | PASS (local E2E) | Real Worker `SIGKILL` reaped the Guardian process group; replacement generation quarantined outcome as uncertain and did not replay. |
-| `COACH_LIFECYCLE_PASS` | PASS (service E2E) | Coach stayed online during API normal/forced restart and recovered after Worker restart with same token/scope; Chrome browser extension and launchd install remain pending. |
+| `WORKER_LIFECYCLE_PASS` | PARTIAL | Native Codex passed normal/forced API restart; existing Background Jobs still stop on API close. |
+| `WORKER_RECOVERY_PASS` | PARTIAL | Native Codex Worker crash safely reaped Guardian and quarantined without replay; general Background Job recovery is not decoupled. |
+| `COACH_LIFECYCLE_PASS` | PARTIAL | Coach service survived API restarts and recovered exact scope/token; launchd installation and real Chrome extension remain pending. |
 | `CONNECTOR_DIAGNOSTICS_PASS` | PARTIAL | Local stages/probe context tested; network and injected write/abort failures/public connector pending |
 | `OPERATION_IDEMPOTENCY_PASS` | PASS (tested behavior) | Real MCP same-ID/same-request retry did not duplicate the task; same ID with a different prompt returned an operation conflict. Completed-result recovery after a lost response remains to be injected. |
 | `RECOVERY_E2E_PASS` | NOT PASS | E01–E16 full fault matrix pending |
 | `PROCESS_SECURITY_PASS` | PARTIAL | UDS key, allowed root, PID identity and fail-closed checks implemented/tested; real crash/reuse tests pending |
-| `GIT_PUSH_VERIFIED` | NOT PASS | No commit or push yet |
+| `GIT_PUSH_VERIFIED` | NOT PASS | Local feature commit exists; not pushed while source main's three unpushed commits and outstanding gates remain unintegrated |
 | `PRODUCTION_BUILD_PASS` | NOT PASS | Feature build passed; no production deployment checkout build |
 | `SERVICE_RESTART_VERIFIED` | NOT PASS | No production restart |
 | `MCP_PUBLIC_E2E_PASS` | NOT PASS | Cloudflare public connector run pending |
