@@ -499,7 +499,12 @@ export class NativeCodexAgentRunner {
             usage=cleaned;
           }
         }
-        if (type==="turn.failed" || type==="error") {failed=true;agentErrorEvent=true;}
+        // Codex can emit recoverable transport/retry "error" events before
+        // eventually producing a valid turn.completed and exit code 0.
+        // Only turn.failed is terminal. An error after completion is an
+        // invalid event order and must not silently pass verification.
+        if (type==="turn.failed") {failed=true;agentErrorEvent=true;}
+        if (type==="error") {agentErrorEvent=true;if(completed)failed=true;}
       } catch { failed=true;malformedEvents=true; }
     };
     const append=(c:Buffer,isStdout:boolean)=>{

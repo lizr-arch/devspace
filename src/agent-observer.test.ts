@@ -26,7 +26,7 @@ test("Codex JSONL fixture projection is bounded to safe, known event categories"
  }
  const feed=store.readGlobal(0);
  assert.deepEqual(feed.events.map(e=>e.kind),["start","command","file-change","tool","end","status"]);
- assert.deepEqual(feed.events.map(e=>e.status),["RUNNING","RUNNING","COMPLETED","RUNNING","COMPLETED","FAILED"]);
+ assert.deepEqual(feed.events.map(e=>e.status),["RUNNING","RUNNING","COMPLETED","RUNNING","COMPLETED","RETRYING"]);
  assert.deepEqual(feed.events.map(e=>e.tool).filter(Boolean),["shell","patch","mcp"]);
  assert.doesNotMatch(JSON.stringify(feed),/SECRET_PHRASE|\.env|private\.key|api_key|command_line|input_tokens/);
  assert.equal(normalizeCodexNativeEvent("w","op",{type:"item.completed",item:{type:"unexpected_new_tool",text:"SECRET"}}),undefined);

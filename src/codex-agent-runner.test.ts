@@ -30,6 +30,15 @@ const fixtureSource=[
 ' if(mode==="bad-json")return process.stdout.write("not-json\\n");',
 ' if(mode==="missing-thread")return process.stdout.write(JSON.stringify(completed)+"\\n");',
 ' if(mode==="turn-failed"){process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"turn.failed"})+"\\n");process.exitCode=1;return;}',
+' if(mode.startsWith("retry-")){',
+'  const err=JSON.stringify({type:"error",message:"temporary retry"})+"\\n";',
+'  process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"turn.started"})+"\\n"+err+err);',
+'  if(mode==="retry-success")process.stdout.write(JSON.stringify(completed)+"\\n");',
+'  if(mode==="retry-nonzero"){process.stdout.write(JSON.stringify(completed)+"\\n");process.exitCode=7;}',
+'  if(mode==="retry-turn-failed"){process.stdout.write(JSON.stringify({type:"turn.failed"})+"\\n"+JSON.stringify(completed)+"\\n");}',
+'  if(mode==="retry-after-completion"){process.stdout.write(JSON.stringify(completed)+"\\n"+err);}',
+'  return;',
+' }',
 ' if(mode==="large-valid"){const big={type:"item.completed",content:"X".repeat(350000)};return process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify(big)+"\\n"+JSON.stringify(completed)+"\\n");}',
 ' if(mode==="huge")return process.stdout.write("X".repeat(400000));',
 ' if(mode==="edit")fs.writeFileSync("edited-result.txt","changes-from-agent");',
@@ -110,8 +119,26 @@ async function gates(){
   assert.match(longProof?.stdoutSha256??"",/^[0-9a-f]{64}$/);
   assert.ok(longProof?.eventTypes.includes("turn.completed"));
 
-  // All failures are from real isolated child processes; never charge the model.
-  for(const mode of ["turn-failed","early","missing-thread","bad-json","huge","timeout"]){
+  // A real-world Codex session may retry several transient errors and STILL
+  // finish turn.completed with exitCode 0 (both Luna and Sol did so).
+  const retryRecovered=create();
+  const recoveredStatus=await retryRecovered.runner.run(makeInput(
+    "recoverable-transport-retry",retryRecovered.space,"retry-success"));
+  assert.equal(recoveredStatus.state,"COMPLETED",JSON.stringify(recoveredStatus));
+  assert.equal(recoveredStatus.exitCode,0);
+  const recoveredEvidence=retryRecovered.events.getEvidence("workspace-one","recoverable-transport-retry") as {eventTypes:string[]}|undefined;
+  assert.ok(recoveredEvidence,"recovered run did not persist immutable evidence");
+  assert.ok(recoveredEvidence.eventTypes.includes("error"),"retry events must remain auditable");
+  assert.ok(recoveredEvidence.eventTypes.includes("turn.completed"));
+  const retryEvents=retryRecovered.observer.read("workspace-one",0,50).events;
+  assert.equal(retryEvents.filter(x=>x.phase==="error").length,2);
+  assert.ok(retryEvents.filter(x=>x.phase==="error").every(x=>x.status==="RETRYING"));
+  assert.ok(retryEvents.some(x=>x.phase==="runner.finalized" && x.status==="COMPLETED"));
+
+  // No terminal failures, early termination, output corruption, or timeout
+  // are permitted to pass merely because some success-looking event exists.
+  for(const mode of ["turn-failed","early","missing-thread","bad-json","huge","timeout",
+    "retry-no-completion","retry-nonzero","retry-turn-failed","retry-after-completion"]){
     const item=create();
     const failed=await item.runner.run(makeInput("fail-"+mode,item.space,mode));
     assert.ok(["FAILED","STOPPED"].includes(failed.state),

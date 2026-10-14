@@ -17,7 +17,9 @@ export function normalizeCodexNativeEvent(workspaceId:string,operationId:string,
   if(type==="turn.started")return {workspaceId,operationId,kind:"status" as ObserverKind,phase:type,status:"RUNNING"};
   if(type==="turn.completed")return {workspaceId,operationId,kind:"end" as ObserverKind,phase:type,status:"COMPLETED"};
   if(type==="turn.failed")return {workspaceId,operationId,kind:"end" as ObserverKind,phase:type,status:"FAILED"};
-  if(type==="error")return {workspaceId,operationId,kind:"status" as ObserverKind,phase:type,status:"FAILED"};
+  // A native error may be a recoverable retry. The verified final state
+  // comes from turn completion + process exit, not this intermediate event.
+  if(type==="error")return {workspaceId,operationId,kind:"status" as ObserverKind,phase:type,status:"RETRYING"};
   if(!["item.started","item.updated","item.completed"].includes(type))return undefined;
   const item=value.item;
   if(!item||typeof item!=="object"||Array.isArray(item))return undefined;
