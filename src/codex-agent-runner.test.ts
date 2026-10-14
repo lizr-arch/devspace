@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { CoachReviewEventStore } from "./coach-review-events.js";
 import { JobResourceLocks } from "./job-resource-locks.js";
 import { NativeCodexAgentRunner, captureCodexFingerprint, type RunnerInput } from "./codex-agent-runner.js";
+import { AgentObserverStore } from "./agent-observer.js";
 
 const NODE = "/Users/liz/.local/bin/node";
 const UUID = "11111111-1111-4111-8111-111111111111";
@@ -47,15 +48,16 @@ function create(locks = new JobResourceLocks(), workspace?:string) {
   const state=mkdtempSync(join(root,"state-"));
   const events=new CoachReviewEventStore(state);
   stores.push(events);
+  const observer=new AgentObserverStore();
   const runner=new NativeCodexAgentRunner({
-    events,nodePath:NODE,codexPath:fixture,locks,spawn:fakeSpawn,
+    events,observer,heartbeatIntervalMs:20,nodePath:NODE,codexPath:fixture,locks,spawn:fakeSpawn,
   });
   runners.push(runner);
-  return {space,events,runner,locks};
+  return {space,events,runner,locks,observer};
 }
 function makeInput(operationId:string,space:string,prompt="success",extra:Partial<RunnerInput>={}):RunnerInput {
   return {workspaceId:"workspace-one",workspaceRoot:space,operationId,prompt,
-    model:"gpt-5.6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000,...extra};
+    model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000,...extra};
 }
 async function gates(){
   // A real (non-Git) file-change changes the actual snapshot hash.
@@ -120,6 +122,27 @@ async function gates(){
   const cancelled=create();
   const pending=cancelled.runner.run(makeInput("cancel-operation",cancelled.space,"timeout"));
   await new Promise(resolve=>setTimeout(resolve,65));
+  const runningStatus=cancelled.runner.status("cancel-operation");
+  assert.equal(runningStatus.state,"RUNNING");
+  assert.equal(runningStatus.activeSelection?.model,"gpt-6-luna");
+  assert.equal(runningStatus.configRevision,0);
+  assert.ok(cancelled.observer.read("workspace-one",0,100).events.some(
+    e=>e.phase==="runner.heartbeat"),"no real running-loop heartbeat was observed");
+  const revised=cancelled.runner.queueNextSelection({
+    workspaceId:"workspace-one",operationId:"cancel-operation",expectedRevision:0,
+    selection:{model:"gpt-6.1-sol",reasoningEffort:"high"},
+  });
+  assert.equal(revised.revision,1);
+  assert.equal(cancelled.runner.status("cancel-operation").nextSelection?.model,"gpt-6.1-sol");
+  assert.equal(cancelled.runner.status("cancel-operation").activeSelection?.model,"gpt-6-luna");
+  assert.throws(()=>cancelled.runner.queueNextSelection({
+    workspaceId:"workspace-one",operationId:"cancel-operation",expectedRevision:0,
+    selection:{model:"gpt-6-luna",reasoningEffort:"medium"},
+  }),/STALE_REVISION/);
+  assert.throws(()=>cancelled.runner.queueNextSelection({
+    workspaceId:"other-workspace",operationId:"cancel-operation",expectedRevision:1,
+    selection:{model:"gpt-6-luna",reasoningEffort:"medium"},
+  }),/WORKSPACE_MISMATCH/);
   assert.equal(await cancelled.runner.stop("cancel-operation"),true);
   assert.equal((await pending).state,"STOPPED");
   assert.equal(cancelled.events.listPending("workspace-one").pending_count,0);

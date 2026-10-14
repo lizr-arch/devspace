@@ -74,13 +74,21 @@ try {
   const base={workspaceId:"authorized",operationId,prompt,
    reasoningEffort:"none",sandbox:"workspace-write"} as const;
   if(n===2 || n===4){
-   await call("codex_agent_start_rework",{...base,parentOperationId:n===2?"stage-1":"stage-3"});
+   // Stage 2 must inherit the durable, queued change from its REWORK parent.
+   const rework={workspaceId:"authorized",operationId,prompt,sandbox:"workspace-write",
+     parentOperationId:n===2?"stage-1":"stage-3",...(n===4?{reasoningEffort:"none"}:{})};
+   await call("codex_agent_start_rework",rework);
   }else{
-   await call("codex_agent_start",{...base,model:"gpt-5.6-luna"});
+   await call("codex_agent_start",{...base,model:"gpt-6-luna"});
   }
   const completed=await completion(operationId);
   assert.equal(completed.state,"COMPLETED",JSON.stringify(completed));
   assert.equal(completed.threadId,"11111111-1111-4111-8111-111111111111");
+  if(n===2){
+    assert.equal(completed.activeSelection?.model,"gpt-6.1-sol");
+    assert.equal(completed.activeSelection?.reasoningEffort,"high");
+    assert.equal(store.getRunConfig("authorized",operationId)?.active.model,"gpt-6.1-sol");
+  }
   assert.equal(store.listPending("authorized").pending_count,1,
     "exactly current event must be awaiting review");
   const packet=store.getEvidence("authorized",operationId) as {evidenceSha256:string;sourceDiff:string;
@@ -99,6 +107,15 @@ try {
    eventId:completed.eventId,decision:actions[i],evidenceSha256:packet.evidenceSha256});
   assert.equal(store.getReview("authorized",operationId)?.decision,actions[i]);
   assert.equal(store.listPending("authorized").pending_count,0);
+  if(n===1){
+    const change=await call("codex_agent_update_config",{
+      workspaceId:"authorized",operationId,expectedRevision:0,
+      model:"gpt-6.1-sol",reasoningEffort:"high"});
+    const config=(change.structuredContent as any).configuration;
+    assert.equal(config.revision,1);
+    assert.equal(config.active.model,"gpt-6-luna");
+    assert.equal(config.next.model,"gpt-6.1-sol");
+  }
   // A repeated start must resolve to the original result, never spawn another
   // task or emit another event.
   const dup=runner.status(operationId);
@@ -117,6 +134,8 @@ try {
      assert.ok(reloaded.getEvidence("authorized",row.operationId));
    }
    assert.equal(reloaded.listPending("authorized").pending_count,0);
+   assert.equal(reloaded.getRunConfig("authorized","stage-1")?.next.model,"gpt-6.1-sol");
+   assert.equal(reloaded.getRunConfig("authorized","stage-2")?.active.model,"gpt-6.1-sol");
  } finally {reloaded.close();}
  console.log(JSON.stringify({gate:"COACH006_B2_B3_FIVE_CYCLE_RUNNER_MCP_PASS",
    cycles:results.length,reworks:results.filter(x=>x.decision==="REWORK").length,

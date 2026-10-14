@@ -55,7 +55,7 @@ test("real native JSONL subprocess -> runner -> private durable snapshot -> guar
     });
     const finished=await runner.run({
       workspaceId:"ws-e2e",workspaceRoot:space,operationId:"op-e2e",prompt:"safe agent fixture",
-      model:"gpt-5.6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000
+      model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000
     });
     assert.equal(finished.state,"COMPLETED",JSON.stringify(finished));
     const snapshot=store.getEfficiencyAudit("ws-e2e","op-e2e");

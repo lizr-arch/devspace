@@ -423,6 +423,7 @@ function createServerWithOwnedState(
     godotImport,
     managedCoachSidecar,
     coachReviewEvents,
+    agentObserver,
     getNativeCodexRunner,
     toolNames,
     widgetMeta,

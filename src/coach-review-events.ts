@@ -5,10 +5,18 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { isPathInsideRoot } from "./roots.js";
 import type { AgentEfficiencySnapshot } from "./agent-efficiency-audit.js";
+import { validateCodexSelection, type CodexSelection } from "./coach-model-policy.js";
 const FILE = "coach-review-events.sqlite";
 const SHA = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 type Decision = "APPROVED" | "REWORK" | "BLOCKED";
+/** Queued selection is applied only when a new explicitly reviewed turn starts.
+ * Changes to a running process never mutate its CLI argv or restart the process.
+ */
+export interface StoredCodexConfig {
+  workspaceId:string; operationId:string; revision:number;
+  active:CodexSelection; next:CodexSelection; updatedAt:string;
+}
 export interface VerifiedTest { event_id: number; workspace_id: string; task_id: string; session_id: string; tested_fingerprint: string; output_sha256: string; created_at: string; }
 export interface CoachEvent {
   event_id: number;
@@ -113,9 +121,76 @@ export class CoachReviewEventStore {
             this.db.exec(`ALTER TABLE coach_agent_runs ADD COLUMN ${name} ${name.includes("pid")||name==="guardian_uid"?"INTEGER":"TEXT"}`);
         }
       }
+      this.db.exec(
+        "CREATE TABLE IF NOT EXISTS coach_agent_model_configs ("+
+        "workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL,"+
+        "active_model TEXT NOT NULL, active_effort TEXT NOT NULL,"+
+        "next_model TEXT NOT NULL, next_effort TEXT NOT NULL,"+
+        "revision INTEGER NOT NULL CHECK(revision>=0), updated_at TEXT NOT NULL,"+
+        "PRIMARY KEY(workspace_id,operation_id));"
+      );
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_agent_quarantine_audit (audit_id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, explanation TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(workspace_id, operation_id, action)); CREATE TABLE IF NOT EXISTS agent_efficiency_audits (workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, snapshot_json TEXT NOT NULL, snapshot_sha256 TEXT, created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, operation_id));");
       const af=new Set((this.db.pragma("table_info(agent_efficiency_audits)") as {name:string}[]).map(x=>x.name)); if(!af.has("snapshot_sha256")) this.db.exec("ALTER TABLE agent_efficiency_audits ADD COLUMN snapshot_sha256 TEXT");
       this.db.pragma("user_version = 4");
+    }).immediate();
+  }
+  /** Save initial selection for exact run scope. Idempotent only for identical
+   * inputs; no cross-workspace model changes or silent downgrade.
+   */
+  recordRunConfig(workspaceId:string,operationId:string,selection:CodexSelection):StoredCodexConfig {
+    if(!ID.test(workspaceId)||!ID.test(operationId))throw new TypeError("COACH_CONFIG_INVALID_SCOPE");
+    validateCodexSelection(selection);
+    return this.db.transaction(()=>{
+      const run=this.getAgentRun(workspaceId,operationId);
+      if(!run)throw new Error("COACH_CONFIG_RUN_NOT_FOUND");
+      const existing=this.getRunConfig(workspaceId,operationId);
+      if(existing){
+        if(existing.active.model!==selection.model || existing.active.reasoningEffort!==selection.reasoningEffort)
+          throw new Error("COACH_CONFIG_IDENTITY_CONFLICT");
+        return existing;
+      }
+      this.db.prepare("INSERT INTO coach_agent_model_configs "+
+        "(workspace_id,operation_id,active_model,active_effort,next_model,next_effort,revision,updated_at) "+
+        "VALUES (?,?,?,?,?,?,0,?)")
+        .run(workspaceId,operationId,selection.model,selection.reasoningEffort,
+          selection.model,selection.reasoningEffort,new Date().toISOString());
+      return this.getRunConfig(workspaceId,operationId)!;
+    }).immediate();
+  }
+  getRunConfig(workspaceId:string,operationId:string):StoredCodexConfig|undefined {
+    if(!ID.test(workspaceId)||!ID.test(operationId))throw new TypeError("COACH_CONFIG_INVALID_SCOPE");
+    const row=this.db.prepare("SELECT * FROM coach_agent_model_configs WHERE workspace_id=? AND operation_id=?")
+      .get(workspaceId,operationId) as {active_model:string;active_effort:string;next_model:string;next_effort:string;revision:number;updated_at:string}|undefined;
+    if(!row)return undefined;
+    const active={model:row.active_model,reasoningEffort:row.active_effort};
+    const next={model:row.next_model,reasoningEffort:row.next_effort};
+    validateCodexSelection(active);validateCodexSelection(next);
+    return {workspaceId,operationId,revision:row.revision,active,next,updatedAt:row.updated_at};
+  }
+  /** Version-checked durable update. No in-flight interruption; the next
+   * explicitly authorized REWORK will inherit this queued selection.
+   */
+  queueRunConfig(input:{workspaceId:string;operationId:string;expectedRevision:number;selection:CodexSelection}):StoredCodexConfig {
+    if(!ID.test(input.workspaceId)||!ID.test(input.operationId) ||
+       !Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0)
+      throw new TypeError("COACH_CONFIG_INVALID_SCOPE_OR_REVISION");
+    validateCodexSelection(input.selection);
+    return this.db.transaction(()=>{
+      const run=this.getAgentRun(input.workspaceId,input.operationId);
+      if(!run || !["RUNNING","COMPLETED"].includes(run.state))
+        throw new Error("COACH_CONFIG_RUN_NOT_RESUMABLE");
+      const current=this.getRunConfig(input.workspaceId,input.operationId);
+      if(!current)throw new Error("COACH_CONFIG_NOT_INITIALIZED");
+      if(current.revision!==input.expectedRevision)throw new Error("COACH_CONFIG_STALE_REVISION");
+      if(current.next.model===input.selection.model && current.next.reasoningEffort===input.selection.reasoningEffort)
+        return current;
+      const updated=this.db.prepare(
+        "UPDATE coach_agent_model_configs SET next_model=?,next_effort=?,revision=revision+1,updated_at=? "+
+        "WHERE workspace_id=? AND operation_id=? AND revision=?")
+        .run(input.selection.model,input.selection.reasoningEffort,new Date().toISOString(),
+          input.workspaceId,input.operationId,input.expectedRevision);
+      if(updated.changes!==1)throw new Error("COACH_CONFIG_STALE_REVISION");
+      return this.getRunConfig(input.workspaceId,input.operationId)!;
     }).immediate();
   }
   recordEfficiencyAudit(snapshot: AgentEfficiencySnapshot): void {

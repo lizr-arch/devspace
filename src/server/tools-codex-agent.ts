@@ -4,6 +4,7 @@ import { LsofWorktreeProcessProbe } from "../workspace-process-probe.js";
 import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 import { guardedClearQuarantine, assessGuardian } from "../coach-agent-guardian.js";
+import { CODEX_MODELS, CODEX_EFFORTS } from "../coach-model-policy.js";
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 const operation=id;
@@ -18,11 +19,11 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
       inputSchema:{
         workspaceId:id,operationId:operation,
         prompt:z.string().min(1).max(10000),
-        model:z.literal("gpt-5.6-luna"),
-        reasoningEffort:z.enum(["none","low"]),
+        model:z.enum(CODEX_MODELS),
+        reasoningEffort:z.enum(CODEX_EFFORTS),
         sandbox:z.enum(["read-only","workspace-write"]),
         // Existing threads may only be resumed through verified REWORK tool.
-        timeoutMs:z.number().int().min(3000).max(180000).optional(),
+        timeoutMs:z.number().int().min(3000).max(3600000).optional(),
       },
       outputSchema:resultOutputSchema({status:z.unknown().optional(),error:optionalError}),
       _meta:{},
@@ -35,6 +36,26 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
       });
       const result="Codex task "+input.operationId+" started or already known. Poll codex_agent_status; a completion event is created only after verified Codex JSON evidence.";
       return {content:[textBlock(result)],structuredContent:{result,status}};
+    });
+    registerAppTool(server,"codex_agent_update_config",{
+      title:"Queue Codex model/reasoning change",
+      description:"Web GPT can change the model and reasoning effort for the next verified turn. Current subprocess continues unchanged. Optimistic revision prevents concurrent updates.",
+      inputSchema:{
+        workspaceId:id,operationId:operation,
+        expectedRevision:z.number().int().nonnegative(),
+        model:z.enum(CODEX_MODELS),reasoningEffort:z.enum(CODEX_EFFORTS),
+      },
+      outputSchema:resultOutputSchema({configuration:z.unknown().optional(),error:optionalError}),
+      _meta:{},
+      annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+    },async({workspaceId,operationId,expectedRevision,model,reasoningEffort})=>{
+      workspaces.getWorkspace(workspaceId);
+      const config=getNativeCodexRunner().queueNextSelection({
+        workspaceId,operationId,expectedRevision,
+        selection:{model,reasoningEffort},
+      });
+      const result="Queued config for next explicitly authorized Codex turn; active process unchanged.";
+      return {content:[textBlock(result)],structuredContent:{result,configuration:config}};
     });
     registerAppTool(server,"codex_agent_stop",{
       title:"Stop native Codex Agent",
@@ -59,6 +80,34 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
       return {content:[textBlock(result)],structuredContent:{result,stopped}};
     });
   }
+
+  registerAppTool(server,"codex_agent_observe",{
+    title:"Observe live Codex Agent events",
+    description:"Read workspace-scoped, redacted native Codex events and heartbeat by cursor. Web GPT should poll during active work. A heartbeat proves runner liveness, not thinking or useful progress.",
+    inputSchema:{
+      workspaceId:id, operationId:operation.optional(),
+      cursor:z.number().int().nonnegative().default(0),
+      limit:z.number().int().min(1).max(100).default(50),
+    },
+    outputSchema:resultOutputSchema({events:z.unknown(),nextCursor:z.number(),gap:z.number(),
+      status:z.unknown().optional(),error:optionalError}),
+    _meta:{},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  },async({workspaceId,operationId,cursor,limit})=>{
+    workspaces.getWorkspace(workspaceId);
+    if(!ctx.agentObserver)throw new Error("COACH_OBSERVER_NOT_CONFIGURED");
+    const snapshot=ctx.agentObserver.read(workspaceId,cursor,limit);
+    const events=operationId ? snapshot.events.filter(e=>e.operationId===operationId):snapshot.events;
+    let status:unknown;
+    if(operationId){
+      try {status=getNativeCodexRunner().status(operationId,workspaceId);}
+      catch(error) {
+        if(!(error instanceof Error && error.message==="CODEX_OPERATION_NOT_FOUND"))throw error;
+      }
+    }
+    const result="Observed "+events.length+" redacted events; continue from cursor "+snapshot.nextCursor;
+    return {content:[textBlock(result)],structuredContent:{result,
+      events,nextCursor:snapshot.nextCursor,gap:snapshot.gap,...(status?{status}:{})}};
+  });
 
   registerAppTool(server,"codex_agent_status",{
     title:"Native Codex Agent status",

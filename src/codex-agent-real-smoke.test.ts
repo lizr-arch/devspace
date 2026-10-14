@@ -19,7 +19,7 @@ try {
     workspaceRoot:workspace,
     operationId:"b1-real-codex-readonly-handshake",
     prompt:"Return exactly COACH_B1_REAL_OK. Do not invoke any tools, run shell commands, create files, or change settings.",
-    model:"gpt-5.6-luna" as const,
+    model:"gpt-6-luna" as const,
     reasoningEffort:"none" as const,
     sandbox:"read-only" as const,
     timeoutMs:120000,

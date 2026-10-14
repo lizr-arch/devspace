@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CoachReviewEventStore } from "./coach-review-events.js";
+import { AgentObserverStore } from "./agent-observer.js";
 import { NativeCodexAgentRunner } from "./codex-agent-runner.js";
 import { JobResourceLocks } from "./job-resource-locks.js";
 import { registerCodexAgentTools } from "./server/tools-codex-agent.js";
@@ -30,14 +31,15 @@ chmodSync(fake,0o700);
 const state=join(root,"state");
 const store=new CoachReviewEventStore(state);
 const locks=new JobResourceLocks();
+const observer=new AgentObserverStore();
 const runner=new NativeCodexAgentRunner({
- events:store,nodePath:"/Users/liz/.local/bin/node",codexPath:fake,locks,
+ events:store,observer,nodePath:"/Users/liz/.local/bin/node",codexPath:fake,locks,
  spawn:(file,args,options)=>spawn(file,args,options),
 });
 function context(readOnly:boolean):ServerContext {
  return {config:{readOnly},workspaces:{
   getWorkspace(id:string){if(id!=="authorized")throw new Error("WORKSPACE_NOT_AUTHORIZED");return {root:workspace};}
- },coachReviewEvents:store,getNativeCodexRunner:()=>runner} as unknown as ServerContext;
+ },coachReviewEvents:store,agentObserver:observer,getNativeCodexRunner:()=>runner} as unknown as ServerContext;
 }
 const mp=new McpServer({name:"native-b1-roundtrip",version:"1.0.0"});
 registerCodexAgentTools(mp,context(false));
@@ -46,15 +48,15 @@ const [a,b]=InMemoryTransport.createLinkedPair();
 await mp.connect(b);await client.connect(a);
 try {
  const names=(await client.listTools()).tools.map(t=>t.name).sort();
- assert.deepEqual(names,["codex_agent_clear_quarantine","codex_agent_evidence","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_start","codex_agent_status","codex_agent_stop"]);
+ assert.deepEqual(names,["codex_agent_clear_quarantine","codex_agent_evidence","codex_agent_observe","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_start","codex_agent_status","codex_agent_stop","codex_agent_update_config"]);
  const denied=await client.callTool({name:"codex_agent_start",arguments:{
-  workspaceId:"untrusted",operationId:"denied",prompt:"edit",model:"gpt-5.6-luna",
+  workspaceId:"untrusted",operationId:"denied",prompt:"edit",model:"gpt-6-luna",
   reasoningEffort:"none",sandbox:"workspace-write"
  }});
  assert.equal(denied.isError,true);
  assert.equal(store.listPending("authorized").pending_count,0);
  const input={workspaceId:"authorized",operationId:"mcp-real",prompt:"mcp-fixture-edit",
-  model:"gpt-5.6-luna",reasoningEffort:"none",sandbox:"workspace-write"} as const;
+  model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write"} as const;
  const initial=await client.callTool({name:"codex_agent_start",arguments:input});
  assert.equal(initial.isError ?? false,false,JSON.stringify(initial));
  assert.equal(JSON.stringify(initial).includes(input.prompt),false,"prompt must not echo");
@@ -64,6 +66,35 @@ try {
   arguments:{workspaceId:"authorized",operationId:"mcp-real"}});
  assert.equal(status.isError ?? false,false);
  assert.equal(((status.structuredContent as Record<string,unknown> | undefined)?.status as {state:string} | undefined)?.state,"COMPLETED");
+ const observation=await client.callTool({name:"codex_agent_observe",arguments:{workspaceId:"authorized",operationId:"mcp-real",cursor:0}});
+ assert.equal(observation.isError??false,false,JSON.stringify(observation));
+ const observed=(observation.structuredContent as Record<string,unknown>).events as Array<{phase:string}>;
+ assert.ok(observed.some(e=>e.phase==="thread.started"));
+ assert.ok(observed.some(e=>e.phase==="turn.completed"));
+ assert.ok(observed.some(e=>e.phase==="runner.finalized"));
+ assert.doesNotMatch(JSON.stringify(observation.structuredContent),/mcp-fixture-edit|not_a_real_usage_field/);
+ const continuation=await client.callTool({name:"codex_agent_observe",arguments:{
+   workspaceId:"authorized",operationId:"mcp-real",
+   cursor:(observation.structuredContent as any).nextCursor}});
+ assert.deepEqual((continuation.structuredContent as any).events,[]);
+ const queued=await client.callTool({name:"codex_agent_update_config",arguments:{
+   workspaceId:"authorized",operationId:"mcp-real",expectedRevision:0,
+   model:"gpt-6.1-sol",reasoningEffort:"high"}});
+ assert.equal(queued.isError??false,false,JSON.stringify(queued));
+ const q=(queued.structuredContent as any).configuration;
+ assert.equal(q.active.model,"gpt-6-luna");
+ assert.equal(q.next.model,"gpt-6.1-sol");
+ assert.equal(q.next.reasoningEffort,"high");
+ assert.equal(q.revision,1);
+ assert.equal(store.getRunConfig("authorized","mcp-real")?.revision,1);
+ const stale=await client.callTool({name:"codex_agent_update_config",arguments:{
+   workspaceId:"authorized",operationId:"mcp-real",expectedRevision:0,
+   model:"gpt-6-luna",reasoningEffort:"low"}});
+ assert.equal(stale.isError,true,"stale update must be rejected");
+ const badModel=await client.callTool({name:"codex_agent_start",arguments:{
+   workspaceId:"authorized",operationId:"legacy-model-not-allowed",
+   prompt:"do not run",model:"gpt-5.6-luna",reasoningEffort:"none",sandbox:"read-only"}});
+ assert.equal(badModel.isError,true,"forbidden model must not launch");
  const ev=await client.callTool({name:"codex_agent_evidence",
   arguments:{workspaceId:"authorized",operationId:"mcp-real"}});
  assert.equal(ev.isError ?? false,false);
@@ -91,6 +122,8 @@ try {
   assert.equal(packet.evidenceSha256,complete.evidenceSha256,
     "evidence must survive a new SQLite handle / simulated server restart");
   assert.equal(reopened.getEvidence("other","mcp-real"),undefined);
+  assert.equal(reopened.getRunConfig("authorized","mcp-real")?.next.model,"gpt-6.1-sol");
+  assert.equal(reopened.getRunConfig("authorized","mcp-real")?.revision,1);
  } finally {reopened.close();}
  const readonly=new McpServer({name:"native-b1-ro",version:"1.0.0"});
  registerCodexAgentTools(readonly,context(true));
@@ -99,7 +132,7 @@ try {
  await readonly.connect(rb);await roclient.connect(ra);
  try {
   assert.deepEqual((await roclient.listTools()).tools.map(x=>x.name).sort(),
-    ["codex_agent_evidence","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_status"]);
+    ["codex_agent_evidence","codex_agent_observe","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_status"]);
  } finally {await roclient.close();await readonly.close();}
  console.log("COACH006B1_MCP_CLIENT_START_STATUS_EVIDENCE_STOP_AND_RESTART_PASS");
 } finally {

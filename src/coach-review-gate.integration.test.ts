@@ -63,6 +63,8 @@ async function completed(operationId:string,workspaceId="allowed"){
   gitSummary:fp.gitSummary,sourceDiff:"fixture",stdoutSha256:sha("stdout"),stderrSha256:sha(""),
   capturedAt:new Date().toISOString(),invocation:{sandbox:"workspace-write",reasoningEffort:"none",resumed:false}};
  const evidenceSha256=sha(JSON.stringify(base));
+ store.claimAgentRun({workspaceId,operationId,requestSha256:sha("test-request:"+operationId)});
+ store.recordRunConfig(workspaceId,operationId,{model:"gpt-6-luna",reasoningEffort:"none"});
  const event=store.recordCompletedWithEvidence({workspaceId,operationId,evidenceSha256,packetJson:JSON.stringify({...base,evidenceSha256})});
  return {eventId:event.event_id,evidenceSha256,operationId,workspaceId};
 }

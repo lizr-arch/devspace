@@ -13,12 +13,14 @@ import {
 import type { CoachReviewEventStore } from "./coach-review-events.js";
 import { GUARDIAN_SOURCE, createGuardianMarker, readGuardianIdentity } from "./coach-agent-guardian.js";
 import { AgentObserverStore, normalizeCodexNativeEvent } from "./agent-observer.js";
+import {validateCodexSelection, type CodexSelection, type CodexModel, type CodexEffort} from "./coach-model-policy.js";
 import { analyzeAgentEfficiency, type AuditTrace } from "./agent-efficiency-audit.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 // Codex currently emits time-ordered UUIDv7 thread IDs; keep valid RFC versions.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MODEL = "gpt-5.6-luna";
+// Model and reasoning effort are explicitly supplied by the Coach.
+// No global frozen model, no fallback to legacy names.
 const NODE = "/Users/liz/.local/bin/node";
 const CODEX = "/Users/liz/.local/bin/codex";
 // Bound long Codex JSON streams without silently truncating their completion events.
@@ -45,8 +47,8 @@ export interface RunnerInput {
   workspaceRoot: string;
   operationId: string;
   prompt: string;
-  model: typeof MODEL;
-  reasoningEffort: "none" | "low";
+  model: CodexModel;
+  reasoningEffort: CodexEffort;
   sessionId?: string;
   parentOperationId?: string;
   /** Rework may only begin against its parent source snapshot. */
@@ -66,6 +68,14 @@ export interface RunnerStatus {
   eventId?: number;
   elapsedMs?: number;
   tokenUsage?: unknown;
+  /** Native event progress is distinct from runner heartbeat. */
+  lastNativeEventAt?:string;
+  nativeEventCount?:number;
+  timeSinceNativeEventMs?:number;
+  progressState?:"STARTING"|"EVENTS_FLOWING"|"AWAITING_MODEL"|"SUSPECTED_STALL"|"FINISHED";
+  activeSelection?:CodexSelection;
+  nextSelection?:CodexSelection;
+  configRevision?:number;
   reason?: string;
 }
 export interface EvidencePacket {
@@ -84,6 +94,7 @@ export interface EvidencePacket {
   invocation: {
     sandbox: RunnerInput["sandbox"];
     reasoningEffort: RunnerInput["reasoningEffort"];
+    model?: CodexModel;
     resumed: boolean;
     parentOperationId?: string;
   };
@@ -100,6 +111,8 @@ export interface NativeRunnerOptions {
   spawn?: Spawn;
   /** Test-only fingerprint injection; never used by production MCP wiring. */
   fingerprint?: (root: string) => Promise<{ sha: string; gitSummary: string | null }>;
+  /** Test-only heartbeat cadence; production is fixed at 5000ms. */
+  heartbeatIntervalMs?:number;
   observer?: AgentObserverStore;
   auditStore?: import("./coach-review-events.js").CoachReviewEventStore;
 }
@@ -110,6 +123,7 @@ interface RecordEntry {
   process?: ProcessLike;
   evidence?: EvidencePacket;
   stop?: boolean;
+  timedOut?: boolean;
 }
 const hash = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 function assertId(value: unknown, field: string): asserts value is string {
@@ -122,8 +136,8 @@ function validate(input: RunnerInput): void {
   assertId(input.operationId, "operation_id");
   if (typeof input.prompt !== "string" || !input.prompt.trim() || input.prompt.length > 10000)
     throw new TypeError("CODEX_INVALID_PROMPT");
-  if (input.model !== MODEL || !["none", "low"].includes(input.reasoningEffort) ||
-      !["workspace-write", "read-only"].includes(input.sandbox))
+  validateCodexSelection(input);
+  if (!["workspace-write", "read-only"].includes(input.sandbox))
     throw new TypeError("CODEX_INVALID_OPTIONS");
   if (input.sessionId !== undefined && !UUID.test(input.sessionId))
     throw new TypeError("CODEX_INVALID_SESSION");
@@ -135,7 +149,7 @@ function validate(input: RunnerInput): void {
        input.parentOperationId === input.operationId))
     throw new TypeError("CODEX_INVALID_REWORK_PARENT");
   if (input.timeoutMs !== undefined &&
-      (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 3000 || input.timeoutMs > 180000))
+      (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 3000 || input.timeoutMs > 3600000))
     throw new TypeError("CODEX_INVALID_TIMEOUT");
 }
 function directory(root: string): string {
@@ -312,6 +326,10 @@ export class NativeCodexAgentRunner {
     this.nodePath = executable(options.nodePath, NODE, test);
     this.codexPath = executable(options.codexPath, CODEX, test);
     this.maxOutput = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
+    if(options.heartbeatIntervalMs!==undefined &&
+       (!test || !Number.isInteger(options.heartbeatIntervalMs) ||
+        options.heartbeatIntervalMs<10 || options.heartbeatIntervalMs>5000))
+      throw new TypeError("CODEX_INVALID_HEARTBEAT_INTERVAL");
     if (!Number.isInteger(this.maxOutput) || this.maxOutput < 4096 || this.maxOutput > DEFAULT_MAX_OUTPUT)
       throw new TypeError("CODEX_INVALID_OUTPUT_LIMIT");
   }
@@ -355,17 +373,45 @@ export class NativeCodexAgentRunner {
     if (record) {
       if(workspaceId && record.status.workspaceId!==workspaceId)
         throw new Error("CODEX_WORKSPACE_MISMATCH");
-      return {...record.status};
+      const config=this.options.events.getRunConfig(record.status.workspaceId,operationId);
+      const now=Date.now();
+      const elapsed=now-Date.parse(record.status.startedAt);
+      const silence=record.status.lastNativeEventAt
+        ?now-Date.parse(record.status.lastNativeEventAt):elapsed;
+      const progressState=record.status.state!=="RUNNING"?"FINISHED":
+        silence>=120_000?"SUSPECTED_STALL":
+        !record.status.nativeEventCount && silence<15_000?"STARTING":
+        silence>=15_000?"AWAITING_MODEL":"EVENTS_FLOWING";
+      return {...record.status,elapsedMs:record.status.elapsedMs??elapsed,
+        progressState,
+        ...(record.status.state==="RUNNING"?{timeSinceNativeEventMs:silence}:{}),
+        activeSelection:config?.active??{model:record.input.model,reasoningEffort:record.input.reasoningEffort},
+        nextSelection:config?.next??{model:record.input.model,reasoningEffort:record.input.reasoningEffort},
+        configRevision:config?.revision??0};
     }
     if(workspaceId){
       const durable=this.options.events.getAgentRun(workspaceId,operationId);
-      if(durable)return {operationId,workspaceId,state:durable.state,
+      if(durable){
+        const config=this.options.events.getRunConfig(workspaceId,operationId);
+        return {operationId,workspaceId,state:durable.state,progressState:"FINISHED",
+        ...(config?{activeSelection:config.active,nextSelection:config.next,configRevision:config.revision}:{}),
         startedAt:durable.startedAt,...(durable.finishedAt?{finishedAt:durable.finishedAt}:{}),
         ...(durable.threadId?{threadId:durable.threadId}:{}),
         ...(durable.eventId?{eventId:durable.eventId}:{}),
         ...(durable.reason?{reason:durable.reason}:{})};
+      }
     }
     throw new Error("CODEX_OPERATION_NOT_FOUND");
+  }
+  /** Queue a durable, revision-checked change for the next explicitly
+   * approved Codex turn. Existing subprocess argv is never modified.
+   */
+  queueNextSelection(input:{workspaceId:string;operationId:string;expectedRevision:number;selection:CodexSelection}) {
+    this.status(input.operationId,input.workspaceId);
+    const config=this.options.events.queueRunConfig(input);
+    this.options.observer?.emit({workspaceId:input.workspaceId,operationId:input.operationId,
+      kind:"status",phase:"runner.config_queued",status:"NEXT_TURN",count:config.revision});
+    return config;
   }
   activeOperationsForWorkspace(workspaceId:string):string[] {
     return [...this.records.values()].filter(r=>r.input.workspaceId===workspaceId &&
@@ -396,7 +442,7 @@ export class NativeCodexAgentRunner {
   private async execute(r:RecordEntry): Promise<RunnerStatus> {
     const input=r.input;
     const args=["exec","--json","--sandbox",input.sandbox,"--skip-git-repo-check",
-      "--ignore-user-config","--disable","chronicle","--model",MODEL,"-c",
+      "--ignore-user-config","--disable","chronicle","--model",input.model,"-c",
       'model_reasoning_effort="' + input.reasoningEffort + '"'];
     if (input.sessionId) args.push("resume",input.sessionId);
     args.push("-"); // Codex documented stdin-prompt sentinel.
@@ -405,6 +451,7 @@ export class NativeCodexAgentRunner {
     let journalClaimed=false;
     let timer:NodeJS.Timeout|undefined;
     let killTimer:NodeJS.Timeout|undefined;
+    let heartbeatTimer:NodeJS.Timeout|undefined;
     let exitCode=-1;
     let completed=false, failed=false, oversize=false, threadId:string|undefined, usage:unknown;
     let malformedEvents=false, agentErrorEvent=false;
@@ -425,6 +472,8 @@ export class NativeCodexAgentRunner {
         const type=typeof raw.type==="string" ? raw.type : "";
         if (!type) {failed=true;malformedEvents=true;return;}
         types.push(type);
+        r.status.lastNativeEventAt=new Date().toISOString();
+        r.status.nativeEventCount=(r.status.nativeEventCount??0)+1;
         // Security-critical native JSONL projection is separately fixture-tested.
         // Unknown or sensitive event categories intentionally yield no observer record.
         const projected=normalizeCodexNativeEvent(input.workspaceId,input.operationId,raw);
@@ -475,6 +524,8 @@ export class NativeCodexAgentRunner {
       this.options.events.claimAgentRun({workspaceId:input.workspaceId,
         operationId:input.operationId,requestSha256:operationIdentity(input)});
       journalClaimed=true;
+      this.options.events.recordRunConfig(input.workspaceId,input.operationId,
+        {model:input.model,reasoningEffort:input.reasoningEffort});
       const before=this.options.fingerprint
         ? await this.options.fingerprint(input.workspaceRoot)
         : await captureCodexFingerprint(input.workspaceRoot);
@@ -507,6 +558,12 @@ export class NativeCodexAgentRunner {
       // The runner sends only the authorized prompt via stdin, never in process argv.
       child.stdin?.on("error",()=>{failed=true;});
       child.stdin?.end(input.prompt);
+      // Transport liveness, NOT a claim of model progress or successful actions.
+      if(this.options.observer)heartbeatTimer=setInterval(()=>{
+        if(r.status.state==="RUNNING")
+          this.options.observer?.emit({workspaceId:input.workspaceId,operationId:input.operationId,
+            kind:"status",phase:"runner.heartbeat",status:"RUNNING",elapsedMs:Date.now()-started});
+      },this.options.spawn?(this.options.heartbeatIntervalMs??5000):5000);
       const code=await new Promise<number>(resolve=>{
         let settled=false;
         const done=(value:number)=>{
@@ -518,9 +575,10 @@ export class NativeCodexAgentRunner {
         child.on("close",(value:number|null)=>done(value ?? -1));
         timer=setTimeout(()=>{
           r.stop=true;
+          r.timedOut=true;
           terminateAgent(child,"SIGTERM");
           killTimer=setTimeout(()=>{terminateAgent(child,"SIGKILL");},1500);
-        },input.timeoutMs ?? 180000);
+        },input.timeoutMs ?? 900000);
       });
       exitCode=code;
       if(!oversize && remaining.trim())parseLine(remaining);
@@ -542,7 +600,7 @@ export class NativeCodexAgentRunner {
           stdoutSha256:stdoutDigest.digest("hex"),
           stderrSha256:stderrDigest.digest("hex"),
           capturedAt:new Date().toISOString(),
-          invocation:{sandbox:input.sandbox,reasoningEffort:input.reasoningEffort,
+          invocation:{sandbox:input.sandbox,model:input.model,reasoningEffort:input.reasoningEffort,
             resumed:Boolean(input.sessionId),
             ...(input.parentOperationId?{parentOperationId:input.parentOperationId}:{})},
           ...(usage!==undefined?{tokenUsage:usage}:{}),
@@ -561,7 +619,7 @@ export class NativeCodexAgentRunner {
         r.status.state="COMPLETED";
       } else {
         r.status.state=r.stop?"STOPPED":"FAILED";
-        r.status.reason = r.stop?"cancelled_or_timed_out"
+        r.status.reason = r.timedOut?"codex_execution_timeout":r.stop?"codex_stopped_by_request"
           : oversize?"codex_json_output_limit_exceeded"
           : malformedEvents?"codex_invalid_json_events"
           : agentErrorEvent?"codex_error_event"
@@ -581,6 +639,7 @@ export class NativeCodexAgentRunner {
     }finally{
       if(timer)clearTimeout(timer);
       if(killTimer)clearTimeout(killTimer);
+      if(heartbeatTimer)clearInterval(heartbeatTimer);
       if(journalClaimed){
         try {
           this.options.events.finishAgentRun({workspaceId:input.workspaceId,

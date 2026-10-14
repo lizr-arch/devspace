@@ -74,7 +74,7 @@ try {
     spawn:()=>{spawned=true;throw new Error("SHOULD_NEVER_SPAWN");},
   });
   assert.throws(()=>native.run({workspaceId:"w1",workspaceRoot:root,
-    operationId:"new-operation-after-crash",prompt:"test",model:"gpt-5.6-luna",
+    operationId:"new-operation-after-crash",prompt:"test",model:"gpt-6-luna",
     reasoningEffort:"none",sandbox:"workspace-write"}),/QUARANTINED/);
   assert.equal(spawned,false);
   // The existing ordinary project_task tool must also refuse to execute
