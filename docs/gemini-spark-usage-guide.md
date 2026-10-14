@@ -5,6 +5,7 @@
 > 目标：讲清楚 **为什么能接、门槛是什么、怎么接、接完之后怎么用**，
 > 以及 **Gemini 网页版和 ChatGPT Web 接同一个 DevSpace 有什么本质区别**。
 > 本文是教程；完整排障实录（4 层故障根因）见 `docs/gemini-spark-integration.md`。
+> 当前 tools/list 行为已改为全目录兼容试验；旧白名单记录只供历史排障参考。
 
 ---
 
@@ -145,24 +146,21 @@ Spark 做重活（如全仓库扫描、批量改写），注意 Google One AI Pr
 | 维度 | ChatGPT Web (GPT-5 系) | Gemini Web (Spark) |
 |---|---|---|
 | 触发方式 | 普通对话（connector 常驻） | **仅 Spark 任务**，`@` 选中 app |
-| 工具目录 | 全量 **59 个**（含 job/game/UI 专用） | 兼容层过滤后 **18 个核心**（workspace/读写/git/task） |
+| 工具目录 | 全量工具目录 | 完整目录并按 Gemini 兼容规则清理 schema（当前试验） |
 | 传输模式 | 容忍 stateless（SDK 兼容好） | 必须 **stateful**（要 Mcp-Session-Id + SSE） |
 | OAuth 回调 | chatgpt.com | **三个** oauth-redirect*.googleusercontent.com |
-| 目录拒收风险 | 无（59 个全收） | 有（>50 工具即触发 Google 侧警告/断开） |
+| 目录拒收风险 | 未观察到 | 完整目录试验中；Google 未公布自定义 MCP 工具数量上限 |
 | 超时窗口 | 相对宽裕 | Spark 更宽但大仓库 open_workspace 仍可能贴线 |
 | 诊断手段 | 少（无 wire 日志概念） | DevSpace 的 mcp_wire/dcr_wire 日志可逐请求复盘 |
 
 **一句话**：ChatGPT 是"随便连都能用"；Gemini 是"必须按它的规矩来"——规矩全部
 由 DevSpace 侧兼容层满足后，两边共用一个实例互不干扰。
 
-**18 个工具白名单**（Gemini 能看到并能调用的全部）：
-`devspace_info, list_workspaces, open_workspace, resume_workspace, read, write,
-edit, grep, glob, ls, git_status, git_diff, project_task, list_task_sessions,
-wait_task, poll_task, stop_task, approve_task_manifest`
-
-缺的工具（如 `start_job`/`start_capture`/游戏与 UI 专用工具）在 Gemini 侧**刻意
-不下发**——不是不能用，是怕它拿到后误判目录不可用。需要补哪个工具，改
-`src/server/express-routes.ts` 的 `GEMINI_TOOL_ALLOWLIST` 即可，改完重启。
+**当前试验**：Gemini 会收到服务端实际注册的完整 MCP 工具目录；兼容层会递归移除
+`$schema`、`additionalProperties`、`outputSchema` 和 Apps UI `_meta`。其他 MCP 客户端
+仍收到未经改写的工具目录。DevSpace 本地协议测试通过，但完整目录是否被 Gemini Spark
+稳定接受，需由实际 Spark 会话验证。此前目录拒收是历史实测，不代表 Google 公布了
+固定的工具数上限。
 
 ---
 
@@ -190,5 +188,5 @@ wait_task, poll_task, stop_task, approve_task_manifest`
   `~/.devspace/watchdog.ps1`（白名单注入 + 自启看门狗）
 - 排障实录：`docs/gemini-spark-integration.md`
 - 兼容层代码：`src/server/express-routes.ts` 内 `GEMINI_CLIENT_MATCH` /
-  `GEMINI_TOOL_ALLOWLIST` / `transformToolsListChunk`
+  `stripToolForGemini` / `transformToolsListChunk`
 - 本机验证探针：`Temp/probe_compat.mjs`（伪装任意客户端签名跑全链路）

@@ -33,6 +33,7 @@
     "test:coach:mac": "tsx src/devspace-instance-lock.test.ts && tsx src/coach-review-events.test.ts && tsx src/coach-a3-secret-session.test.ts && tsx src/coach-a3-server-smoke.test.ts && tsx src/job-resource-locks-sidecar.test.ts && tsx src/managed-coach-sidecar.test.ts && tsx src/codex-agent-runner.test.ts && tsx src/codex-agent-mcp.test.ts && tsx src/coach-review-gate.test.ts && tsx src/coach-review-gate.integration.test.ts && tsx src/coach-agent-recovery.test.ts && tsx src/coach-five-cycle.test.ts && node --test src/coach-browser-extension.test.cjs",
     "test:coach:mac:os": "tsx src/coach-agent-guardian-normal.test.ts && tsx src/coach-agent-os.test.ts && tsx src/coach-agent-os-security.test.ts && tsx src/coach-agent-os-migration.test.ts",
     "test:coach:real-billable": "tsx src/codex-agent-real-smoke.test.ts",
+    "test:gemini-tools": "tsx tests/test_gemini_tool_expansion.ts",
     "test:webgpt-local": "npm run build && tsx tests/test_webgpt_local_host.ts",
     "test:webgpt-local:ui": "npm run build && tsx tests/webgpt_local_server.ts --open",
     "test:game-art-real": "tsx tests/test_game_art_real.ts",
