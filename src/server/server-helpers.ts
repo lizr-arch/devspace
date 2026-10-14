@@ -244,6 +244,7 @@ export function exposedToolNames(
     "codex_agent_evidence",
     "codex_agent_source_diff",
     "get_agent_efficiency_audit",
+    "coach_realtime_status",
   ];
   if (!config.readOnly) {
     tools.splice(3, 0, "publish_artifact");
@@ -291,6 +292,9 @@ export function exposedToolNames(
       "codex_agent_start_rework",
       "codex_agent_verify_test",
       "codex_agent_submit_review",
+      "coach_realtime_register",
+      "coach_realtime_pause",
+      "coach_realtime_resume",
       "codex_agent_clear_quarantine",
     );
     if (config.gitRemoteWrite.enabled) {
@@ -449,6 +453,9 @@ export function requiredCapabilityForTool(tool: string): ToolCapability {
       "codex_agent_start_rework",
       "codex_agent_verify_test",
       "codex_agent_submit_review",
+      "coach_realtime_register",
+      "coach_realtime_pause",
+      "coach_realtime_resume",
       "stop_task",
       "bash",
       "run_shell",

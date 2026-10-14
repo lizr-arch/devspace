@@ -10,12 +10,21 @@ const regular=config(false);
 const names=exposedToolNames(regular,toolNamesFor(regular));
 assert.equal(names.filter(n=>n==="codex_agent_observe").length,1);
 assert.equal(names.filter(n=>n==="codex_agent_update_config").length,1);
+for(const tool of ["coach_realtime_status","coach_realtime_register","coach_realtime_pause","coach_realtime_resume"])
+ assert.equal(names.filter(n=>n===tool).length,1);
+for(const tool of ["coach_realtime_register","coach_realtime_pause","coach_realtime_resume"])
+ assert.equal(requiredCapabilityForTool(tool),"runner.execute");
+assert.equal(requiredCapabilityForTool("coach_realtime_status"),"workspace.read");
 assert.equal(requiredCapabilityForTool("codex_agent_update_config"),"runner.execute");
 assert.equal(requiredCapabilityForTool("codex_agent_observe"),"workspace.read");
 const readOnly=config(true);
 const ro=exposedToolNames(readOnly,toolNamesFor(readOnly));
 assert.ok(ro.includes("codex_agent_observe"));
+assert.ok(ro.includes("coach_realtime_status"));
+assert.ok(!ro.includes("coach_realtime_register"));
+assert.ok(!ro.includes("coach_realtime_pause"));
+assert.ok(!ro.includes("coach_realtime_resume"));
 assert.ok(!ro.includes("codex_agent_update_config"));
 assert.ok(!ro.includes("codex_agent_start"));
-assert.match(TOOL_SCHEMA_REVISION,/coach-runtime-dynamic-observe-v2\+agent-efficiency-audit-v1$/);
+assert.match(TOOL_SCHEMA_REVISION,/coach-runtime-dynamic-observe-v2\+agent-efficiency-audit-v1\+coach-realtime-001$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");

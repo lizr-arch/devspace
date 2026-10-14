@@ -55,6 +55,8 @@ export interface RunnerInput {
   expectedFingerprint?: string;
   sandbox: "workspace-write" | "read-only";
   timeoutMs?: number;
+  /** Internal-only local Coach reviewer. Never offered as an MCP input. */
+  internalReview?: true;
 }
 export interface RunnerStatus {
   operationId: string;
@@ -122,6 +124,7 @@ interface RecordEntry {
   promise?: Promise<RunnerStatus>;
   process?: ProcessLike;
   evidence?: EvidencePacket;
+  reviewRecommendation?: { decision: "APPROVED"|"REWORK"|"BLOCKED"; reason: string };
   stop?: boolean;
   timedOut?: boolean;
 }
@@ -441,6 +444,12 @@ export class NativeCodexAgentRunner {
     return [...this.records.values()].filter(r=>r.input.workspaceId===workspaceId &&
       r.status.state==="RUNNING").map(r=>r.input.operationId);
   }
+  /** A structured verdict is advisory, only accessible in-process after a
+   * completed, signed independent reviewer run. Never a remote status field. */
+  getReviewRecommendation(operationId:string) {
+    const entry=this.records.get(operationId);
+    return entry?.status.state==="COMPLETED" ? entry.reviewRecommendation : undefined;
+  }
   getEvidence(operationId: string): EvidencePacket | undefined {
     assertId(operationId,"operation_id");
     const evidence=this.records.get(operationId)?.evidence;
@@ -496,6 +505,28 @@ export class NativeCodexAgentRunner {
         const type=typeof raw.type==="string" ? raw.type : "";
         if (!type) {failed=true;malformedEvents=true;return;}
         types.push(type);
+        if(input.internalReview && type==="item.completed") {
+          const item=raw.item;
+          if(item && typeof item==="object" && !Array.isArray(item)) {
+            const candidate=item as Record<string,unknown>;
+            if(candidate.type==="agent_message" && typeof candidate.text==="string" &&
+               candidate.text.length<=1600) {
+              // Require one machine-readable bounded final message. Text is
+              // NOT included in the public observer or status response.
+              try {
+                const parsed=JSON.parse(candidate.text) as Record<string,unknown>;
+                if(["APPROVED","REWORK","BLOCKED"].includes(String(parsed.decision)) &&
+                    typeof parsed.reason==="string" && parsed.reason.length>=3 &&
+                    parsed.reason.length<=350 && !/[\u0000-\u001f]/.test(parsed.reason)) {
+                  r.reviewRecommendation={
+                    decision:parsed.decision as "APPROVED"|"REWORK"|"BLOCKED",
+                    reason:parsed.reason,
+                  };
+                }
+              } catch { /* Invalid reviewer response becomes BLOCKED by policy. */ }
+            }
+          }
+        }
         r.status.lastNativeEventAt=new Date().toISOString();
         r.status.nativeEventCount=(r.status.nativeEventCount??0)+1;
         // Security-critical native JSONL projection is separately fixture-tested.

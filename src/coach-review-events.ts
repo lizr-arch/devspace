@@ -41,6 +41,11 @@ export interface ReviewReceipt {
 export class CoachReviewEventStore {
   readonly path: string;
   private readonly db: Database.Database;
+  private readonly completionListeners=new Set<(event:{workspaceId:string;operationId:string;eventId:number})=>void>();
+  onCompleted(listener:(event:{workspaceId:string;operationId:string;eventId:number})=>void):()=>void {
+    this.completionListeners.add(listener);
+    return ()=>this.completionListeners.delete(listener);
+  }
   constructor(stateDir: string) {
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     if (process.platform !== "win32") chmodSync(stateDir, 0o700);
@@ -247,7 +252,7 @@ export class CoachReviewEventStore {
     const {evidenceSha256: _digest, ...base}=data;
     const hash=createHash("sha256").update(JSON.stringify(base)).digest("hex");
     if (hash !== input.evidenceSha256) throw new Error("COACH_EVIDENCE_HASH_MISMATCH");
-    return this.db.transaction(()=>{
+    const completedEvent=this.db.transaction(()=>{
       const event=this.recordCompleted(input);
       this.db.prepare("INSERT OR IGNORE INTO coach_review_evidence " +
         "(event_id,evidence_sha256,packet_json) VALUES (?,?,?)")
@@ -258,6 +263,13 @@ export class CoachReviewEventStore {
         throw new Error("COACH_EVIDENCE_CONFLICT");
       return event;
     }).immediate();
+    // Only publish AFTER SQLite commits evidence and event atomically.
+    // A listener is advisory; it must not overturn verified runner success.
+    for(const listener of this.completionListeners) {
+      try {listener({workspaceId:input.workspaceId,operationId:input.operationId,eventId:completedEvent.event_id});}
+      catch { /* Poll fallback recovers the missed notification. */ }
+    }
+    return completedEvent;
   }
   getEvidence(workspaceId:string,operationId:string): unknown | undefined {
     if (!ID.test(workspaceId) || !ID.test(operationId)) throw new TypeError("COACH_EVENT_INVALID_INPUT");
