@@ -36,6 +36,7 @@ Status: **PARTIAL / NOT ACCEPTED**. No production deployment, push, or full reli
 - Doctor probes now retain sample ID, local timestamps/duration, HTTP status, server correlation headers, response presence, and bounded sanitized errors. Failed POST is no longer retried by a fallback GET/JSON helper.
 - `src/doctor.test.ts` completed successfully after aligning two stale current-main tool inventory assertions. Its local OAuth/MCP external-client probe includes 100 sequential session reuse calls and 20 concurrent calls.
 - A current read-only request to the configured public `/healthz` endpoint returned HTTP 200 with Boot ID `e7ddcf4b-1b53-4bda-9384-42a202908172`; the response reported stateless session counters active 0 and capacity evictions 0. This verifies public tunnel reachability only, not OAuth/MCP tool delivery.
+- `node --import tsx src/cli.ts doctor --public --json` exited 0: public health, OAuth protected-resource metadata, authorization-server metadata, dynamic client registration (201), and owner authorization page all returned success. This verifies OAuth entry readiness; it does not exchange a user token or prove MCP tool receipt.
 - **Not yet verified:** injected client abort, failed response write, tool timeout, completed operation with lost client response, public Cloudflare connector 100+20 run, external wrapper error payload availability. Because the connector is outside this repo, caller receipt cannot be proven from server success alone. Diagnostic history is process-local and bounded, not a durable journal.
 
 ## Test/build evidence
