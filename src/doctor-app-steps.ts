@@ -392,6 +392,16 @@ export async function runDevspaceInfoProbes(params: {
       numberField(assetDownloadTimeouts, "idleReadMs") === 30_000 &&
       numberField(assetDownloadTimeouts, "totalMs") === 180_000 &&
       assetIntake?.signedUrlsPersisted === false;
+    const reportedToolNames = new Set(
+      reportedTools.filter((name): name is string => typeof name === "string"),
+    );
+    // devspace_info has the complete catalog; tools/list may hide app-only tools.
+    const reportedToolsCoverClientCatalog = toolNames.every((name) =>
+      reportedToolNames.has(name),
+    );
+    const missingClientTools = toolNames.filter(
+      (name) => !reportedToolNames.has(name),
+    );
     runnerNames = runnerEntries
       .map((runner) => stringField(asRecord(runner), "name"))
       .filter((name): name is string => Boolean(name));
@@ -411,7 +421,7 @@ export async function runDevspaceInfoProbes(params: {
     devspaceInfoCheck =
       devspaceInfo.ok &&
       schemaFingerprint &&
-      reportedTools.length === toolNames.length &&
+      reportedToolsCoverClientCatalog &&
       runnerRegistryValid &&
       assetIntakeValid
         ? okCheck(
@@ -422,15 +432,11 @@ export async function runDevspaceInfoProbes(params: {
           ? {
               ok: false,
               status: devspaceInfo.status,
-              detail:
-                "MCP devspace_info responded, but its fingerprint, tool catalog, runner registry, or asset-intake timeout contract was incomplete.",
+              detail: `MCP devspace_info contract incomplete: fingerprint=${Boolean(schemaFingerprint)}, clientToolsCovered=${reportedToolsCoverClientCatalog} (missing: ${missingClientTools.slice(0, 8).join(",") || "none"}), runnerRegistry=${runnerRegistryValid}, assetIntake=${assetIntakeValid}.`,
             }
           : failedCheck(devspaceInfo, "MCP devspace_info did not succeed.");
 
-    if (
-      !statelessTransport &&
-      (input.sessionReuseCalls || input.sessionConcurrentCalls)
-    ) {
+    if (input.sessionReuseCalls || input.sessionConcurrentCalls) {
       const requestedCalls = input.sessionReuseCalls ?? 0;
       const concurrentCalls = input.sessionConcurrentCalls ?? 0;
       if (
@@ -458,6 +464,10 @@ export async function runDevspaceInfoProbes(params: {
         initialCreatedBySource,
         "doctor",
       );
+      const initialStatelessRequests = numberField(
+        initialSessionStats,
+        "statelessRequests",
+      );
       let successfulCalls = 0;
       let sessionChanged = false;
 
@@ -471,7 +481,7 @@ export async function runDevspaceInfoProbes(params: {
             method: "tools/call",
             params: { name: "list_workspaces", arguments: { limit: 1 } },
           },
-          sessionId,
+          statelessTransport ? undefined : sessionId,
         );
         const responseSessionId = reused.headers?.get("mcp-session-id");
         if (responseSessionId && responseSessionId !== sessionId) {
@@ -496,7 +506,7 @@ export async function runDevspaceInfoProbes(params: {
                 arguments: { limit: 1 },
               },
             },
-            sessionId,
+            statelessTransport ? undefined : sessionId,
           ),
         ),
       );
@@ -519,7 +529,7 @@ export async function runDevspaceInfoProbes(params: {
           method: "tools/call",
           params: { name: "devspace_info", arguments: {} },
         },
-        sessionId,
+        statelessTransport ? undefined : sessionId,
       );
       const finalInfoResult = asRecord(
         asRecord(parseMcpResponseJson(finalInfo.text))?.result,
@@ -534,6 +544,8 @@ export async function runDevspaceInfoProbes(params: {
         finalCreatedBySource,
         "doctor",
       );
+      const finalStatelessRequests = numberField(finalStats, "statelessRequests");
+      const finalActiveSessions = numberField(finalStats, "active");
       sessionReuseCreatedDelta =
         initialDoctorCreated === undefined ||
         finalDoctorCreated === undefined
@@ -543,18 +555,30 @@ export async function runDevspaceInfoProbes(params: {
         initialCreated === undefined || finalCreated === undefined
           ? undefined
           : finalCreated - initialCreated;
+      const statelessRequestDelta =
+        initialStatelessRequests === undefined ||
+        finalStatelessRequests === undefined
+          ? undefined
+          : finalStatelessRequests - initialStatelessRequests;
+      const transportLoadCheck = statelessTransport
+        ? sessionChanged === false &&
+          sessionReuseTotalCreatedDelta === 0 &&
+          (statelessRequestDelta ?? 0) >= requestedCalls + concurrentCalls + 1 &&
+          finalActiveSessions === 0
+        : sessionChanged === false && sessionReuseCreatedDelta === 0;
       sessionReuseCheck =
         successfulCalls === requestedCalls + concurrentCalls &&
-        sessionChanged === false &&
-        sessionReuseCreatedDelta === 0
+        transportLoadCheck
           ? okCheck(
               devspaceInfo.status,
-              `One MCP session handled ${requestedCalls} sequential and ${concurrentCalls} concurrent tool calls without creating another session.`,
+              statelessTransport
+                ? `Stateless MCP handled ${requestedCalls} sequential and ${concurrentCalls} concurrent tool calls without retaining a session.`
+                : `One MCP session handled ${requestedCalls} sequential and ${concurrentCalls} concurrent tool calls without creating another session.`,
             )
           : {
               ok: false,
               status: devspaceInfo.status,
-              detail: `Session reuse probe completed ${successfulCalls}/${requestedCalls + concurrentCalls} calls; sessionChanged=${String(sessionChanged)}; doctorCreatedDelta=${String(sessionReuseCreatedDelta)}; totalCreatedDelta=${String(sessionReuseTotalCreatedDelta)}.`,
+              detail: `${statelessTransport ? "Stateless load" : "Session reuse"} probe completed ${successfulCalls}/${requestedCalls + concurrentCalls} calls; sessionChanged=${String(sessionChanged)}; doctorCreatedDelta=${String(sessionReuseCreatedDelta)}; totalCreatedDelta=${String(sessionReuseTotalCreatedDelta)}; statelessRequestDelta=${String(statelessRequestDelta)}; finalActiveSessions=${String(finalActiveSessions)}.`,
             };
     }
 

@@ -243,6 +243,7 @@ export function exposedToolNames(
     "codex_agent_quarantine_status",
     "codex_agent_evidence",
     "codex_agent_source_diff",
+    "get_agent_efficiency_audit",
   ];
   if (!config.readOnly) {
     tools.splice(3, 0, "publish_artifact");

@@ -17,5 +17,5 @@ const ro=exposedToolNames(readOnly,toolNamesFor(readOnly));
 assert.ok(ro.includes("codex_agent_observe"));
 assert.ok(!ro.includes("codex_agent_update_config"));
 assert.ok(!ro.includes("codex_agent_start"));
-assert.match(TOOL_SCHEMA_REVISION,/coach-runtime-dynamic-observe-v2$/);
+assert.match(TOOL_SCHEMA_REVISION,/coach-runtime-dynamic-observe-v2\+agent-efficiency-audit-v1$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");

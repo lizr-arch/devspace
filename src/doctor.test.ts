@@ -27,7 +27,7 @@ assert.equal(
   TOOL_SCHEMA_REVISION,
   // Pinned deliberately: any change to the exposed tool surface must be an
   // explicit, reviewable bump of TOOL_SCHEMA_REVISION.
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-14+coach-runtime-dynamic-observe-v2",
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-14+coach-runtime-dynamic-observe-v2+agent-efficiency-audit-v1",
 );
 
 try {
@@ -39,6 +39,7 @@ try {
   await testLiveChatGptProbe();
   await testPublicChatGptProbe();
   await testPublicExternalClientProbe();
+  await testPublicExternalClientProbe("stateless");
   await testPublicExternalClientProbeReadOnly();
   await testProjectMemoryHttpMcpFlow();
   await testPublicProbeExplainsInvalidHost();
@@ -328,7 +329,9 @@ async function testPublicChatGptProbe(): Promise<void> {
   }
 }
 
-async function testPublicExternalClientProbe(): Promise<void> {
+async function testPublicExternalClientProbe(
+  transportMode: "stateful" | "stateless" = "stateful",
+): Promise<void> {
   const configDir = mkdtempSync(join(tempRoot, "config-external-client-"));
   const stateDir = mkdtempSync(join(tempRoot, "state-external-client-"));
   const worktreeRoot = mkdtempSync(join(tempRoot, "worktree-external-client-"));
@@ -370,7 +373,7 @@ async function testPublicExternalClientProbe(): Promise<void> {
     DEVSPACE_LOG_LEVEL: "silent",
     DEVSPACE_LOG_REQUESTS: "0",
     DEVSPACE_LOG_TOOL_CALLS: "0",
-    DEVSPACE_MCP_TRANSPORT_MODE: "stateful",
+    DEVSPACE_MCP_TRANSPORT_MODE: transportMode,
     HOST: "127.0.0.1",
     PORT: String(port),
   });
@@ -409,13 +412,14 @@ async function testPublicExternalClientProbe(): Promise<void> {
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
     // Locked against the independently reviewed B1/B2/B3 + Sidecar surface.
-    assert.equal(probe.toolNames?.length, 75);
+    assert.equal(probe.toolNames?.length, 78);
     for (const approved of [
       "codex_agent_start", "codex_agent_status", "codex_agent_stop",
       "codex_agent_evidence", "codex_agent_source_diff",
       "codex_agent_start_rework", "codex_agent_verify_test",
       "codex_agent_submit_review", "codex_agent_quarantine_status",
       "codex_agent_clear_quarantine",
+      "get_agent_efficiency_audit",
     ]) assert.equal(probe.toolNames?.includes(approved),true,approved);
     assert.deepEqual(probe.appOnlyToolNames, ["report_workspace_app_error"]);
     assert.equal(probe.workspaceAppTelemetryTool.ok, true);
@@ -648,10 +652,12 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "wait_task",
       "poll_task",
       "coach_sidecar_status",
+      "codex_agent_observe",
       "codex_agent_status",
       "codex_agent_quarantine_status",
       "codex_agent_source_diff",
       "codex_agent_evidence",
+      "get_agent_efficiency_audit",
     ]);
     assert.equal(probe.toolNames.includes("codex_agent_start"), false);
     assert.equal(probe.toolNames.includes("codex_agent_clear_quarantine"), false);
