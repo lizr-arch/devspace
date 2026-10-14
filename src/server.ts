@@ -98,6 +98,8 @@ import { GameSessionManager } from "./game-sessions.js";
 import { ExternalInspectorManager } from "./inspectors.js";
 import { ManagedCoachSidecar } from "./managed-coach-sidecar.js";
 import { AgentObserverStore } from "./agent-observer.js";
+import { CoachRealtimeEngine } from "./coach-realtime.js";
+import { registerCoachRealtimeTools } from "./server/tools-coach-realtime.js";
 import { CoachReviewEventStore } from "./coach-review-events.js";
 import { NativeCodexAgentRunner } from "./codex-agent-runner.js";
 import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
@@ -187,6 +189,7 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   registerSidecarTools(server, ctx);
   registerCodexAgentTools(server, ctx);
   registerCodexReviewTools(server, ctx);
+  registerCoachRealtimeTools(server, ctx);
   registerAgentAuditTools(server, ctx);
 
   return server;
@@ -385,6 +388,9 @@ function createServerWithOwnedState(
     },
   );
 
+  const coachRealtime=new CoachRealtimeEngine(config.stateDir,{
+    events:coachReviewEvents,tasks,runner:getNativeCodexRunner,workspaces,
+  });
   const toolNames = toolNamesFor(config);
   const widgetMeta = (
     toolName: string,
@@ -423,6 +429,7 @@ function createServerWithOwnedState(
     godotImport,
     managedCoachSidecar,
     coachReviewEvents,
+    coachRealtime,
     agentObserver,
     getNativeCodexRunner,
     toolNames,
@@ -463,6 +470,7 @@ function createServerWithOwnedState(
       // shutdown rather than on individual MCP session expiry.
       workspaceStore.close?.();
       closePending = Promise.allSettled([
+        coachRealtime.close(),
         managedCoachSidecar.close(),
         nativeCodexRunner?.close(),
       ]).then(() => {
