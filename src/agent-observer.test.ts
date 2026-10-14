@@ -43,6 +43,8 @@ test("observer global cursor gap, restart detection, and multi-worktree isolatio
  assert.equal(tail.events.length,2);
  assert.equal(s.read("B",0).events.length,1);
  assert.equal(s.read("A",0).events.length,2);
+ assert.equal(s.read("A",1000).reset,true,"stale MCP cursor must reset after DevSpace boot");
+ assert.deepEqual(s.read("A",1000).events.map(e=>e.phase),s.read("A",0).events.map(e=>e.phase));
  assert.equal(s.readGlobal(1000).reset,true);
  assert.equal(s.readGlobal(1000).events.length,2);
 });

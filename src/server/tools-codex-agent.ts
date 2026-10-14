@@ -90,7 +90,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
       limit:z.number().int().min(1).max(100).default(50),
     },
     outputSchema:resultOutputSchema({events:z.unknown(),nextCursor:z.number(),gap:z.number(),
-      status:z.unknown().optional(),error:optionalError}),
+      reset:z.boolean(),status:z.unknown().optional(),error:optionalError}),
     _meta:{},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
   },async({workspaceId,operationId,cursor,limit})=>{
     workspaces.getWorkspace(workspaceId);
@@ -99,14 +99,31 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
     const events=operationId ? snapshot.events.filter(e=>e.operationId===operationId):snapshot.events;
     let status:unknown;
     if(operationId){
-      try {status=getNativeCodexRunner().status(operationId,workspaceId);}
-      catch(error) {
+      try {
+        const raw=getNativeCodexRunner().status(operationId,workspaceId);
+        // An agent's token usage and opaque failure reason can contain
+        // untrusted provider fields. Do not expose full RunnerStatus here.
+        // The Web GPT live view intentionally has a narrow safe allowlist.
+        const {state,startedAt,finishedAt,elapsedMs,lastNativeEventAt,
+          nativeEventCount,timeSinceNativeEventMs,progressState,
+          activeSelection,nextSelection,configRevision}=raw;
+        status={state,startedAt,...(finishedAt?{finishedAt}:{}),
+          ...(elapsedMs!==undefined?{elapsedMs}:{}),
+          ...(lastNativeEventAt?{lastNativeEventAt}:{}),
+          ...(nativeEventCount!==undefined?{nativeEventCount}:{}),
+          ...(timeSinceNativeEventMs!==undefined?{timeSinceNativeEventMs}:{}),
+          ...(progressState?{progressState}:{}),
+          ...(activeSelection?{activeSelection}:{}),
+          ...(nextSelection?{nextSelection}:{}),
+          ...(configRevision!==undefined?{configRevision}:{})};
+      } catch(error) {
         if(!(error instanceof Error && error.message==="CODEX_OPERATION_NOT_FOUND"))throw error;
       }
     }
     const result="Observed "+events.length+" redacted events; continue from cursor "+snapshot.nextCursor;
     return {content:[textBlock(result)],structuredContent:{result,
-      events,nextCursor:snapshot.nextCursor,gap:snapshot.gap,...(status?{status}:{})}};
+      events,nextCursor:snapshot.nextCursor,gap:snapshot.gap,reset:snapshot.reset,
+      ...(status?{status}:{})}};
   });
 
   registerAppTool(server,"codex_agent_status",{

@@ -63,11 +63,16 @@ export class AgentObserverStore {
     this.global.push(e);while(this.global.length>this.maxEvents) this.global.shift();return e;
   }
   read(workspaceId:string,cursor=0,limit=100){
-    if(!ID.test(workspaceId)||!Number.isSafeInteger(cursor)||cursor<0)return {events:[],nextCursor:cursor,gap:0};
-    const list=this.byWorkspace.get(workspaceId)??[], oldest=list[0]?.cursor??this.cursor+1;
-    const gap=list.length>0&&cursor<oldest?oldest-cursor-1:0;
-    const events=list.filter(e=>e.cursor>cursor).slice(0,Math.min(100,Math.max(1,limit)));
-    return {events,nextCursor:events.at(-1)?.cursor??cursor,gap};
+    if(!ID.test(workspaceId)||!Number.isSafeInteger(cursor)||cursor<0||
+       !Number.isSafeInteger(limit)||limit<1)
+      return {events:[],nextCursor:0,gap:0,reset:false};
+    // The observer is in memory. A new DevSpace boot restarts its sequence.
+    // A Web GPT client resuming with its previous boot cursor must resync.
+    const reset=cursor>this.cursor,requested=reset?0:cursor;
+    const list=this.byWorkspace.get(workspaceId)??[],oldest=list[0]?.cursor??this.cursor+1;
+    const gap=list.length>0&&requested<oldest?oldest-requested-1:0;
+    const events=list.filter(e=>e.cursor>requested).slice(0,Math.min(100,limit));
+    return {events,nextCursor:events.at(-1)?.cursor??requested,gap,reset};
   }
   readGlobal(cursor=0,limit=100){
     if (!Number.isSafeInteger(cursor)||cursor<0||!Number.isSafeInteger(limit)||limit<1)
