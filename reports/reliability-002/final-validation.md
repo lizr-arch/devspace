@@ -35,6 +35,7 @@ Status: **PARTIAL / NOT ACCEPTED**. No production deployment, push, or full reli
 - Added a bounded in-memory MCP diagnostic ring (512 records) and `/monitor/api` summary with request/trace IDs, method, RPC ID, tool, operation ID, a stable one-way workspace reference, stages, coarse error class, status, and p50/p95/p99 processing time. The summary labels success as server-observed and explicitly marks Connector receipt `not_observable`. Response headers return request/trace IDs; raw MCP body/error text is excluded from wire logs.
 - Doctor probes now retain sample ID, local timestamps/duration, HTTP status, server correlation headers, response presence, and bounded sanitized errors. Failed POST is no longer retried by a fallback GET/JSON helper.
 - `src/doctor.test.ts` completed successfully after aligning two stale current-main tool inventory assertions. Its local OAuth/MCP external-client probe includes 100 sequential session reuse calls and 20 concurrent calls.
+- A current read-only request to the configured public `/healthz` endpoint returned HTTP 200 with Boot ID `e7ddcf4b-1b53-4bda-9384-42a202908172`; the response reported stateless session counters active 0 and capacity evictions 0. This verifies public tunnel reachability only, not OAuth/MCP tool delivery.
 - **Not yet verified:** injected client abort, failed response write, tool timeout, completed operation with lost client response, public Cloudflare connector 100+20 run, external wrapper error payload availability. Because the connector is outside this repo, caller receipt cannot be proven from server success alone. Diagnostic history is process-local and bounded, not a durable journal.
 
 ## Test/build evidence
@@ -61,7 +62,7 @@ Real Codex/API/Worker evidence (full JSON in `reports/reliability-002/real-codex
 
 The repeat run recorded its own API/Worker PIDs, Boot IDs, operation IDs, cursors, Evidence hashes and result hashes in `reports/reliability-002/real-codex-api-restart-latest.json`; identifiers from this separate run are not mixed with the earlier run above.
 
-No Cloudflare public test, deployment, push, production build from the deploy checkout, or 10–15 minute soak has been performed.
+No authenticated Cloudflare MCP tool run, deployment, push, production build from the deploy checkout, or 10–15 minute soak has been performed. Only the read-only public `/healthz` probe above was made.
 
 ## Gate status
 
