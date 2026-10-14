@@ -349,40 +349,13 @@ export function setupExpressRoutes(params: {
   // Wire diagnosis + Gemini Spark compatibility for /mcp POST requests.
   // GET (SSE stream) and DELETE pass through untouched.
   //
-  // Gemini compat (2026-09-08, root-caused from wire logs): Gemini Spark's
-  // connector completes DCR/OAuth/initialize but after receiving the full
-  // tools/list catalog (59 tools / 129KB, every tool carrying $schema,
-  // additionalProperties, outputSchema and Apps-UI _meta) it treats the server
-  // as having "no usable tools", DELETEs the session and retries until it
-  // gives up with "We had trouble connecting to this server". Google's own
-  // docs warn above ~50 tools per connector and list $schema/additionalProperties
-  // as schema features its pipeline must sanitize. ChatGPT tolerates the raw
-  // catalog, so we filter ONLY for the Gemini connector signature observed on
-  // the wire (clientInfo.name="mcp", version="0.1.0") and leave every other
-  // client's tools/list byte-identical.
+  // Gemini compat trial: expose the full current tools/list catalog to Gemini
+  // after removing schema and Apps UI fields that its function declaration
+  // pipeline has struggled with. Google does not publish a numeric MCP tool
+  // limit, so confirm acceptance with a real Spark session. Only the observed
+  // Gemini signature is rewritten; other clients remain byte-identical.
   const GEMINI_CLIENT_MATCH = (name: string, version: string): boolean =>
     name === "mcp" && version === "0.1.0";
-
-  const GEMINI_TOOL_ALLOWLIST = new Set([
-    "devspace_info",
-    "list_workspaces",
-    "open_workspace",
-    "resume_workspace",
-    "read",
-    "write",
-    "edit",
-    "grep",
-    "glob",
-    "ls",
-    "git_status",
-    "git_diff",
-    "project_task",
-    "list_task_sessions",
-    "wait_task",
-    "poll_task",
-    "stop_task",
-    "approve_task_manifest",
-  ]);
 
   const geminiSessions = new Map<string, true>();
 
@@ -436,9 +409,9 @@ export function setupExpressRoutes(params: {
       const result = (parsed as { result?: { tools?: unknown } })?.result;
       if (!result || !Array.isArray(result.tools)) return line;
       const before = result.tools.length;
-      result.tools = (result.tools as Record<string, unknown>[])
-        .filter((tool) => GEMINI_TOOL_ALLOWLIST.has(String(tool.name)))
-        .map(stripToolForGemini);
+      result.tools = (result.tools as Record<string, unknown>[]).map(
+        stripToolForGemini,
+      );
       changed = true;
       logEvent(config.logging, "info", "gemini_tools_filtered", {
         requestId,
