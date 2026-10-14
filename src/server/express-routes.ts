@@ -413,7 +413,7 @@ export function setupExpressRoutes(params: {
         stripToolForGemini,
       );
       changed = true;
-      logEvent(config.logging, "info", "gemini_tools_filtered", {
+      logEvent(config.logging, "info", "gemini_tools_rewritten", {
         requestId,
         toolsBefore: before,
         toolsAfter: (result.tools as unknown[]).length,
