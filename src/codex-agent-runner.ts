@@ -263,8 +263,11 @@ export function captureCodexSourceDiff(root: string): string {
   try { gitRoot=runGit("rev-parse","--show-toplevel").trim(); }
   catch { /* A directory outside Git is supported by a small content snapshot. */ }
   let result="";
-  if(gitRoot!==undefined && gitRoot!==workspace)
-    throw new Error("CODEX_EVIDENCE_WORKSPACE_NOT_GIT_ROOT");
+  // A scoped workspace can live below an ancestor Git repository without
+  // being its Git root. Fingerprinting already treats it as a bounded
+  // non-Git snapshot; evidence must use the SAME confined semantics.
+  // Never run ancestor Git status/diff: those could include other owners' files.
+  if(gitRoot!==workspace)gitRoot=undefined;
   if(gitRoot){
     const changes=runGit("status","--porcelain=v1","-z","--untracked-files=all")
       .split("\0").filter(Boolean);
@@ -291,21 +294,42 @@ export function captureCodexSourceDiff(root: string): string {
       .split("\0").filter(Boolean);
     for(const path of untracked)result+="\n--- /dev/null\n+++ b/"+path+"\n"+safeText(path);
   }else{
+    // The 32 MiB/2000-file scoped snapshot is preserved. Small text
+    // workspaces have readable source. Larger maps / binaries get an ENTIRE
+    // path+size+SHA manifest, never a truncated partial source diff.
+    // The independent reviewer can read the files and verify their hashes.
     const skip=new Set([".git",".devspace","node_modules","dist",".next",".venv","venv"]);
-    let count=0;
+    const inventory:Array<{path:string;bytes:number;sha256:string}>=[];
+    let count=0,bytes=0, readable="", hashOnly=false;
     const walk=(dir:string,prefix="")=>{
       for(const name of readdirSync(dir).sort()){
         if(skip.has(name))continue;
         const path=prefix?prefix+"/"+name:name;
-        const st=lstatSync(join(dir,name));
-        if(st.isDirectory()){walk(join(dir,name),path);continue;}
-        if(++count>MAX_SNAPSHOT_FILES)throw new Error("CODEX_EVIDENCE_TOO_MANY_FILES");
-        result+="\n--- /dev/null\n+++ b/"+path+"\n"+safeText(path);
-        if(Buffer.byteLength(result,"utf8")>MAX_EVIDENCE_BYTES)
+        if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+        const abs=join(dir,name),st=lstatSync(abs);
+        if(st.isDirectory()){walk(abs,path);continue;}
+        if(!st.isFile())throw new Error("CODEX_EVIDENCE_UNSAFE_FILE");
+        count++; bytes+=st.size;
+        if(count>MAX_SNAPSHOT_FILES)throw new Error("CODEX_EVIDENCE_TOO_MANY_FILES");
+        if(st.size>MAX_SNAPSHOT_BYTES||bytes>MAX_SNAPSHOT_BYTES)
           throw new Error("CODEX_EVIDENCE_TOO_LARGE");
+        const content=readFileSync(abs);
+        inventory.push({path,bytes:content.length,sha256:createHash("sha256").update(content).digest("hex")});
+        if(!hashOnly&&!content.includes(0)){
+          const next=readable+"\n--- /dev/null\n+++ b/"+path+"\n"+content.toString("utf8");
+          // Keep enough space for the rest of the signed evidence packet.
+          if(Buffer.byteLength(next,"utf8")<=16*1024)readable=next;
+          else hashOnly=true;
+        }else hashOnly=true;
       }
     };
     walk(workspace);
+    if(hashOnly){
+      result="CODEX_SCOPED_NON_GIT_SHA256_MANIFEST_V1\n"+
+        JSON.stringify({files:inventory,fullInventory:true,totalBytes:bytes});
+      if(Buffer.byteLength(result,"utf8")>MAX_EVIDENCE_BYTES)
+        throw new Error("CODEX_EVIDENCE_TOO_LARGE");
+    }else result=readable;
   }
   if(Buffer.byteLength(result,"utf8")>MAX_EVIDENCE_BYTES)
     throw new Error("CODEX_EVIDENCE_TOO_LARGE");

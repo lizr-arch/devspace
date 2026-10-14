@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoachReviewEventStore } from "./coach-review-events.js";
 import { JobResourceLocks } from "./job-resource-locks.js";
-import { NativeCodexAgentRunner, captureCodexFingerprint, type RunnerInput } from "./codex-agent-runner.js";
+import { NativeCodexAgentRunner, captureCodexFingerprint, captureCodexSourceDiff, type RunnerInput } from "./codex-agent-runner.js";
 import { AgentObserverStore } from "./agent-observer.js";
 
 const NODE = "/Users/liz/.local/bin/node";
@@ -92,6 +92,49 @@ async function gates(){
   const gh2=await captureCodexFingerprint(gitScratch);
   assert.notEqual(gh1.sha,gh2.sha,"unborn Git repo edit did not change digest");
 
+  // Real geoterrain regression: a nested, intentionally non-repository
+  // workspace can sit beneath an ancestor Git repo. The snapshot/evidence
+  // must be confined to the scoped child; never include the ancestor's files.
+  const ancestor=mkdtempSync(join(root,"ancestor-git-"));
+  execFileSync("/usr/bin/git",["init","-q",ancestor],{stdio:"ignore"});
+  writeFileSync(join(ancestor,"parent-owner-private.txt"),"PARENT_OWNER_SENTINEL");
+  const child=join(ancestor,"scoped-batch");
+  mkdirSync(child);
+  writeFileSync(join(child,"rivergraph.py"),"print('SCOPED_SOURCE_OK')\\n");
+  const scopedBefore=await captureCodexFingerprint(child);
+  assert.match(scopedBefore.gitSummary??"",/non-git snapshot/);
+  const scopedSource=captureCodexSourceDiff(child);
+  assert.ok(scopedSource.includes("rivergraph.py"));
+  assert.match(scopedSource,/SCOPED_SOURCE_OK/);
+  assert.doesNotMatch(scopedSource,/PARENT_OWNER_SENTINEL|parent-owner-private/);
+  const scopedActual=create(undefined,child);
+  const scopedRun=await scopedActual.runner.run(makeInput(
+    "nested-nongit-parent-git",child,"success"));
+  assert.equal(scopedRun.state,"COMPLETED",JSON.stringify(scopedRun));
+  assert.ok(scopedActual.runner.getEvidence("nested-nongit-parent-git"));
+  assert.equal(scopedRun.exitCode,0);
+  assert.match(scopedRun.evidenceSha256??"",/^[0-9a-f]{64}$/);
+  writeFileSync(join(child,".env"),"SHOULD_NOT_LEAK");
+  assert.throws(()=>captureCodexSourceDiff(child),/CODEX_EVIDENCE_SENSITIVE_PATH/);
+  rmSync(join(child,".env"));
+  // Real geojson is larger than a safe plaintext evidence packet. Every
+  // file is still represented by full per-path SHA, with no silent dropping.
+  writeFileSync(join(child,"large-rivergraph.geojson"),"x".repeat(140_000));
+  writeFileSync(join(child,"water-tile.bin"),Buffer.from([0,1,2,255]));
+  const hashed=captureCodexSourceDiff(child);
+  assert.match(hashed,/CODEX_SCOPED_NON_GIT_SHA256_MANIFEST_V1/);
+  const manifest=JSON.parse(hashed.slice(hashed.indexOf("\n")+1));
+  assert.equal(manifest.fullInventory,true);
+  assert.equal(manifest.files.length,3);
+  assert.ok(manifest.files.some((f:{path:string;bytes:number;sha256:string})=>
+    f.path==="large-rivergraph.geojson" && f.bytes===140_000 &&
+    /^[a-f0-9]{64}$/.test(f.sha256)));
+  const mapRun=create(undefined,child);
+  const verifiedMap=await mapRun.runner.run(makeInput(
+    "nested-bulk-map-evidence",child,"success"));
+  assert.equal(verifiedMap.state,"COMPLETED",JSON.stringify(verifiedMap));
+  assert.match(mapRun.runner.getEvidence("nested-bulk-map-evidence")?.sourceDiff??"",
+    /CODEX_SCOPED_NON_GIT_SHA256_MANIFEST_V1/);
   const a=create();
   const input=makeInput("successful-edit",a.space,"edit");
   const first=await a.runner.run(input);
