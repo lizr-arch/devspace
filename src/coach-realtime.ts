@@ -278,7 +278,8 @@ export class CoachRealtimeEngine {
       this.transition(this.get(planId)!,"BLOCKED","maximum_rework_cycles_reached");return;
     }
     const newStage=decision==="APPROVED"?p.stageIndex+1:p.stageIndex;
-    const newCount=decision==="APPROVED"?0:p.reworkCount+1;
+    // maxReworks is a plan-wide cost/safety ceiling, never reset at a stage boundary.
+    const newCount=decision==="APPROVED"?p.reworkCount:p.reworkCount+1;
     const nextOp=this.nextOperationId(p,newStage,newCount);
     const next=p.spec.stages[newStage];
     const config=this.d.events.getRunConfig(p.workspaceId,p.currentOperationId);
