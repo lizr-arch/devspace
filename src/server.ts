@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { join } from "node:path";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
@@ -102,6 +103,8 @@ import { CoachRealtimeEngine } from "./coach-realtime.js";
 import { registerCoachRealtimeTools } from "./server/tools-coach-realtime.js";
 import { CoachReviewEventStore } from "./coach-review-events.js";
 import { NativeCodexAgentRunner } from "./codex-agent-runner.js";
+import type { CodexAgentControl } from "./codex-agent-control.js";
+import { CodexWorkerClient, CodexWorkerCoachClient, defaultCodexWorkerKey } from "./codex-worker-ipc.js";
 import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
 import { registerCodexAgentTools } from "./server/tools-codex-agent.js";
 import { registerCodexReviewTools } from "./server/tools-codex-review.js";
@@ -334,19 +337,26 @@ function createServerWithOwnedState(
   const coachReviewEvents = new CoachReviewEventStore(config.stateDir);
   // On a controlled fresh server start, quarantine unknown old runs. No
   // process auto-replay, signal, PID-based kill or invented success status.
-  coachReviewEvents.reconcileInterruptedRuns();
-  const agentObserver = new AgentObserverStore();
-  const managedCoachSidecar = new ManagedCoachSidecar(undefined, coachReviewEvents.path, agentObserver);
+  const codexWorkerSocket=process.env.DEVSPACE_CODEX_WORKER_SOCKET;
+  // In Worker mode, the independent supervisor owns recovery. API boot must
+  // never rewrite RUNNING task rows based on its own process lifetime.
+  if(!codexWorkerSocket)coachReviewEvents.reconcileInterruptedRuns();
+  const agentObserver = new AgentObserverStore(2048,32,join(config.stateDir,"native-agent-observer.sqlite"));
+  const managedCoachSidecar = codexWorkerSocket
+    ? new CodexWorkerCoachClient(codexWorkerSocket,defaultCodexWorkerKey(config.stateDir),coachReviewEvents)
+    : new ManagedCoachSidecar(undefined, coachReviewEvents.path, agentObserver);
   // Lazy: unsupported hosts may still start DevSpace; Codex is only resolved
   // after an explicitly authorized Agent tool invocation.
-  let nativeCodexRunner: NativeCodexAgentRunner | undefined;
-  const getNativeCodexRunner = () => nativeCodexRunner ??= new NativeCodexAgentRunner({
-    events: coachReviewEvents,
-    observer: agentObserver,
-    auditStore: coachReviewEvents,
-    nodePath: "/Users/liz/.local/bin/node",
-    codexPath: "/Users/liz/.local/bin/codex",
-  });
+  let nativeCodexRunner: CodexAgentControl | undefined;
+  const getNativeCodexRunner = () => nativeCodexRunner ??= codexWorkerSocket
+    ? new CodexWorkerClient(codexWorkerSocket,defaultCodexWorkerKey(config.stateDir),coachReviewEvents)
+    : new NativeCodexAgentRunner({
+      events: coachReviewEvents,
+      observer: agentObserver,
+      auditStore: coachReviewEvents,
+      nodePath: "/Users/liz/.local/bin/node",
+      codexPath: "/Users/liz/.local/bin/codex",
+    });
 
   /**
    * The workspace registry needs to see every kind of live work, because
@@ -474,6 +484,7 @@ function createServerWithOwnedState(
         managedCoachSidecar.close(),
         nativeCodexRunner?.close(),
       ]).then(() => {
+        agentObserver.close();
         coachReviewEvents.close();
       });
       return closePending;

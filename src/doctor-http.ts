@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { ServerConfig } from "./config.js";
 import {
   type ChatGptWebInfo,
@@ -432,6 +432,7 @@ export async function fetchJson(
   url: string,
   init?: RequestInit,
 ): Promise<JsonFetchResult> {
+  const probeSampleId=randomUUID(),started=Date.now(),startedAt=new Date(started).toISOString();
   try {
     const response = await fetch(url, init);
     const text = await response.text();
@@ -448,9 +449,13 @@ export async function fetchJson(
       status: response.status,
       text,
       json,
+      probeSampleId,startedAt,endedAt:new Date().toISOString(),durationMs:Date.now()-started,
+      requestId:response.headers.get("x-devspace-request-id")??undefined,
+      traceId:response.headers.get("x-devspace-trace-id")??undefined,
+      mcpResponsePresent:json!==undefined,
       ...(response.ok
         ? {}
-        : { error: `HTTP ${response.status}${text ? `: ${text}` : ""}` }),
+        : { error: sanitizeProbeError(`HTTP ${response.status}${text ? `: ${text}` : ""}`),errorClass:response.status===401?"AUTH_FAILURE":response.status>=500?"HTTP_RESPONSE_ERROR":"MCP_PROTOCOL_ERROR" }),
     };
   } catch (error) {
     const cause =
@@ -469,20 +474,30 @@ export async function fetchJson(
           : undefined;
     return {
       ok: false,
-      error:
+      probeSampleId,startedAt,endedAt:new Date().toISOString(),durationMs:Date.now()-started,
+      errorClass:"NETWORK_OR_TUNNEL_ERROR",
+      mcpResponsePresent:false,
+      error:sanitizeProbeError(
         error instanceof Error
           ? causeText
             ? `${error.message} (${causeText})`
             : error.message
-          : String(error),
+          : String(error)),
     };
   }
+}
+
+function sanitizeProbeError(value:string):string {
+  return value.replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi,"Bearer [redacted]")
+    .replace(/(access_token|refresh_token|client_secret|authorization)=?[^\s&]*/gi,"$1=[redacted]")
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g,"[redacted-token]").slice(0,512);
 }
 
 export async function fetchText(
   url: string,
   init?: RequestInit,
 ): Promise<JsonFetchResult & { headers?: Headers }> {
+  const probeSampleId=randomUUID(),started=Date.now(),startedAt=new Date(started).toISOString();
   try {
     const response = await fetch(url, init);
     const text = await response.text();
@@ -500,13 +515,23 @@ export async function fetchText(
       text,
       json,
       headers: response.headers,
+      probeSampleId,startedAt,endedAt:new Date().toISOString(),durationMs:Date.now()-started,
+      requestId:response.headers.get("x-devspace-request-id")??undefined,
+      traceId:response.headers.get("x-devspace-trace-id")??undefined,
+      mcpResponsePresent:json!==undefined,
       ...(response.ok
         ? {}
-        : { error: `HTTP ${response.status}${text ? `: ${text}` : ""}` }),
+        : { error: sanitizeProbeError(`HTTP ${response.status}${text ? `: ${text}` : ""}`),errorClass:response.status===401?"AUTH_FAILURE":response.status>=500?"HTTP_RESPONSE_ERROR":"MCP_PROTOCOL_ERROR" }),
     };
   } catch (error) {
+    const cause=error instanceof Error&&"cause" in error?(error as Error&{cause?:unknown}).cause:undefined;
+    const causeCode=cause&&typeof cause==="object"?String((cause as {code?:unknown}).code??""):"";
     return {
-      ...(await fetchJson(url, init)),
+      ok:false,probeSampleId,startedAt,endedAt:new Date().toISOString(),durationMs:Date.now()-started,
+      errorClass:/TIMEOUT|timed out|abort/i.test(error instanceof Error?error.message:"")?"TOOL_TIMEOUT":
+        causeCode?"NETWORK_OR_TUNNEL_ERROR":"UNKNOWN",
+      mcpResponsePresent:false,
+      error:sanitizeProbeError(error instanceof Error?`${error.message}${causeCode?` (${causeCode})`:""}`:String(error)),
     };
   }
 }
@@ -527,17 +552,20 @@ export async function postMcpJsonRpc(
   body: Record<string, unknown>,
   sessionId?: string,
 ): Promise<JsonFetchResult & { headers?: Headers }> {
+  const traceId=randomUUID();
   const headers = new Headers();
   headers.set("Authorization", `Bearer ${accessToken}`);
   headers.set("Accept", "application/json, text/event-stream");
   headers.set("Content-Type", "application/json");
+  headers.set("X-DevSpace-Trace-Id",traceId);
   if (sessionId) headers.set("mcp-session-id", sessionId);
 
-  return fetchText(url, {
+  const response=await fetchText(url, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
   });
+  return {...response,traceId:response.traceId??traceId};
 }
 
 export function parseMcpResponseJson(text: string | undefined): unknown {

@@ -3,6 +3,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { resolve } from "node:path";
 import * as prompts from "@clack/prompts";
 import { loadConfig } from "./config.js";
+import { startCodexWorkerService } from "./codex-worker-ipc.js";
 import {
   deriveChatGptWebInfo,
   probePublicExternalClientFlow,
@@ -54,6 +55,7 @@ type Command =
   | "schema-probe"
   | "collab"
   | "worker"
+  | "codex-worker"
   | "handoff"
   | "delegate"
   | "run"
@@ -92,6 +94,12 @@ async function main(argv: string[]): Promise<void> {
     case "worker":
       await runWorkerCommand(args);
       return;
+    case "codex-worker": {
+      const config=loadConfig();
+      const service=await startCodexWorkerService(config);
+      console.log(`Codex Worker ${service.workerId} generation ${service.generation} listening on a private local socket.`);
+      return;
+    }
     case "handoff":
       await runHandoffCommand(args);
       return;
@@ -136,6 +144,7 @@ function normalizeCommand(command: string | undefined): Command {
   if (
     command === "collab" ||
     command === "worker" ||
+    command === "codex-worker" ||
     command === "handoff" ||
     command === "delegate" ||
     command === "run" ||

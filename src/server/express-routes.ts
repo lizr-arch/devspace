@@ -48,6 +48,7 @@ import {
   webGptTestBuildDirectoryUrl,
 } from "./server-workspace-app.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { mcpDiagnosticsSnapshot, recordMcpDiagnostic, requestTraceId, withMcpRequest } from "../mcp-diagnostics.js";
 
 export function setupExpressRoutes(params: {
   app: express.Express;
@@ -79,9 +80,15 @@ export function setupExpressRoutes(params: {
 
   app.use((req, res, next) => {
     const requestId = randomUUID();
+    const inboundTraceId=req.header("x-devspace-trace-id");
+    const traceId=inboundTraceId&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(inboundTraceId)
+      ?inboundTraceId:requestTraceId();
     const startedAt = performance.now();
     const finishMonitoring = requestMonitor.begin(requestPath(req));
     res.locals.requestId = requestId;
+    res.locals.traceId = traceId;
+    res.setHeader("X-DevSpace-Request-Id", requestId);
+    res.setHeader("X-DevSpace-Trace-Id", traceId);
 
     let completed = false;
     const completeRequest = () => {
@@ -116,8 +123,20 @@ export function setupExpressRoutes(params: {
         ...requestLogFields(req, config),
       });
     };
-    res.once("finish", completeRequest);
-    res.once("close", completeRequest);
+    res.once("finish", () => {
+      if (requestPath(req) === "/mcp") {
+        const errorClass = res.statusCode === 401 ? "AUTH_FAILURE"
+          : [400,404,405].includes(res.statusCode) ? "MCP_PROTOCOL_ERROR"
+          : res.statusCode >= 500 ? "HTTP_RESPONSE_ERROR" : undefined;
+        withMcpRequest({requestId,traceId},()=>recordMcpDiagnostic("response_written", { statusCode: res.statusCode, ...(errorClass ? {errorClass} : {}) }));
+      }
+      completeRequest();
+    });
+    res.once("close", () => {
+      if (!res.writableFinished) withMcpRequest({requestId,traceId},()=>recordMcpDiagnostic("client_abort", { statusCode: res.statusCode, errorClass: "CLIENT_ABORT" }));
+      completeRequest();
+    });
+    res.once("error", () => withMcpRequest({requestId,traceId},()=>recordMcpDiagnostic("http_response_error", { statusCode: res.statusCode, errorClass: "HTTP_RESPONSE_ERROR" })));
 
     next();
   });
@@ -179,6 +198,7 @@ export function setupExpressRoutes(params: {
         persisted: runtime.monitorEvents.isPersistent(),
         retention: 200,
       },
+      mcpDiagnostics: mcpDiagnosticsSnapshot(100),
       load: calculateLoadAssessment({
         requests,
         resources,
@@ -429,10 +449,13 @@ export function setupExpressRoutes(params: {
       return;
     }
     const requestId = res.locals.requestId as string | undefined;
+    const traceId = res.locals.traceId as string | undefined;
     const rpcMethod =
       req.body && typeof req.body === "object" && !Array.isArray(req.body)
         ? (req.body as { method?: unknown }).method
         : undefined;
+    const rpcId = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as { id?: unknown }).id : undefined;
     if (geminiSessions.size > 256) geminiSessions.clear();
 
     // Is this request part of a known Gemini session?
@@ -441,7 +464,7 @@ export function setupExpressRoutes(params: {
       requestSessionId !== undefined &&
       geminiSessions.get(requestSessionId) === true;
 
-    const chunks: Buffer[] = [];
+    let responseBytes = 0;
     const origWrite = res.write.bind(res);
     const origEnd = res.end.bind(res);
 
@@ -481,15 +504,15 @@ export function setupExpressRoutes(params: {
         text = Buffer.from(chunk).toString("utf8");
       if (text === undefined) return chunk;
       if (!geminiCompat || rpcMethod !== "tools/list") {
-        chunks.push(Buffer.from(text));
+        responseBytes += Buffer.byteLength(text);
         return chunk;
       }
       const transformed = transformToolsListChunk(text, requestId);
       if (transformed === null) {
-        chunks.push(Buffer.from(text));
+        responseBytes += Buffer.byteLength(text);
         return chunk;
       }
-      chunks.push(Buffer.from(transformed));
+      responseBytes += Buffer.byteLength(transformed);
       return Buffer.from(transformed);
     };
 
@@ -526,23 +549,27 @@ export function setupExpressRoutes(params: {
         }
       }
 
-      const body = Buffer.concat(chunks).toString("utf8");
       logEvent(config.logging, "info", "mcp_wire", {
         httpMethod: req.method,
         rpcMethod: typeof rpcMethod === "string" ? rpcMethod : undefined,
+        traceId,
         sessionIdPrefix: sessionIdPrefix(requestSessionId),
         status: res.statusCode,
         geminiCompat,
         contentType: String(res.getHeader("content-type") ?? ""),
-        resBody: body.slice(0, 600),
-        resLen: body.length,
+        resLen: responseBytes,
       });
       return (origEnd as (...args: never[]) => typeof res)(
         chunk as never,
         ...(rest as never[]),
       );
     }) as typeof res.end;
-    next();
+    withMcpRequest({
+      requestId: requestId ?? "unknown",
+      traceId: traceId ?? requestId ?? "unknown",
+      rpcMethod: typeof rpcMethod === "string" ? rpcMethod : undefined,
+      rpcId: typeof rpcId === "string" || typeof rpcId === "number" ? rpcId : undefined,
+    }, () => { recordMcpDiagnostic("request_received"); next(); });
   });
 
   app.use(
@@ -600,6 +627,7 @@ export function setupExpressRoutes(params: {
       });
     });
     if (res.headersSent) return;
+    recordMcpDiagnostic("authenticated");
 
     const authReq = req as express.Request & { auth?: { resource?: URL } };
     if (
@@ -616,9 +644,12 @@ export function setupExpressRoutes(params: {
         reason: "invalid_oauth_resource",
         ...requestLogFields(req, config),
       });
+      recordMcpDiagnostic("parsed", { statusCode: 401, errorClass: "AUTH_FAILURE" });
       sendJsonRpcError(res, 401, -32001, "Unauthorized");
       return;
     }
+
+    recordMcpDiagnostic("parsed");
 
     logEvent(config.logging, "debug", "mcp_request", {
       requestId,
@@ -658,7 +689,7 @@ export function setupExpressRoutes(params: {
         void statelessServer.close().catch((error) => {
           logEvent(config.logging, "warn", "mcp_stateless_close_error", {
             requestId,
-            error: error instanceof Error ? error.message : String(error),
+            errorClass: "MCP_PROTOCOL_ERROR",
           });
           runtime.monitorEvents.record({
             source: "mcp",
@@ -675,10 +706,11 @@ export function setupExpressRoutes(params: {
         await statelessServer.connect(statelessTransport);
         await statelessTransport.handleRequest(req, res, req.body);
       } catch (error) {
+        recordMcpDiagnostic("parsed", { statusCode: 500, errorClass: "MCP_PROTOCOL_ERROR" });
         logEvent(config.logging, "error", "mcp_request_error", {
           requestId,
           transportMode: "stateless",
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "MCP_PROTOCOL_ERROR",
         });
         runtime.monitorEvents.record({
           source: "mcp",
@@ -754,9 +786,10 @@ export function setupExpressRoutes(params: {
 
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
+      recordMcpDiagnostic("parsed", { statusCode: 500, errorClass: "MCP_PROTOCOL_ERROR" });
       logEvent(config.logging, "error", "mcp_request_error", {
         requestId,
-        error: error instanceof Error ? error.message : String(error),
+        errorClass: "MCP_PROTOCOL_ERROR",
       });
       runtime.monitorEvents.record({
         source: "mcp",
@@ -776,7 +809,7 @@ export function setupExpressRoutes(params: {
         } catch (error) {
           logEvent(config.logging, "warn", "mcp_transport_close_error", {
             requestId,
-            error: error instanceof Error ? error.message : String(error),
+            errorClass: "MCP_PROTOCOL_ERROR",
           });
           runtime.monitorEvents.record({
             source: "mcp",

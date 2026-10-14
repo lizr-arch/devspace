@@ -58,7 +58,7 @@ export function registerCodexReviewTools(server: McpServer, ctx: ServerContext):
       throw new Error("COACH_REWORK_CONFIG_NOT_FOUND");
     const selected={model:model??parentConfig!.next.model,
       reasoningEffort:reasoningEffort??parentConfig!.next.reasoningEffort};
-    const status=runner.start({workspaceId,workspaceRoot:workspace.root,operationId,
+    const status=await runner.start({workspaceId,workspaceRoot:workspace.root,operationId,
       parentOperationId,expectedFingerprint:packet.finalFingerprint,prompt,
       ...selected,sandbox,sessionId:packet.threadId,...(timeoutMs?{timeoutMs}:{})});
     const result="Started explicit Codex rework operation "+operationId+" on parent thread.";

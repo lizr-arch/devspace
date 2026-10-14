@@ -2,7 +2,7 @@
 
 Task ID: `DEVSPACE-WORKER-LIFECYCLE-001`
 
-Status: design only; not part of the connection-reliability deployment.
+Status: implementation in progress on `feat/devspace-reliability-002`; not production deployed or lifecycle-accepted.
 
 ## Problem
 
@@ -10,9 +10,13 @@ Today the Codex Guardian and Codex child process are owned by the DevSpace serve
 
 ## Proposed shape
 
-Run task supervision in a separate, user-scoped worker service. The MCP server submits a durable operation record and returns its ID; the worker claims the operation with a lease, records state and native events, and owns the child process group. Closing or upgrading the MCP listener must not signal active workers. Explicit cancellation remains an operation-level request.
+Run task supervision in a separate, user-scoped Worker service. The MCP server retains OAuth and Workspace authorization and submits bounded structured requests over a private Unix socket; the Worker owns the runner, Guardian, Codex child process group, and durable run journal. `devspace codex-worker` starts the Worker. Set `DEVSPACE_CODEX_WORKER_SOCKET` for the API to use its `CodexWorkerClient`; unset it to retain the legacy in-process adapter during controlled rollout. API close on the Worker path deliberately does not call stop or close on the independent Worker.
 
-Use the existing SQLite state and `operationId` / request-hash semantics where applicable. Persist the worker PID, process group, process start identity, lease owner, operation state, heartbeat, and bounded event cursor. On worker recovery, reconcile the process identity and durable event store before marking work `RECOVERING`, `COMPLETED`, or `FAILED`; never infer failure from an HTTP disconnect.
+Use the existing SQLite state and `(workspaceId, operationId, requestSha256)` identity. Schema v5 records Worker PID/UID/start identity and generation lease, per-run generation and heartbeat, cancellation timestamp, and event cursor. Claims, per-run heartbeats, and finalization are fenced by the active Worker generation. The UDS and random secret file are mode `0600`; state directory is mode `0700`; only configured allowed roots are accepted; malformed or unauthenticated calls fail closed. Process identity uses PID, UID, and macOS `lstart`, never PID alone. Same-ID/same-fingerprint retries return the saved state without a second spawn; changed fingerprints are rejected. No automatic replay of an uncertain side effect is allowed.
+
+Current recovery policy is intentionally conservative: if an old Worker is proven dead, all of its active Guardian identities and process groups must also be verified gone before a replacement acquires a new generation. Missing, live, PID-reused, or unreadable Guardian identity blocks takeover; no signal is sent to an uncertain PID. After verified cleanup, terminal evidence can be recovered, otherwise the run becomes `INTERRUPTED` and is never replayed. Live Guardian reattachment is not implemented, so an abnormal Worker loss quarantines rather than resumes work.
+
+The redacted Native Agent Observer now uses a bounded SQLite journal with monotonic global cursor and explicit gap/reset behavior, shared by API and Worker generations. Coach Feed is hosted inside that independent Worker process: API restart leaves the listener and existing token alive; Worker restart reloads the protected token and exact saved workspace/scope. This keeps the service boundary small, though Worker and Coach share a process failure domain.
 
 ## Required rollout protocol
 
@@ -32,4 +36,12 @@ Use the existing SQLite state and `operationId` / request-hash semantics where a
 - Failure injection covers worker restart, API restart, stale lease, client disconnect, completion-before-response, and process identity reuse.
 - Deployment tooling refuses restart if workers cannot prove durable recovery state.
 
-This remains a design and independent follow-up. No worker framework or runtime lifecycle refactor was added to this release.
+## Unfinished acceptance items
+
+- Add a user LaunchAgent plist/install and rollback path for the Worker; validate launchd boot/login behavior.
+- Add deployment `SERVING`/`DRAINING`/`RESTARTING` admission integration and keep read-only recovery calls available during drain.
+- Prove UDS auth, Worker shutdown/restart, real PID identity, API restart with a real Codex CLI task, event cursor continuity, and no duplicate side effects on an authorized macOS test host.
+- Validate Coach restart, browser reconnect, and exact-scope recovery in a real browser; the current automated browser surface timed out.
+- Run public Cloudflare 100 sequential/20 concurrent calls with injected transport failures and finish the E01–E16 recovery matrix before production deployment.
+
+Local UDS and loopback HTTP lifecycle tests now run and pass on macOS. The production Worker/Coach service is not installed; no production service was changed or restarted.

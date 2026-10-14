@@ -10,7 +10,8 @@ import { join } from "node:path";
 import {checkManifestIntegrity} from "./task-manifest.js";
 import { CoachReviewGate } from "./coach-review-gate.js";
 import type { CoachReviewEventStore } from "./coach-review-events.js";
-import type { NativeCodexAgentRunner, RunnerInput, RunnerStatus } from "./codex-agent-runner.js";
+import type { RunnerInput, RunnerStatus } from "./codex-agent-runner.js";
+import type { CodexAgentControl } from "./codex-agent-control.js";
 import { captureCodexFingerprint } from "./codex-agent-runner.js";
 import type { TaskRunner } from "./task-runner.js";
 import { validateCodexSelection, type CodexModel, type CodexEffort } from "./coach-model-policy.js";
@@ -50,7 +51,7 @@ export interface RealtimeReviewRecommendation {
 export interface RealtimeDependencies {
   events:CoachReviewEventStore;
   tasks:TaskRunner;
-  runner:()=>NativeCodexAgentRunner;
+  runner:()=>CodexAgentControl;
   workspaces:Pick<WorkspaceRegistry,"getWorkspace">;
   /** Test-only: never select a different model or fabricate an APPROVED. */
   review?: (input:{
@@ -300,7 +301,7 @@ export class CoachRealtimeEngine {
       sandbox:next.sandbox,timeoutMs:3600000,
       sessionId:String(packet.threadId),parentOperationId:p.currentOperationId,
       expectedFingerprint:String(packet.finalFingerprint)};
-    this.d.runner().start(input);
+    await this.d.runner().start(input);
     this.transition(this.get(planId)!,"ACTIVE",null);
   }
   private operationId(p:CoachRealtimePlan,kind:"review"):string {
@@ -332,7 +333,7 @@ export class CoachRealtimeEngine {
     });
     if(status.state!=="COMPLETED"||status.exitCode!==0||!status.eventId)
       throw new Error("COACH_REALTIME_REVIEWER_FAILED");
-    const verdict=this.d.runner().getReviewRecommendation(operationId);
+    const verdict=await this.d.runner().getReviewRecommendation(operationId,plan.workspaceId);
     if(!verdict)throw new Error("COACH_REALTIME_REVIEWER_INVALID_VERDICT");
     return verdict;
   }

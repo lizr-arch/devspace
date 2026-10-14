@@ -117,6 +117,8 @@ export interface NativeRunnerOptions {
   heartbeatIntervalMs?:number;
   observer?: AgentObserverStore;
   auditStore?: import("./coach-review-events.js").CoachReviewEventStore;
+  /** Present only in the independent Worker Supervisor process. */
+  workerLease?: {workerId:string;generation:number};
 }
 interface RecordEntry {
   input: RunnerInput;
@@ -364,8 +366,6 @@ export class NativeCodexAgentRunner {
     validate(input);
     const root = directory(input.workspaceRoot);
     const canonical = { ...input, workspaceRoot:root };
-    if(this.options.events.hasInterruptedRun(input.workspaceId))
-      throw new Error("CODEX_WORKSPACE_QUARANTINED_UNRESOLVED_AGENT");
     const old = this.records.get(input.operationId);
     if (old) {
       if (operationIdentity(old.input) !== operationIdentity(canonical))
@@ -376,8 +376,12 @@ export class NativeCodexAgentRunner {
     if(durable){
       if(durable.requestSha256!==operationIdentity(canonical))
         throw new Error("CODEX_OPERATION_DURABLE_IDENTITY_CONFLICT");
-      throw new Error("CODEX_OPERATION_PREVIOUSLY_RECORDED_NO_REPLAY");
+      // The durable row is the idempotent receipt after a process restart.
+      // Return its observed state; never relaunch an operation from disk.
+      return Promise.resolve(this.status(input.operationId,input.workspaceId));
     }
+    if(this.options.events.hasInterruptedRun(input.workspaceId))
+      throw new Error("CODEX_WORKSPACE_QUARANTINED_UNRESOLVED_AGENT");
     const record: RecordEntry = {
       input: canonical,
       status: { operationId: input.operationId, workspaceId:input.workspaceId,
@@ -392,7 +396,7 @@ export class NativeCodexAgentRunner {
     const running=this.run(input);
     // execute() records failure status internally; never leak an unhandled rejection.
     void running.catch(()=>{});
-    return this.status(input.operationId);
+    return this.status(input.operationId,input.workspaceId);
   }
   status(operationId: string,workspaceId?:string): RunnerStatus {
     assertId(operationId,"operation_id");
@@ -420,10 +424,14 @@ export class NativeCodexAgentRunner {
       const durable=this.options.events.getAgentRun(workspaceId,operationId);
       if(durable){
         const config=this.options.events.getRunConfig(workspaceId,operationId);
+        let evidence:{exitCode?:unknown;evidenceSha256?:unknown}|undefined;
+        if(durable.state==="COMPLETED")try{evidence=this.options.events.getEvidence(workspaceId,operationId) as typeof evidence;}catch{/* Corrupt proof remains unavailable. */}
         return {operationId,workspaceId,state:durable.state,progressState:"FINISHED",
         ...(config?{activeSelection:config.active,nextSelection:config.next,configRevision:config.revision}:{}),
         startedAt:durable.startedAt,...(durable.finishedAt?{finishedAt:durable.finishedAt}:{}),
         ...(durable.threadId?{threadId:durable.threadId}:{}),
+        ...(Number.isSafeInteger(evidence?.exitCode)?{exitCode:Number(evidence?.exitCode)}:{}),
+        ...(typeof evidence?.evidenceSha256==="string"?{evidenceSha256:evidence.evidenceSha256}:{}),
         ...(durable.eventId?{eventId:durable.eventId}:{}),
         ...(durable.reason?{reason:durable.reason}:{})};
       }
@@ -446,18 +454,20 @@ export class NativeCodexAgentRunner {
   }
   /** A structured verdict is advisory, only accessible in-process after a
    * completed, signed independent reviewer run. Never a remote status field. */
-  getReviewRecommendation(operationId:string) {
+  getReviewRecommendation(operationId:string,workspaceId?:string) {
     const entry=this.records.get(operationId);
-    return entry?.status.state==="COMPLETED" ? entry.reviewRecommendation : undefined;
+    if(entry?.status.state==="COMPLETED")return entry.reviewRecommendation;
+    return workspaceId?this.options.events.getReviewRecommendation(workspaceId,operationId):undefined;
   }
   getEvidence(operationId: string): EvidencePacket | undefined {
     assertId(operationId,"operation_id");
     const evidence=this.records.get(operationId)?.evidence;
     return evidence ? {...evidence,eventTypes:[...evidence.eventTypes]} : undefined;
   }
-  async stop(operationId: string): Promise<boolean> {
+  async stop(operationId: string,workspaceId?:string): Promise<boolean> {
     assertId(operationId,"operation_id");
     const r=this.records.get(operationId);
+    if(r&&workspaceId&&r.status.workspaceId!==workspaceId)throw new Error("CODEX_WORKSPACE_MISMATCH");
     if (!r || r.status.state!=="RUNNING") return false;
     r.stop=true;
     terminateAgent(r.process,"SIGTERM");
@@ -582,7 +592,8 @@ export class NativeCodexAgentRunner {
         requests:requestsForCommand({argv:[this.codexPath,...args],workspaceRoot:input.workspaceRoot})});
       locked=true;
       this.options.events.claimAgentRun({workspaceId:input.workspaceId,
-        operationId:input.operationId,requestSha256:operationIdentity(input)});
+        operationId:input.operationId,requestSha256:operationIdentity(input),
+        ...(this.options.workerLease?{workerId:this.options.workerLease.workerId,generation:this.options.workerLease.generation}:{})});
       journalClaimed=true;
       this.options.events.recordRunConfig(input.workspaceId,input.operationId,
         {model:input.model,reasoningEffort:input.reasoningEffort});
@@ -620,9 +631,22 @@ export class NativeCodexAgentRunner {
       child.stdin?.end(input.prompt);
       // Transport liveness, NOT a claim of model progress or successful actions.
       if(this.options.observer)heartbeatTimer=setInterval(()=>{
-        if(r.status.state==="RUNNING")
+        if(r.status.state==="RUNNING") {
+          if(this.options.workerLease) {
+            const cursor=this.options.observer?.latestCursor()??0;
+            const stillOwned=this.options.events.heartbeatAgentRun({workspaceId:input.workspaceId,
+              operationId:input.operationId,workerId:this.options.workerLease.workerId,
+              generation:this.options.workerLease.generation,eventCursor:cursor});
+            if(!stillOwned) {
+              failed=true;
+              r.stop=true;
+              terminateAgent(r.process,"SIGTERM");
+              return;
+            }
+          }
           this.options.observer?.emit({workspaceId:input.workspaceId,operationId:input.operationId,
             kind:"status",phase:"runner.heartbeat",status:"RUNNING",elapsedMs:Date.now()-started});
+        }
       },this.options.spawn?(this.options.heartbeatIntervalMs??5000):5000);
       const code=await new Promise<number>(resolve=>{
         let settled=false;
@@ -708,6 +732,8 @@ export class NativeCodexAgentRunner {
             ...(r.status.threadId?{threadId:r.status.threadId}:{}),
             ...(r.status.eventId?{eventId:r.status.eventId}:{}),
             ...(r.status.reason?{reason:r.status.reason}:{}),
+            ...(r.reviewRecommendation?{reviewRecommendation:r.reviewRecommendation}:{}),
+            ...(this.options.workerLease?{workerId:this.options.workerLease.workerId,generation:this.options.workerLease.generation}:{}),
           });
         } catch {
           r.status.state="FAILED";

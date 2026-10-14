@@ -27,6 +27,7 @@ const fixtureSource=[
 '  return setInterval(()=>{},1000);',
 ' }',
 ' if(mode==="early")return process.exit(7);',
+' if(mode.startsWith("review-")){const verdict={decision:mode==="review-rework"?"REWORK":"APPROVED",reason:"review evidence verified"};return process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify(verdict)}})+"\\n"+JSON.stringify(completed)+"\\n");}',
 ' if(mode==="bad-json")return process.stdout.write("not-json\\n");',
 ' if(mode==="missing-thread")return process.stdout.write(JSON.stringify(completed)+"\\n");',
 ' if(mode==="turn-failed"){process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"turn.failed"})+"\\n");process.exitCode=1;return;}',
@@ -273,6 +274,35 @@ async function gates(){
   assert.equal(pa.state,"COMPLETED");assert.equal(qa.state,"COMPLETED");
   assert.equal(p.events.listPending("workspace-one").pending_count,1);
   assert.equal(q.events.listPending("workspace-two").pending_count,1);
+
+  const durableRetry=create();
+  const firstResult=await durableRetry.runner.run(makeInput("same-after-restart",durableRetry.space,"success"));
+  assert.equal(firstResult.state,"COMPLETED");
+  let relaunches=0;
+  const restartedRunner=new NativeCodexAgentRunner({events:durableRetry.events,nodePath:NODE,codexPath:fixture,
+    spawn:(file,args,opts)=>{relaunches++;return nativeSpawn(file,args,opts);}});
+  runners.push(restartedRunner);
+  assert.equal(restartedRunner.start(makeInput("same-after-restart",durableRetry.space,"success")).state,"COMPLETED");
+  assert.equal(relaunches,0,"a durable duplicate must return its receipt without a second process");
+  assert.throws(()=>restartedRunner.start(makeInput("same-after-restart",durableRetry.space,"different prompt")),
+    /DURABLE_IDENTITY_CONFLICT/);
+
+  const reviewState=mkdtempSync(join(root,"review-state-"));
+  const reviewWorkspace=mkdtempSync(join(root,"review-workspace-"));
+  const reviewStore=new CoachReviewEventStore(reviewState);
+  const reviewRunner=new NativeCodexAgentRunner({events:reviewStore,nodePath:NODE,codexPath:fixture,spawn:fakeSpawn});
+  runners.push(reviewRunner);
+  const reviewResult=await reviewRunner.run(makeInput("persisted-review",reviewWorkspace,"review-approved",{internalReview:true}));
+  assert.equal(reviewResult.state,"COMPLETED");
+  assert.deepEqual(reviewRunner.getReviewRecommendation("persisted-review","workspace-one"),
+    {decision:"APPROVED",reason:"review evidence verified"});
+  await reviewRunner.close();reviewStore.close();
+  stores.splice(stores.indexOf(reviewStore),1);
+  const recoveredReviewStore=new CoachReviewEventStore(reviewState);stores.push(recoveredReviewStore);
+  const recoveredReviewRunner=new NativeCodexAgentRunner({events:recoveredReviewStore,nodePath:NODE,codexPath:fixture,spawn:fakeSpawn});
+  runners.push(recoveredReviewRunner);
+  assert.deepEqual(recoveredReviewRunner.getReviewRecommendation("persisted-review","workspace-one"),
+    {decision:"APPROVED",reason:"review evidence verified"},"Worker restart restores the bounded decision from SQLite");
 
   const invalid=create();
   for(const [name,extra] of [

@@ -35,6 +35,7 @@ import {
 } from "./server-types.js";
 
 import { formatErrorRemedy } from "../errors.js";
+import { recordMcpDiagnostic } from "../mcp-diagnostics.js";
 
 export async function rollbackImportedAsset(input: {
   workspaceRoot: string;
@@ -113,12 +114,13 @@ export const registerAppTool: typeof registerMcpAppTool = ((
       },
     },
     (async (...args: unknown[]) => {
+      const input = args[0] as { operationId?: unknown } | undefined;
+      const operationId = typeof input?.operationId === "string" ? input.operationId : undefined;
+      const first = args[0] as { workspaceId?: unknown } | undefined;
+      const workspaceId = first && typeof first.workspaceId === "string" ? first.workspaceId : undefined;
+      const workspaceRef=workspaceId?createHash("sha256").update(workspaceId).digest("hex").slice(0,16):undefined;
+      recordMcpDiagnostic("tool_started", { toolName: String(name), operationId, ...(workspaceRef?{workspaceRef}:{}) });
       try {
-        const first = args[0] as { workspaceId?: unknown } | undefined;
-        const workspaceId =
-          first && typeof first.workspaceId === "string"
-            ? first.workspaceId
-            : undefined;
         const registry = workspaceRegistryForToolCall();
         // The one explicit reviewed clearance tool must be allowed to run
         // while quarantined; it independently checks guardian and worktree.
@@ -137,8 +139,20 @@ export const registerAppTool: typeof registerMcpAppTool = ((
           workspaceId && registry && devspaceMeta.autoLease
             ? await registry.leaseForToolCall(workspaceId, invoke)
             : await invoke();
+        const isError = Boolean(result && typeof result === "object" && (result as { isError?: unknown }).isError === true);
+        recordMcpDiagnostic("tool_finished", {
+          toolName: String(name), operationId,
+          ...(workspaceRef?{workspaceRef}:{}),
+          ...(isError ? { errorClass: "TOOL_EXECUTION_ERROR" as const } : {}),
+        });
         return attachRegisteredToolName(String(name), result);
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "";
+        recordMcpDiagnostic("tool_finished", {
+          toolName: String(name), operationId,
+          ...(workspaceRef?{workspaceRef}:{}),
+          errorClass: /TIMEOUT|timed out/i.test(errorMessage) ? "TOOL_TIMEOUT" : "TOOL_EXECUTION_ERROR",
+        });
         const { message, errorPayload } = formatErrorRemedy(error);
         return {
           content: [{ type: "text" as const, text: message }],

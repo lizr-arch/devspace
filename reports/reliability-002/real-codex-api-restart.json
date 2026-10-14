@@ -1,0 +1,48 @@
+{
+  "result": "REAL_CODEX_API_AND_WORKER_FAILURE_RECOVERY_PASS",
+  "normalRestart": {
+    "operationId": "real-api-restart-9073045b-b11a-4655-b53a-a252b164f623",
+    "workerPid": 58754,
+    "apiPidBefore": 58756,
+    "apiPidAfter": 58761,
+    "bootIdBefore": "22a8be8a-c9ad-4ddf-acd5-fc251a069c63",
+    "bootIdAfter": "af964203-7559-4830-b46c-fbd682448fa8",
+    "state": "COMPLETED",
+    "evidenceSha256": "f2dc86957699a021b2b827cbea4f92f3b531be73ef378eb051750189c1d47a77",
+    "firstCursor": 2,
+    "nextCursor": 20,
+    "resultSha256": "488264f94d99d1807f97dd78348ec020259e6b67446599dc1e8e7070bb4bfeb6",
+    "exactFileWrites": 1
+  },
+  "forcedExit": {
+    "operationId": "real-api-hard-exit-9ee2177a-1010-45df-bf10-870a3f1a212f",
+    "apiPidKilled": 58761,
+    "apiPidAfterRestart": 58825,
+    "workerPid": 58754,
+    "state": "COMPLETED",
+    "evidenceSha256": "f0afb39f66c2cbdb0ada5b0c8bf57c4ffa90ad876b4578539fb94c94fe14eebf",
+    "firstCursor": 20,
+    "nextCursor": 41,
+    "resultSha256": "0461a7127fba8ec34227bf0ad061a0fa79a6a46191d4d9dfde4b9a4dd850d1d4",
+    "exactFileWrites": 1
+  },
+  "workerCrash": {
+    "operationId": "real-worker-crash-31e0463a-8bd6-46c6-b6c8-541fe94a1204",
+    "workerPidKilled": 58754,
+    "workerPidRecovered": 58915,
+    "generation": 2,
+    "state": "INTERRUPTED",
+    "reason": "unknown_outcome_no_automatic_replay",
+    "guardianRecovery": "gone",
+    "noAutomaticReplay": true,
+    "CoachRecovered": true,
+    "cursor": 41
+  },
+  "coach": {
+    "port": 57278,
+    "apiRestartSurvival": true,
+    "apiSigkillSurvival": true,
+    "forgedOriginRejected": true,
+    "missingTokenRejected": true
+  }
+}

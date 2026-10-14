@@ -45,6 +45,9 @@
     "test:save-reload": "tsx tests/test_godot_save_reload_roundtrip.ts",
     "test:coach:observer": "tsx src/agent-observer.test.ts && tsx src/agent-observer.integration.test.ts && node --test src/coach-browser-extension.test.cjs src/coach-observer-panel.test.cjs"
     ,"test:coach:audit": "tsx src/agent-efficiency-audit.test.ts && tsx src/agent-efficiency-audit.integration.test.ts && node --test src/coach-observer-panel.test.cjs src/coach-agent-audit-browser.test.cjs"
+    ,"test:mcp-diagnostics": "tsx src/mcp-diagnostics.test.ts"
+    ,"test:codex-worker": "node --import tsx src/codex-worker-lifecycle.test.ts && node --import tsx src/agent-observer.test.ts && node --import tsx src/coach-agent-os-migration.test.ts"
+    ,"test:doctor-diagnostics": "node --import tsx src/doctor-http-diagnostics.test.ts"
   },
   "keywords": [],
   "author": "",

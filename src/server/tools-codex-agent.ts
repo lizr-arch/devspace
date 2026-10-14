@@ -31,7 +31,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
     },async(input)=>{
       const workspace=workspaces.getWorkspace(input.workspaceId);
       const runner=getNativeCodexRunner();
-      const status=runner.start({
+      const status=await runner.start({
         ...input,workspaceRoot:workspace.root,
       });
       const result="Codex task "+input.operationId+" started or already known. Poll codex_agent_status; a completion event is created only after verified Codex JSON evidence.";
@@ -50,7 +50,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
       annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
     },async({workspaceId,operationId,expectedRevision,model,reasoningEffort})=>{
       workspaces.getWorkspace(workspaceId);
-      const config=getNativeCodexRunner().queueNextSelection({
+      const config=await getNativeCodexRunner().queueNextSelection({
         workspaceId,operationId,expectedRevision,
         selection:{model,reasoningEffort},
       });
@@ -69,9 +69,9 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
       const runner=getNativeCodexRunner();
       let stopped=false;
       try {
-        const s=runner.status(operationId,workspaceId);
+        const s=await runner.status(operationId,workspaceId);
         if(s.workspaceId!==workspaceId)throw new Error("CODEX_WORKSPACE_MISMATCH");
-        stopped=await runner.stop(operationId);
+      stopped=await runner.stop(operationId,workspaceId);
       } catch(error) {
         if(error instanceof Error && error.message==="CODEX_OPERATION_NOT_FOUND")stopped=false;
         else throw error;
@@ -100,7 +100,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
     let status:unknown;
     if(operationId){
       try {
-        const raw=getNativeCodexRunner().status(operationId,workspaceId);
+        const raw=await getNativeCodexRunner().status(operationId,workspaceId);
         // An agent's token usage and opaque failure reason can contain
         // untrusted provider fields. Do not expose full RunnerStatus here.
         // The Web GPT live view intentionally has a narrow safe allowlist.
@@ -136,7 +136,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
   },async({workspaceId,operationId})=>{
     workspaces.getWorkspace(workspaceId);
     const runner=getNativeCodexRunner();
-    const status=runner.status(operationId,workspaceId);
+    const status=await runner.status(operationId,workspaceId);
     if(status.workspaceId!==workspaceId)throw new Error("CODEX_WORKSPACE_MISMATCH");
     const result="Codex run "+operationId+": "+status.state;
     return {content:[textBlock(result)],structuredContent:{result,status}};

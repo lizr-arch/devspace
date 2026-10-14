@@ -411,8 +411,9 @@ async function testPublicExternalClientProbe(
     assert.equal(probe.sessionConcurrentCalls, 20);
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
-    // Locked against the independently reviewed B1/B2/B3 + Sidecar surface.
-    assert.equal(probe.toolNames?.length, 78);
+    // Locked against the independently reviewed B1/B2/B3 + Sidecar + Coach
+    // event-driven review surface present on current main.
+    assert.equal(probe.toolNames?.length, 82);
     for (const approved of [
       "codex_agent_start", "codex_agent_status", "codex_agent_stop",
       "codex_agent_evidence", "codex_agent_source_diff",
@@ -657,6 +658,7 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "codex_agent_quarantine_status",
       "codex_agent_source_diff",
       "codex_agent_evidence",
+      "coach_realtime_status",
       "get_agent_efficiency_audit",
     ]);
     assert.equal(probe.toolNames.includes("codex_agent_start"), false);

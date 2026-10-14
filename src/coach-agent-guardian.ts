@@ -90,6 +90,8 @@ function ps(pid:number):GuardianProbe|undefined {
     lstart:match[4].replace(/\s+/g," "),command:match[5]};
   return LSTART.test(result.lstart)?result:undefined;
 }
+/** Read process ownership data without signalling the PID (macOS only). */
+export function inspectProcessIdentity(pid:number):GuardianProbe|undefined { return ps(pid); }
 export function createGuardianMarker():string{
   return "devspace-guardian-"+randomBytes(18).toString("hex");
 }

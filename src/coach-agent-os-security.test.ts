@@ -85,7 +85,7 @@ try{
      {name:string}[]).map(x=>x.name));
    for(const col of ["guardian_marker","guardian_pid","guardian_pgid","guardian_uid","guardian_lstart"])
     assert.ok(cols.has(col),"migration forgot "+col);
-   assert.equal(db2.pragma("user_version",{simple:true}),4);
+   assert.equal(db2.pragma("user_version",{simple:true}),5);
   }finally{db2.close();}
   // v3 CHECK did not know CLEARED. The migration must actually allow
   // an audited terminal clearance; adding columns alone is insufficient.

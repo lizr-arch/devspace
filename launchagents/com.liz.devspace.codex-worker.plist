@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.liz.devspace.codex-worker</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/liz/.hermes/node/bin/node</string>
+		<string>dist/cli.js</string>
+		<string>codex-worker</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/liz/agy/devspace</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DEVSPACE_STATE_DIR</key>
+		<string>/Users/liz/.local/share/devspace</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>3600</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/liz/.local/state/devspace/codex-worker.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/liz/.local/state/devspace/codex-worker.error.log</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

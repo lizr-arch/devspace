@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { chmodSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import Database from "better-sqlite3";
 /** Bounded, redacted live view of native Codex execution. Never stores prompts or output. */
 export type ObserverKind = "start"|"status"|"tool"|"command"|"file-change"|"test"|"end";
 export interface ObserverEvent { cursor:number; workspaceId:string; operationId:string; kind:ObserverKind; at:string; phase?:string; status?:string; tool?:string; actionId?:string; inputHash?:string; sourceMutation?:boolean; basename?:string; count?:number; elapsedMs?:number; }
@@ -51,15 +54,37 @@ export function normalizeCodexNativeEvent(workspaceId:string,operationId:string,
 }
 export class AgentObserverStore {
   private readonly byWorkspace=new Map<string, ObserverEvent[]>(); private readonly global:ObserverEvent[]=[]; private cursor=0;
-  constructor(private readonly maxEvents=2048, private readonly maxWorkspaces=32) {}
+  private readonly db?:Database.Database;
+  constructor(private readonly maxEvents=2048, private readonly maxWorkspaces=32, databasePath?:string) {
+    if(databasePath){
+      const target=resolve(databasePath),parent=dirname(target);
+      mkdirSync(parent,{recursive:true,mode:0o700});
+      const canonicalTarget=join(realpathSync(parent),basename(target));
+      try{if(realpathSync(canonicalTarget)!==canonicalTarget||!statSync(canonicalTarget).isFile())throw new Error("COACH_OBSERVER_DATABASE_PATH_UNSAFE");}
+      catch(error){if(!(error instanceof Error&&"code" in error&&(error as NodeJS.ErrnoException).code==="ENOENT"))throw error;}
+      this.db=new Database(canonicalTarget);
+      this.db.pragma("journal_mode = WAL");this.db.pragma("busy_timeout = 10000");
+      this.db.exec("CREATE TABLE IF NOT EXISTS native_agent_observer_events(cursor INTEGER PRIMARY KEY AUTOINCREMENT,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,event_json TEXT NOT NULL); CREATE INDEX IF NOT EXISTS native_agent_observer_workspace_cursor ON native_agent_observer_events(workspace_id,cursor)");
+      chmodSync(canonicalTarget,0o600);chmodSync(realpathSync(parent),0o700);
+      this.cursor=Number((this.db.prepare("SELECT coalesce(max(cursor),0) AS cursor FROM native_agent_observer_events").get() as {cursor:number}).cursor);
+    }
+  }
   emit(input:{workspaceId:string;operationId:string;kind:ObserverKind;phase?:unknown;status?:unknown;tool?:unknown;basename?:unknown;count?:unknown;elapsedMs?:unknown}): ObserverEvent|undefined {
     if(!ID.test(input.workspaceId)||!ID.test(input.operationId)) return undefined;
     const clean=(v:unknown)=>typeof v==="string"&&SAFE.test(v)?v:undefined;
-    const e:ObserverEvent={cursor:++this.cursor,workspaceId:input.workspaceId,operationId:input.operationId,kind:input.kind,at:new Date().toISOString()};
+    const e:ObserverEvent={cursor:0,workspaceId:input.workspaceId,operationId:input.operationId,kind:input.kind,at:new Date().toISOString()};
     const phase=clean(input.phase),status=clean(input.status),tool=clean(input.tool),basename=clean(input.basename);
     if(phase)e.phase=phase;if(status)e.status=status;if(tool)e.tool=tool;if(basename)e.basename=basename;
     if(Number.isSafeInteger(input.count)&&Number(input.count)>=0)e.count=Number(input.count);
     if(Number.isSafeInteger(input.elapsedMs)&&Number(input.elapsedMs)>=0)e.elapsedMs=Number(input.elapsedMs);
+    if(this.db){
+      this.db.transaction(()=>{
+        const inserted=this.db!.prepare("INSERT INTO native_agent_observer_events(workspace_id,operation_id,event_json) VALUES (?,?,?)").run(e.workspaceId,e.operationId,"{}");
+        e.cursor=Number(inserted.lastInsertRowid);this.cursor=e.cursor;
+        this.db!.prepare("UPDATE native_agent_observer_events SET event_json=? WHERE cursor=?").run(JSON.stringify(e),e.cursor);
+        this.db!.exec("DELETE FROM native_agent_observer_events WHERE cursor <= (SELECT coalesce(max(cursor),0)-32768 FROM native_agent_observer_events)");
+      }).immediate();
+    }else e.cursor=++this.cursor;
     if(!this.byWorkspace.has(e.workspaceId)&&this.byWorkspace.size>=this.maxWorkspaces)this.byWorkspace.delete(this.byWorkspace.keys().next().value!);
     const list=this.byWorkspace.get(e.workspaceId)??[];list.push(e);while(list.length>this.maxEvents)list.shift();this.byWorkspace.set(e.workspaceId,list);
     this.global.push(e);while(this.global.length>this.maxEvents) this.global.shift();return e;
@@ -70,6 +95,16 @@ export class AgentObserverStore {
       return {events:[],nextCursor:0,gap:0,reset:false};
     // The observer is in memory. A new DevSpace boot restarts its sequence.
     // A Web GPT client resuming with its previous boot cursor must resync.
+    if(this.db){
+      const newest=Number((this.db.prepare("SELECT coalesce(max(cursor),0) AS cursor FROM native_agent_observer_events").get() as {cursor:number}).cursor);
+      const reset=cursor>newest,requested=reset?0:cursor;
+      const oldest=this.db.prepare("SELECT min(cursor) AS cursor FROM native_agent_observer_events WHERE workspace_id=?").get(workspaceId) as {cursor:number|null};
+      const first=oldest.cursor??newest+1;
+      const gap=oldest.cursor!==null&&requested<first-1?first-requested-1:0;
+      const rows=this.db.prepare("SELECT event_json FROM native_agent_observer_events WHERE workspace_id=? AND cursor>? ORDER BY cursor LIMIT ?").all(workspaceId,requested,Math.min(100,limit)) as {event_json:string}[];
+      const events=rows.map(row=>JSON.parse(row.event_json) as ObserverEvent);
+      return {events,nextCursor:events.at(-1)?.cursor??requested,gap,reset};
+    }
     const reset=cursor>this.cursor,requested=reset?0:cursor;
     const list=this.byWorkspace.get(workspaceId)??[],oldest=list[0]?.cursor??this.cursor+1;
     const gap=list.length>0&&requested<oldest?oldest-requested-1:0;
@@ -81,8 +116,22 @@ export class AgentObserverStore {
       return {events:[],nextCursor:0,gap:0,reset:false};
     // A new server generation has an independent monotonic sequence. If a
     // previously paired panel has a newer cursor, explicitly reset it.
+    if(this.db){
+      const newest=Number((this.db.prepare("SELECT coalesce(max(cursor),0) AS cursor FROM native_agent_observer_events").get() as {cursor:number}).cursor);
+      const reset=cursor>newest,requested=reset?0:cursor;
+      const oldest=Number((this.db.prepare("SELECT coalesce(min(cursor),0) AS cursor FROM native_agent_observer_events").get() as {cursor:number}).cursor);
+      const gap=oldest>0&&requested<oldest-1?oldest-requested-1:0;
+      const rows=this.db.prepare("SELECT event_json FROM native_agent_observer_events WHERE cursor>? ORDER BY cursor LIMIT ?").all(requested,Math.min(100,limit)) as {event_json:string}[];
+      const events=rows.map(row=>JSON.parse(row.event_json) as ObserverEvent);
+      return {events,nextCursor:events.at(-1)?.cursor??requested,gap,reset};
+    }
     const reset=cursor>this.cursor;
     return {...this.readList(this.global,reset?0:cursor,limit),reset};
+  }
+  close():void{this.db?.close();}
+  latestCursor():number {
+    if(!this.db)return this.cursor;
+    return Number((this.db.prepare("SELECT coalesce(max(cursor),0) AS cursor FROM native_agent_observer_events").get() as {cursor:number}).cursor);
   }
   private readList(list:ObserverEvent[],cursor:number,limit:number){
     const oldest=list[0]?.cursor??this.cursor+1;

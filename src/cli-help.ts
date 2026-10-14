@@ -14,6 +14,7 @@ export function printHelp(): void {
       "Usage:",
       "  devspace                 Run first-time setup if needed, then start the server",
       "  devspace serve           Start the server",
+      "  devspace codex-worker    Run the independent Codex Worker Supervisor",
       "  devspace init            Create or update ~/.devspace/config.json and auth.json",
       "  devspace doctor          Show config, runtime, and ChatGPT Web readiness details",
       "  devspace doctor --live   Probe local health, OAuth metadata, registration, and Owner password page",

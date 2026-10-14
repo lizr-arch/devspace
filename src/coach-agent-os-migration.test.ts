@@ -50,7 +50,7 @@ try{
  } finally{store.close();}
  const reopened=new Database(path,{readonly:true});
  try{
-  assert.equal(reopened.pragma("user_version",{simple:true}),4);
+  assert.equal(reopened.pragma("user_version",{simple:true}),5);
   const row=reopened.prepare("SELECT state,guardian_marker FROM coach_agent_runs "+
    "WHERE workspace_id='safe-ws' AND operation_id='legacy-interrupted'").get() as
    {state:string;guardian_marker:string|null};

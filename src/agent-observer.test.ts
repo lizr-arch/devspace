@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { AgentObserverStore, normalizeCodexNativeEvent } from "./agent-observer.js";
 test("observer is monotonic, bounded, and redacts unsafe fields",()=>{
  const s=new AgentObserverStore(2);s.emit({workspaceId:"w",operationId:"o",kind:"tool",tool:"safe",basename:"x.ts",phase:"RUNNING"});
@@ -47,4 +50,25 @@ test("observer global cursor gap, restart detection, and multi-worktree isolatio
  assert.deepEqual(s.read("A",1000).events.map(e=>e.phase),s.read("A",0).events.map(e=>e.phase));
  assert.equal(s.readGlobal(1000).reset,true);
  assert.equal(s.readGlobal(1000).events.length,2);
+});
+
+test("persistent observer keeps the cursor and authorized workspace feed across API generations",()=>{
+ const root=mkdtempSync(join(tmpdir(),"devspace-observer-persist-"));
+ const path=join(root,"native-agent-observer.sqlite");
+ const first=new AgentObserverStore(2,32,path);
+ first.emit({workspaceId:"persist-A",operationId:"op-1",kind:"start",status:"RUNNING"});
+ const cursor=first.read("persist-A",0).nextCursor;
+ first.close();
+ const restarted=new AgentObserverStore(2,32,path);
+ restarted.emit({workspaceId:"persist-A",operationId:"op-1",kind:"end",status:"COMPLETED"});
+ restarted.emit({workspaceId:"persist-B",operationId:"op-2",kind:"start"});
+ const resumed=restarted.read("persist-A",cursor);
+ assert.equal(resumed.reset,false);
+ assert.equal(resumed.events.length,1);
+ assert.equal(resumed.events[0]?.status,"COMPLETED");
+ assert.ok(resumed.nextCursor>cursor);
+ assert.equal(restarted.read("persist-B",0).events.length,1);
+ assert.equal(JSON.stringify(restarted.readGlobal(0)).includes("prompt"),false);
+ restarted.close();
+ rmSync(root,{recursive:true,force:true});
 });

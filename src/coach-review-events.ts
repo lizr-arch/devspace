@@ -31,7 +31,10 @@ export interface DurableAgentRun {
   workspaceId:string;operationId:string;requestSha256:string;state:AgentRunState;
   startedAt:string;finishedAt:string|null;threadId:string|null;
   eventId:number|null;reason:string|null;
+  workerId?:string|null;workerGeneration?:number|null;leaseOwner?:string|null;
+  leaseHeartbeatAt?:string|null;eventCursor?:number|null;
 }
+export interface WorkerLease { workerId:string;generation:number;pid:number;uid:number;lstart:string;heartbeatAt:string; }
 export interface ReviewReceipt {
   event_id: number;
   decision: Decision;
@@ -64,7 +67,7 @@ export class CoachReviewEventStore {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 10000");
     const current = this.db.pragma("user_version", { simple: true }) as number;
-    if (current > 4) {
+    if (current > 5) {
       this.db.close();
       throw new Error("COACH_EVENT_STORE_UNSUPPORTED_VERSION");
     }
@@ -92,6 +95,7 @@ export class CoachReviewEventStore {
         "state TEXT NOT NULL CHECK(state IN (\'RUNNING\',\'COMPLETED\',\'FAILED\',\'STOPPED\',\'INTERRUPTED\',\'CLEARED\'))," +
         "started_at TEXT NOT NULL, finished_at TEXT, thread_id TEXT, event_id INTEGER, reason TEXT," +
         "guardian_marker TEXT, guardian_pid INTEGER, guardian_pgid INTEGER, guardian_uid INTEGER, guardian_lstart TEXT," +
+        "worker_id TEXT, worker_generation INTEGER, lease_owner TEXT, lease_heartbeat_at TEXT, cancel_requested_at TEXT, event_cursor INTEGER NOT NULL DEFAULT 0,"+
         "PRIMARY KEY(workspace_id,operation_id));"
       );
       // SQLite ADD COLUMN cannot change the v3 state CHECK constraint.
@@ -103,11 +107,11 @@ export class CoachReviewEventStore {
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='coach_agent_runs'"
       ).get() as {sql:string};
       const newColumns=["guardian_marker","guardian_pid","guardian_pgid",
-        "guardian_uid","guardian_lstart"];
+        "guardian_uid","guardian_lstart","worker_id","worker_generation","lease_owner","lease_heartbeat_at","cancel_requested_at","event_cursor"];
       if(!schema.sql.includes("'CLEARED'")) {
         const columns=["workspace_id","operation_id","request_sha256","state",
           "started_at","finished_at","thread_id","event_id","reason",...newColumns];
-        const select=columns.map(name=>fields.has(name)?name:"NULL").join(",");
+        const select=columns.map(name=>fields.has(name)?name:name==="event_cursor"?"0":"NULL").join(",");
         this.db.exec(
           "ALTER TABLE coach_agent_runs RENAME TO coach_agent_runs_v3_archive;" +
           "CREATE TABLE coach_agent_runs (" +
@@ -115,6 +119,7 @@ export class CoachReviewEventStore {
           "state TEXT NOT NULL CHECK(state IN ('RUNNING','COMPLETED','FAILED','STOPPED','INTERRUPTED','CLEARED'))," +
           "started_at TEXT NOT NULL, finished_at TEXT, thread_id TEXT, event_id INTEGER, reason TEXT," +
           "guardian_marker TEXT, guardian_pid INTEGER, guardian_pgid INTEGER, guardian_uid INTEGER, guardian_lstart TEXT," +
+          "worker_id TEXT, worker_generation INTEGER, lease_owner TEXT, lease_heartbeat_at TEXT, cancel_requested_at TEXT, event_cursor INTEGER NOT NULL DEFAULT 0,"+
           "PRIMARY KEY(workspace_id,operation_id));" +
           "INSERT INTO coach_agent_runs ("+columns.join(",")+") SELECT "+
             select+" FROM coach_agent_runs_v3_archive;" +
@@ -123,9 +128,13 @@ export class CoachReviewEventStore {
       } else {
         for(const name of newColumns) {
           if(!fields.has(name))
-            this.db.exec(`ALTER TABLE coach_agent_runs ADD COLUMN ${name} ${name.includes("pid")||name==="guardian_uid"?"INTEGER":"TEXT"}`);
+            this.db.exec(`ALTER TABLE coach_agent_runs ADD COLUMN ${name} ${name.includes("pid")||name==="guardian_uid"||name==="worker_generation"||name==="event_cursor"?"INTEGER":"TEXT"}${name==="event_cursor"?" NOT NULL DEFAULT 0":""}`);
         }
       }
+      this.db.exec("CREATE TABLE IF NOT EXISTS codex_worker_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1),worker_id TEXT NOT NULL,generation INTEGER NOT NULL,pid INTEGER NOT NULL,uid INTEGER NOT NULL,lstart TEXT NOT NULL,heartbeat_at TEXT NOT NULL)");
+      this.db.exec("CREATE TABLE IF NOT EXISTS codex_worker_generation (singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation INTEGER NOT NULL)");
+      this.db.exec("CREATE TABLE IF NOT EXISTS coach_worker_review_recommendations (workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,decision TEXT NOT NULL CHECK(decision IN ('APPROVED','REWORK','BLOCKED')),reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(workspace_id,operation_id),FOREIGN KEY(workspace_id,operation_id) REFERENCES coach_agent_runs(workspace_id,operation_id))");
+      this.db.exec("CREATE TABLE IF NOT EXISTS coach_feed_config (singleton INTEGER PRIMARY KEY CHECK(singleton=1),workspace_id TEXT NOT NULL,workspace_root TEXT NOT NULL,port INTEGER NOT NULL,paired_extension_id TEXT,observe_all_native_agents INTEGER NOT NULL CHECK(observe_all_native_agents IN (0,1)),updated_at TEXT NOT NULL)");
       this.db.exec(
         "CREATE TABLE IF NOT EXISTS coach_agent_model_configs ("+
         "workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL,"+
@@ -136,7 +145,7 @@ export class CoachReviewEventStore {
       );
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_agent_quarantine_audit (audit_id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, explanation TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(workspace_id, operation_id, action)); CREATE TABLE IF NOT EXISTS agent_efficiency_audits (workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, snapshot_json TEXT NOT NULL, snapshot_sha256 TEXT, created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, operation_id));");
       const af=new Set((this.db.pragma("table_info(agent_efficiency_audits)") as {name:string}[]).map(x=>x.name)); if(!af.has("snapshot_sha256")) this.db.exec("ALTER TABLE agent_efficiency_audits ADD COLUMN snapshot_sha256 TEXT");
-      this.db.pragma("user_version = 4");
+      this.db.pragma("user_version = 5");
     }).immediate();
   }
   /** Save initial selection for exact run scope. Idempotent only for identical
@@ -375,26 +384,75 @@ export class CoachReviewEventStore {
       return this.getAgentRun(input.workspaceId,input.operationId)!;
     }).immediate();
   }
+  getWorkerLease():WorkerLease|undefined {
+    const row=this.db.prepare("SELECT worker_id AS workerId,generation,pid,uid,lstart,heartbeat_at AS heartbeatAt FROM codex_worker_lease WHERE singleton=1").get() as WorkerLease|undefined;
+    return row;
+  }
+  acquireWorkerLease(input:{workerId:string;pid:number;uid:number;lstart:string;previousOwnerProvenDead:boolean}):WorkerLease {
+    if(!ID.test(input.workerId)||!Number.isSafeInteger(input.pid)||input.pid<=1||!Number.isSafeInteger(input.uid)||input.uid<0||input.lstart.length<18||input.lstart.length>32)
+      throw new TypeError("COACH_WORKER_LEASE_INVALID");
+    return this.db.transaction(()=>{
+      const old=this.getWorkerLease();
+      if(old&&!input.previousOwnerProvenDead)throw new Error("COACH_WORKER_LEASE_OWNER_UNCERTAIN");
+      const saved=this.db.prepare("SELECT generation FROM codex_worker_generation WHERE singleton=1").get() as {generation:number}|undefined;
+      const generation=Math.max(saved?.generation??0,old?.generation??0)+1,heartbeatAt=new Date().toISOString();
+      this.db.prepare("INSERT INTO codex_worker_generation(singleton,generation) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET generation=excluded.generation").run(generation);
+      this.db.prepare("INSERT INTO codex_worker_lease(singleton,worker_id,generation,pid,uid,lstart,heartbeat_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET worker_id=excluded.worker_id,generation=excluded.generation,pid=excluded.pid,uid=excluded.uid,lstart=excluded.lstart,heartbeat_at=excluded.heartbeat_at")
+        .run(input.workerId,generation,input.pid,input.uid,input.lstart,heartbeatAt);
+      return {workerId:input.workerId,generation,pid:input.pid,uid:input.uid,lstart:input.lstart,heartbeatAt};
+    }).immediate();
+  }
+  heartbeatWorkerLease(input:{workerId:string;generation:number}):boolean {
+    const result=this.db.prepare("UPDATE codex_worker_lease SET heartbeat_at=? WHERE singleton=1 AND worker_id=? AND generation=?").run(new Date().toISOString(),input.workerId,input.generation);
+    return result.changes===1;
+  }
+  releaseWorkerLease(input:{workerId:string;generation:number}):boolean {
+    return this.db.prepare("DELETE FROM codex_worker_lease WHERE singleton=1 AND worker_id=? AND generation=?").run(input.workerId,input.generation).changes===1;
+  }
+  listRunningAgentRuns():DurableAgentRun[] {
+    return this.db.prepare("SELECT workspace_id AS workspaceId,operation_id AS operationId,request_sha256 AS requestSha256,state,started_at AS startedAt,finished_at AS finishedAt,thread_id AS threadId,event_id AS eventId,reason,worker_id AS workerId,worker_generation AS workerGeneration,lease_owner AS leaseOwner,lease_heartbeat_at AS leaseHeartbeatAt,event_cursor AS eventCursor FROM coach_agent_runs WHERE state='RUNNING' ORDER BY started_at").all() as DurableAgentRun[];
+  }
+  activeAgentOperationsForWorkspace(workspaceId:string):string[] {
+    if(!ID.test(workspaceId))throw new TypeError("COACH_AGENT_RUN_INVALID");
+    return (this.db.prepare("SELECT operation_id FROM coach_agent_runs WHERE workspace_id=? AND state='RUNNING' ORDER BY started_at")
+      .all(workspaceId) as {operation_id:string}[]).map(row=>row.operation_id);
+  }
+  markAgentRunInterrupted(input:{workspaceId:string;operationId:string;reason:string}):boolean {
+    if(!ID.test(input.workspaceId)||!ID.test(input.operationId))throw new TypeError("COACH_AGENT_RUN_INVALID");
+    return this.db.prepare("UPDATE coach_agent_runs SET state='INTERRUPTED',finished_at=?,reason=? WHERE workspace_id=? AND operation_id=? AND state='RUNNING'").run(new Date().toISOString(),input.reason.slice(0,160),input.workspaceId,input.operationId).changes===1;
+  }
+  heartbeatAgentRun(input:{workspaceId:string;operationId:string;workerId:string;generation:number;eventCursor?:number}):boolean {
+    const result=this.db.prepare("UPDATE coach_agent_runs SET lease_heartbeat_at=?,event_cursor=max(event_cursor,?) WHERE workspace_id=? AND operation_id=? AND state='RUNNING' AND worker_id=? AND worker_generation=? AND EXISTS(SELECT 1 FROM codex_worker_lease WHERE singleton=1 AND worker_id=? AND generation=?)")
+      .run(new Date().toISOString(),input.eventCursor??0,input.workspaceId,input.operationId,input.workerId,input.generation,input.workerId,input.generation);
+    return result.changes===1;
+  }
   /** Durable claim: a request ID is never automatically replayed after restart. */
-  claimAgentRun(input:{workspaceId:string;operationId:string;requestSha256:string}):DurableAgentRun {
+  claimAgentRun(input:{workspaceId:string;operationId:string;requestSha256:string;workerId?:string;generation?:number}):DurableAgentRun {
     if(!ID.test(input.workspaceId)||!ID.test(input.operationId)||!SHA.test(input.requestSha256))
       throw new TypeError("COACH_AGENT_RUN_INVALID");
     return this.db.transaction(()=>{
+      if(input.workerId!==undefined||input.generation!==undefined){
+        if(!input.workerId||!Number.isSafeInteger(input.generation))throw new TypeError("COACH_WORKER_FENCE_INVALID");
+        const lease=this.getWorkerLease();
+        if(!lease||lease.workerId!==input.workerId||lease.generation!==input.generation)throw new Error("COACH_WORKER_FENCED");
+      }
       const existing=this.getAgentRun(input.workspaceId,input.operationId);
       if(existing){
         if(existing.requestSha256!==input.requestSha256)throw new Error("COACH_AGENT_RUN_IDENTITY_CONFLICT");
         throw new Error("COACH_AGENT_RUN_ALREADY_RECORDED_NO_REPLAY");
       }
       this.db.prepare("INSERT INTO coach_agent_runs " +
-        "(workspace_id,operation_id,request_sha256,state,started_at) VALUES (?,?,?,\'RUNNING\',?)")
-        .run(input.workspaceId,input.operationId,input.requestSha256,new Date().toISOString());
+        "(workspace_id,operation_id,request_sha256,state,started_at,worker_id,worker_generation,lease_owner,lease_heartbeat_at,event_cursor) VALUES (?,?,?,\'RUNNING\',?,?,?,?,?,0)")
+        .run(input.workspaceId,input.operationId,input.requestSha256,new Date().toISOString(),input.workerId??null,input.generation??null,input.workerId??null,input.workerId?new Date().toISOString():null);
       return this.getAgentRun(input.workspaceId,input.operationId)!;
     }).immediate();
   }
-  finishAgentRun(input:{workspaceId:string;operationId:string;state:"COMPLETED"|"FAILED"|"STOPPED";threadId?:string;eventId?:number;reason?:string}):DurableAgentRun {
+  finishAgentRun(input:{workspaceId:string;operationId:string;state:"COMPLETED"|"FAILED"|"STOPPED";threadId?:string;eventId?:number;reason?:string;reviewRecommendation?:{decision:"APPROVED"|"REWORK"|"BLOCKED";reason:string};workerId?:string;generation?:number}):DurableAgentRun {
     if(!ID.test(input.workspaceId)||!ID.test(input.operationId))throw new TypeError("COACH_AGENT_RUN_INVALID");
     if(input.state==="COMPLETED" && (!Number.isSafeInteger(input.eventId)||!input.eventId))
       throw new Error("COACH_AGENT_COMPLETION_EVENT_REQUIRED");
+    if(input.reviewRecommendation&&(!["APPROVED","REWORK","BLOCKED"].includes(input.reviewRecommendation.decision)||input.reviewRecommendation.reason.length<3||input.reviewRecommendation.reason.length>350||/[\u0000-\u001f]/.test(input.reviewRecommendation.reason)||input.state!=="COMPLETED"))
+      throw new Error("COACH_REVIEW_RECOMMENDATION_INVALID");
     return this.db.transaction(()=>{
       const current=this.getAgentRun(input.workspaceId,input.operationId);
       if(!current || current.state!=="RUNNING")throw new Error("COACH_AGENT_RUN_NOT_ACTIVE");
@@ -403,18 +461,53 @@ export class CoachReviewEventStore {
           "WHERE event_id=? AND workspace_id=? AND operation_id=?").get(input.eventId,input.workspaceId,input.operationId);
         if(!completed)throw new Error("COACH_AGENT_COMPLETION_UNVERIFIED");
       }
+      if(input.workerId!==undefined||input.generation!==undefined){
+        const lease=this.getWorkerLease();
+        if(!lease||lease.workerId!==input.workerId||lease.generation!==input.generation)throw new Error("COACH_WORKER_FENCED");
+      }
       this.db.prepare("UPDATE coach_agent_runs SET state=?,finished_at=?,thread_id=?,event_id=?,reason=? " +
-        "WHERE workspace_id=? AND operation_id=? AND state=\'RUNNING\'")
+        "WHERE workspace_id=? AND operation_id=? AND state=\'RUNNING\' AND (? IS NULL OR (worker_id=? AND worker_generation=?))")
         .run(input.state,new Date().toISOString(),input.threadId??null,input.eventId??null,
-          (input.reason??"").slice(0,160),input.workspaceId,input.operationId);
+          (input.reason??"").slice(0,160),input.workspaceId,input.operationId,input.workerId??null,input.workerId??null,input.generation??null);
+      if(input.reviewRecommendation){
+        const existing=this.getReviewRecommendation(input.workspaceId,input.operationId);
+        if(existing&&(existing.decision!==input.reviewRecommendation.decision||existing.reason!==input.reviewRecommendation.reason))
+          throw new Error("COACH_REVIEW_RECOMMENDATION_CONFLICT");
+        this.db.prepare("INSERT OR IGNORE INTO coach_worker_review_recommendations(workspace_id,operation_id,decision,reason,created_at) VALUES (?,?,?,?,?)")
+          .run(input.workspaceId,input.operationId,input.reviewRecommendation.decision,input.reviewRecommendation.reason,new Date().toISOString());
+      }
       return this.getAgentRun(input.workspaceId,input.operationId)!;
     }).immediate();
+  }
+  getReviewRecommendation(workspaceId:string,operationId:string):{decision:"APPROVED"|"REWORK"|"BLOCKED";reason:string}|undefined {
+    if(!ID.test(workspaceId)||!ID.test(operationId))throw new TypeError("COACH_AGENT_RUN_INVALID");
+    const row=this.db.prepare("SELECT r.decision,r.reason FROM coach_worker_review_recommendations r JOIN coach_agent_runs a USING(workspace_id,operation_id) WHERE r.workspace_id=? AND r.operation_id=? AND a.state='COMPLETED'")
+      .get(workspaceId,operationId) as {decision:"APPROVED"|"REWORK"|"BLOCKED";reason:string}|undefined;
+    return row?{...row}:undefined;
+  }
+  saveCoachFeedConfig(input:{workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents:boolean}):void {
+    if(!ID.test(input.workspaceId)||!input.workspaceRoot||!Number.isSafeInteger(input.port)||input.port<1||input.port>65535||
+      (input.pairedExtensionId!==undefined&&!/^[a-p]{32}$/.test(input.pairedExtensionId))||
+      (input.observeAllNativeAgents&&!input.pairedExtensionId))throw new Error("COACH_FEED_CONFIG_INVALID");
+    this.db.prepare("INSERT INTO coach_feed_config(singleton,workspace_id,workspace_root,port,paired_extension_id,observe_all_native_agents,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET workspace_id=excluded.workspace_id,workspace_root=excluded.workspace_root,port=excluded.port,paired_extension_id=excluded.paired_extension_id,observe_all_native_agents=excluded.observe_all_native_agents,updated_at=excluded.updated_at")
+      .run(input.workspaceId,input.workspaceRoot,input.port,input.pairedExtensionId??null,input.observeAllNativeAgents?1:0,new Date().toISOString());
+  }
+  coachFeedConfig():{workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents:boolean}|undefined {
+    const row=this.db.prepare("SELECT workspace_id AS workspaceId,workspace_root AS workspaceRoot,port,paired_extension_id AS pairedExtensionId,observe_all_native_agents AS observeAllNativeAgents FROM coach_feed_config WHERE singleton=1")
+      .get() as {workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId:string|null;observeAllNativeAgents:number}|undefined;
+    return row?{workspaceId:row.workspaceId,workspaceRoot:row.workspaceRoot,port:row.port,
+      ...(row.pairedExtensionId?{pairedExtensionId:row.pairedExtensionId}:{}),observeAllNativeAgents:row.observeAllNativeAgents===1}:undefined;
+  }
+  clearCoachFeedConfig():void {this.db.prepare("DELETE FROM coach_feed_config WHERE singleton=1").run();}
+  coachFeedWorkspaceIdsForRoot(root:string):string[] {
+    const row=this.coachFeedConfig();return row?.workspaceRoot===root?[row.workspaceId]:[];
   }
   getAgentRun(workspaceId:string,operationId:string):DurableAgentRun|undefined {
     if(!ID.test(workspaceId)||!ID.test(operationId))throw new TypeError("COACH_AGENT_RUN_INVALID");
     return this.db.prepare("SELECT workspace_id AS workspaceId,operation_id AS operationId," +
       "request_sha256 AS requestSha256,state,started_at AS startedAt,finished_at AS finishedAt," +
       "thread_id AS threadId,event_id AS eventId,reason " +
+      ",worker_id AS workerId,worker_generation AS workerGeneration,lease_owner AS leaseOwner,lease_heartbeat_at AS leaseHeartbeatAt,event_cursor AS eventCursor " +
       "FROM coach_agent_runs WHERE workspace_id=? AND operation_id=?")
       .get(workspaceId,operationId) as DurableAgentRun|undefined;
   }

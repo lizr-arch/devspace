@@ -116,6 +116,14 @@ export interface JsonFetchResult {
   json?: unknown;
   headers?: Headers;
   error?: string;
+  probeSampleId?: string;
+  requestId?: string;
+  traceId?: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  errorClass?: "AUTH_FAILURE"|"MCP_PROTOCOL_ERROR"|"TOOL_EXECUTION_ERROR"|"TOOL_TIMEOUT"|"CLIENT_ABORT"|"HTTP_RESPONSE_ERROR"|"NETWORK_OR_TUNNEL_ERROR"|"CONNECTOR_WRAPPER_ERROR"|"UNKNOWN";
+  mcpResponsePresent?: boolean;
 }
 
 export interface TextFetchResult {

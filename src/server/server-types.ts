@@ -18,9 +18,9 @@ import type { AssetReceiptStore } from "../asset-receipts.js";
 import type { ArtifactPublisher } from "../artifact-publisher.js";
 import type { TaskRunner } from "../task-runner.js";
 import type { GodotImportRegistry } from "../godot-import.js";
-import type { ManagedCoachSidecar } from "../managed-coach-sidecar.js";
+import type { ManagedCoachSidecarControl } from "../managed-coach-sidecar.js";
 import type { CoachReviewEventStore } from "../coach-review-events.js";
-import type { NativeCodexAgentRunner } from "../codex-agent-runner.js";
+import type { CodexAgentControl } from "../codex-agent-control.js";
 import type { AgentObserverStore } from "../agent-observer.js";
 import type { CoachRealtimeEngine } from "../coach-realtime.js";
 
@@ -496,11 +496,11 @@ export interface ServerContext {
   workspaceApp: WorkspaceAppBuild | undefined;
   tasks: TaskRunner;
   godotImport: GodotImportRegistry;
-  managedCoachSidecar: ManagedCoachSidecar;
+  managedCoachSidecar: ManagedCoachSidecarControl;
   coachReviewEvents: CoachReviewEventStore;
   coachRealtime: CoachRealtimeEngine;
   agentObserver: AgentObserverStore;
-  getNativeCodexRunner: () => NativeCodexAgentRunner;
+  getNativeCodexRunner: () => CodexAgentControl;
   toolNames: ToolNames;
   widgetMeta: (
     toolName: string,

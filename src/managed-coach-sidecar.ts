@@ -11,12 +11,19 @@ const SERVICE_NAME = "coach-feed";
 const MAX_EVENTS = 50;
 const EXTENSION_ID = /^[a-p]{32}$/;
 
-type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean };
+type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string };
 type EventRow = { event_id: string | number; operation_id: string; event_type: string; created_at: string };
 type Entry = SidecarInput & { token: Buffer; server: Server; database: Database.Database; jobId: string; startedAt: string };
 
-export interface CoachSidecarStatus { workspaceId: string; serviceName: string; port: number; state: "running"; startedAt: string; pairedExtensionId?: string; }
+export interface CoachSidecarStatus { workspaceId: string; serviceName: string; port: number; state: "running"|"stopped"; startedAt?: string; pairedExtensionId?: string; reason?:string; }
 export interface CoachSidecarStartResult extends CoachSidecarStatus { token: string; }
+export interface ManagedCoachSidecarControl {
+  start(input:Omit<SidecarInput,"pairingToken">):Promise<CoachSidecarStartResult>;
+  stop(workspaceId:string):Promise<void>;
+  status(workspaceId:string):CoachSidecarStatus|undefined|Promise<CoachSidecarStatus|undefined>;
+  activeServiceIdsForRoot(root:string):string[];
+  close():Promise<void>;
+}
 
 function validPort(port: unknown): asserts port is number {
   if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError("Invalid loopback port");
@@ -64,6 +71,7 @@ export class ManagedCoachSidecar {
     validPort(input.port);
     if (!input.workspaceId || !input.workspaceRoot) throw new TypeError("workspaceId and workspaceRoot are required");
     if (input.pairedExtensionId !== undefined && !EXTENSION_ID.test(input.pairedExtensionId)) throw new TypeError("Invalid paired extension id");
+    if(input.pairingToken!==undefined&&!/^[A-Za-z0-9_-]{43}$/.test(input.pairingToken))throw new TypeError("Invalid pairing token");
     // Elevated cross-worktree observer scope must be explicitly granted at
     // sidecar startup, never implicitly inherited from the existing v0.2 token.
     if (input.observeAllNativeAgents && !input.pairedExtensionId) throw new TypeError("Admin observer requires a paired extension");
@@ -93,7 +101,7 @@ export class ManagedCoachSidecar {
       }
       database = new Database(canonicalDatabase, { readonly: true, fileMustExist: true });
       schemaCheck(database, Boolean(this.nativeEventDatabasePath));
-      const token = randomBytes(32);
+      const token = input.pairingToken?Buffer.from(input.pairingToken,"base64url"):randomBytes(32);
       const entry = await new Promise<Entry>((resolve, reject) => {
         server = createServer((req, res) => this.handle(entry, req, res));
         server.requestTimeout = 5_000;

@@ -118,7 +118,7 @@ export function registerSidecarTools(
     },
     async ({ workspaceId }) => {
       workspaces.getWorkspace(workspaceId);
-      const sidecar = managedCoachSidecar.status(workspaceId);
+      const sidecar = await managedCoachSidecar.status(workspaceId);
       const result = sidecar ? "Coach feed is running." : "Coach feed is stopped.";
       return {
         content: [textBlock(result)],
