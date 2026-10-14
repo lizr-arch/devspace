@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import {exposedToolNames,requiredCapabilityForTool,toolNamesFor} from "./server/server-helpers.js";
+import {TOOL_SCHEMA_REVISION} from "./server/server-types.js";
+import type {ServerConfig} from "./config.js";
+function config(readOnly:boolean):ServerConfig{
+ return {readOnly,minimalTools:false,toolNaming:"short",widgets:"off",
+   gitRemoteWrite:{enabled:false},godotImport:{enabled:false}} as unknown as ServerConfig;
+}
+const regular=config(false);
+const names=exposedToolNames(regular,toolNamesFor(regular));
+assert.equal(names.filter(n=>n==="codex_agent_observe").length,1);
+assert.equal(names.filter(n=>n==="codex_agent_update_config").length,1);
+assert.equal(requiredCapabilityForTool("codex_agent_update_config"),"runner.execute");
+assert.equal(requiredCapabilityForTool("codex_agent_observe"),"workspace.read");
+const readOnly=config(true);
+const ro=exposedToolNames(readOnly,toolNamesFor(readOnly));
+assert.ok(ro.includes("codex_agent_observe"));
+assert.ok(!ro.includes("codex_agent_update_config"));
+assert.ok(!ro.includes("codex_agent_start"));
+assert.match(TOOL_SCHEMA_REVISION,/coach-runtime-dynamic-observe-v2$/);
+console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");

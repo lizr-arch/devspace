@@ -27,7 +27,7 @@ assert.equal(
   TOOL_SCHEMA_REVISION,
   // Pinned deliberately: any change to the exposed tool surface must be an
   // explicit, reviewable bump of TOOL_SCHEMA_REVISION.
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-11+devspace-1.3",
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-14+coach-runtime-dynamic-observe-v2",
 );
 
 try {
