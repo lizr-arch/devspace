@@ -104,7 +104,7 @@ async function run() {
     const gemini = await listTools(url, token.access_token, "mcp");
     const regular = await listTools(url, token.access_token, "ChatGPT");
     assert.equal(gemini.length, regular.length);
-    assert.ok(gemini.length > 18, `expected expanded full catalog, got ${gemini.length}`);
+    assert.ok(gemini.length >= 73, `expected full catalog, got ${gemini.length}`);
     for (const tool of gemini) {
       const encoded = JSON.stringify(tool);
       assert.ok(!encoded.includes("$schema"), `${tool.name} retained $schema`);
