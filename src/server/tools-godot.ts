@@ -85,7 +85,7 @@ export function registerGodotImportTool(
           .max(600)
           .optional()
           .describe(
-            "How long to wait for the import to settle before returning the in-flight status. Defaults to 240. The import keeps running; follow it with wait_job or poll_job.",
+            "How long to wait for the import to settle before returning the in-flight status. Defaults to 1 second. The import keeps running; follow it with wait_job or poll_job.",
           ),
         jobId: z
           .string()

@@ -300,9 +300,8 @@ try {
     jobs: slowJobs,
     runners: slowRunners,
     registry: slowRegistry,
-    waitSeconds: 0,
   });
-  assert.equal(first.job.status, "running");
+  assert.equal(first.job.status, "running", "default wait must return promptly while the import continues");
   assert.ok(slowRegistry.activeForProject(godotProjectKey(realpathSync(projectRoot))));
 
   await assert.rejects(

@@ -406,7 +406,7 @@ export async function finishGodotImportReport(input: {
   }
   const project = projectFromRecord(recordBefore);
 
-  const effectiveWait = Math.max(0, Math.min(waitSeconds ?? 240, 600));
+  const effectiveWait = Math.max(0, Math.min(waitSeconds ?? 1, 600));
   let job = jobs.poll(jobId, 0, 1);
   if (!isTerminalJobStatus(job.status) && effectiveWait > 0) {
     // `BackgroundJobManager.wait` caps a single wait at MAX_WAIT_SECONDS (30),
