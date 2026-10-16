@@ -14,7 +14,7 @@
 ## 范围和设计决策
 
 - 代码文件：`coach-browser-extension/manifest.json`、`worker.js`、`auto-worker.js`、`chatgpt-delivery.js`、`popup.html`、`autosend-popup.js`；原侧边栏、原观察面板和手动复制保留。额外修复 `src/managed-coach-sidecar.ts`：仅将服务自身已授权的 workspaceId 附带至 `/events` 回包，不扩大可见范围。
-- 测试：`src/coach-auto-delivery.test.cjs` 和已有的 `src/coach-browser-extension.test.cjs`；入口 `npm run test:coach:autosend`。
+- 测试：`src/coach-auto-delivery.test.cjs` 和已有的 `src/coach-browser-extension.test.cjs`。原项目 `main` 已由浏览器扩展测试入口自动引入新增测试，运行 `npm run test:coach:mac` 或 `npm run test:coach:observer` 即覆盖；独立开发工作树另保留 `npm run test:coach:autosend`。
 - URL 仅允许 `https://chatgpt.com/c/{conversationId}` 或 `https://chatgpt.com/g/{gptId}/c/{conversationId}`；不在主页或不同会话发送。
 - `content script` 位于 Chrome 隔离执行环境，只接收扩展内部消息，不调用 ChatGPT 非公开网络 API，不读取聊天正文；未识别正确输入框或发送按钮就失败关闭。
 - 风险：ChatGPT DOM/前端输入组件将来改变会造成拒绝发送；不会绕过校验强行点击。30 秒事件检测是 Chrome 后台 Alarm，不是零延迟推送。
