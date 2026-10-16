@@ -106,13 +106,16 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
         // The Web GPT live view intentionally has a narrow safe allowlist.
         const {state,startedAt,finishedAt,elapsedMs,lastNativeEventAt,
           nativeEventCount,timeSinceNativeEventMs,progressState,
-          activeSelection,nextSelection,configRevision}=raw;
+          activeSelection,nextSelection,configRevision,
+          errorEventCount,lastErrorCategory}=raw;
         status={state,startedAt,...(finishedAt?{finishedAt}:{}),
           ...(elapsedMs!==undefined?{elapsedMs}:{}),
           ...(lastNativeEventAt?{lastNativeEventAt}:{}),
           ...(nativeEventCount!==undefined?{nativeEventCount}:{}),
           ...(timeSinceNativeEventMs!==undefined?{timeSinceNativeEventMs}:{}),
           ...(progressState?{progressState}:{}),
+          ...(errorEventCount!==undefined?{errorEventCount}:{}),
+          ...(lastErrorCategory?{lastErrorCategory}:{}),
           ...(activeSelection?{activeSelection}:{}),
           ...(nextSelection?{nextSelection}:{}),
           ...(configRevision!==undefined?{configRevision}:{})};

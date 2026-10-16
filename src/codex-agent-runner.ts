@@ -29,6 +29,24 @@ const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 const MAX_SNAPSHOT_FILES = 2000;
 const MAX_EVIDENCE_BYTES = 64 * 1024;
 type State = "RUNNING" | "COMPLETED" | "FAILED" | "STOPPED" | "INTERRUPTED" | "CLEARED";
+type CodexErrorCategory =
+  "authentication" | "model_unavailable" | "rate_or_quota" |
+  "provider_5xx" | "transport" | "timeout" | "unclassified";
+/** Classifies only genuine Codex error events, discarding their raw text immediately. */
+export function classifyCodexError(raw:Record<string,unknown>):CodexErrorCategory {
+  const obj=raw.error && typeof raw.error==="object" && !Array.isArray(raw.error)
+    ? raw.error as Record<string,unknown> : {};
+  const parts=[raw.message,raw.code,raw.error, obj.message, obj.code]
+    .filter((x):x is string=>typeof x==="string").map(x=>x.slice(0,1024));
+  const msg=parts.join(" ");
+  if(/\b(?:401|403)\b|unauthorized|auth(?:entication|orization) failed|invalid api key|not authenticated|token expired/i.test(msg))return "authentication";
+  if(/unknown model|model not found|unsupported model|invalid.model|model.{0,60}(?:does not exist|unavailable|not supported)/i.test(msg))return "model_unavailable";
+  if(/\b429\b|rate.limit|quota|too many requests/i.test(msg))return "rate_or_quota";
+  if(/\b(?:500|502|503|504)\b|internal server error|service unavailable|bad gateway/i.test(msg))return "provider_5xx";
+  if(/econnreset|eai_again|enotfound|certificate|\btls\b|\bssl\b|\bdns\b|stream.{0,25}(?:disconnect|closed|reset)|connection.{0,25}(?:closed|reset|refused)|failed to connect/i.test(msg))return "transport";
+  if(/timed out|timeout|deadline exceeded/i.test(msg))return "timeout";
+  return "unclassified";
+}
 type ProcessLike = Pick<ChildProcess, "pid" | "stdin" | "stdout" | "stderr" | "on" | "kill"> & { guardianFd?: ChildProcess["stdio"][3] };
 /** Terminate the dedicated process group on Unix, not only the Codex parent. */
 function terminateAgent(proc:ProcessLike | undefined, signal:NodeJS.Signals):void {
@@ -70,6 +88,9 @@ export interface RunnerStatus {
   eventId?: number;
   elapsedMs?: number;
   tokenUsage?: unknown;
+  /** Whitelisted diagnosis only; never the raw provider error text. */
+  errorEventCount?: number;
+  lastErrorCategory?: CodexErrorCategory;
   /** Native event progress is distinct from runner heartbeat. */
   lastNativeEventAt?:string;
   nativeEventCount?:number;
@@ -568,8 +589,14 @@ export class NativeCodexAgentRunner {
         // eventually producing a valid turn.completed and exit code 0.
         // Only turn.failed is terminal. An error after completion is an
         // invalid event order and must not silently pass verification.
-        if (type==="turn.failed") {failed=true;agentErrorEvent=true;}
-        if (type==="error") {agentErrorEvent=true;if(completed)failed=true;}
+        if (type==="turn.failed") {failed=true;agentErrorEvent=true;
+          r.status.lastErrorCategory=classifyCodexError(raw);}
+        if (type==="error") {
+          agentErrorEvent=true;
+          r.status.errorEventCount=(r.status.errorEventCount??0)+1;
+          r.status.lastErrorCategory=classifyCodexError(raw);
+          if(completed)failed=true;
+        }
       } catch { failed=true;malformedEvents=true; }
     };
     const append=(c:Buffer,isStdout:boolean)=>{

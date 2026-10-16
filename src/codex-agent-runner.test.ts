@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoachReviewEventStore } from "./coach-review-events.js";
 import { JobResourceLocks } from "./job-resource-locks.js";
-import { NativeCodexAgentRunner, captureCodexFingerprint, captureCodexSourceDiff, type RunnerInput } from "./codex-agent-runner.js";
+import { NativeCodexAgentRunner, captureCodexFingerprint, captureCodexSourceDiff, classifyCodexError, type RunnerInput } from "./codex-agent-runner.js";
 import { AgentObserverStore } from "./agent-observer.js";
 
 const NODE = "/Users/liz/.local/bin/node";
@@ -70,6 +70,21 @@ function makeInput(operationId:string,space:string,prompt="success",extra:Partia
     model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000,...extra};
 }
 async function gates(){
+  // Only categorical error metadata may cross the trust boundary. No message text.
+  assert.equal(classifyCodexError({type:"error",message:"HTTP 401 secret_example_key"}),
+    "authentication");
+  assert.equal(classifyCodexError({type:"error",message:"unsupported model gpt-6"}),
+    "model_unavailable");
+  assert.equal(classifyCodexError({type:"error",message:"request rejected: 429 rate limit"}),
+    "rate_or_quota");
+  assert.equal(classifyCodexError({type:"error",message:"HTTP 503"}),
+    "provider_5xx");
+  assert.equal(classifyCodexError({type:"error",message:"stream disconnected"}),
+    "transport");
+  assert.equal(classifyCodexError({type:"error",message:"deadline exceeded"}),
+    "timeout");
+  assert.equal(classifyCodexError({type:"error",message:"private text goes here"}),
+    "unclassified");
   // A real (non-Git) file-change changes the actual snapshot hash.
   const scratch=mkdtempSync(join(root,"snapshot-"));
   writeFileSync(join(scratch,"sample.txt"),"original");
@@ -170,6 +185,9 @@ async function gates(){
     "recoverable-transport-retry",retryRecovered.space,"retry-success"));
   assert.equal(recoveredStatus.state,"COMPLETED",JSON.stringify(recoveredStatus));
   assert.equal(recoveredStatus.exitCode,0);
+  assert.equal(recoveredStatus.errorEventCount,2);
+  assert.equal(recoveredStatus.lastErrorCategory,"unclassified");
+  assert.equal(JSON.stringify(recoveredStatus).includes("temporary retry"),false);
   const recoveredEvidence=retryRecovered.events.getEvidence("workspace-one","recoverable-transport-retry") as {eventTypes:string[]}|undefined;
   assert.ok(recoveredEvidence,"recovered run did not persist immutable evidence");
   assert.ok(recoveredEvidence.eventTypes.includes("error"),"retry events must remain auditable");
