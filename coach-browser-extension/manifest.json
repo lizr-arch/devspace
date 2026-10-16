@@ -1,17 +1,32 @@
 {
   "manifest_version": 3,
-  "name": "DevSpace Coach Watch (Paired Prototype)",
-  "version": "0.2.0",
-  "description": "Paired, read-only DevSpace review notifications. Never sends ChatGPT messages.",
+  "name": "DevSpace Coach Watch",
+  "version": "0.3.0",
+  "description": "Opt-in delivery of local Codex review events to one explicitly bound ChatGPT conversation.",
   "permissions": [
     "alarms",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "tabs"
   ],
   "host_permissions": [
     "http://127.0.0.1/*"
   ],
-  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'self'"},
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "chatgpt-delivery.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
   "background": {
     "service_worker": "worker.js"
   },
@@ -19,5 +34,7 @@
     "default_popup": "popup.html",
     "default_title": "DevSpace review queue"
   },
-  "side_panel": { "default_path": "panel.html" }
+  "side_panel": {
+    "default_path": "panel.html"
+  }
 }

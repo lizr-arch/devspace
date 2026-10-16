@@ -1,5 +1,5 @@
 "use strict";
-// Browser-session-only bearer pairing. No content scripts or ChatGPT automation.
+// Browser-session-only bearer pairing. ChatGPT delivery remains separately opt-in.
 const KEY = "coachPairing";
 const STATUS = "coachStatus";
 const ALARM = "coach-poll";
@@ -115,6 +115,8 @@ async function pairNow(port,token) {
   } catch {
     return {ok:false,message:"bridge_unreachable"};
   }
+  // A different Sidecar pairing never inherits permission to post into a chat.
+  await chrome.storage.session.remove("coachAutoTarget");
   await chrome.storage.session.set({[KEY]:{port,token}});
   const status=await feedCheck();
   return {ok:status.online,message:status.message};
@@ -149,8 +151,9 @@ chrome.runtime.onMessage.addListener((message,_sender,sendResponse) => {
     return true;
   }
   if(message.type === "COACH_UNPAIR") {
-    void chrome.storage.session.remove(KEY).then(feedCheck).then(() => sendResponse({ok:true}));
+    void chrome.storage.session.remove(KEY).then(() => chrome.storage.session.remove("coachAutoTarget")).then(feedCheck).then(() => sendResponse({ok:true}));
     return true;
   }
   return false;
 });
+importScripts("auto-worker.js");

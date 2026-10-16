@@ -24,6 +24,18 @@ button{padding:8px;cursor:pointer;border:1px solid #b7c2cc;border-radius:6px;bac
 <button id="refresh">刷新</button><button id="open-panel">打开 Agent 观察面板</button><button id="copy">复制审核指令</button>
 <p><strong>观察范围说明：</strong>观察面板可能显示此 DevSpace 服务启动的所有工作树中 Codex CLI 的脱敏事件、任务 ID 和执行状态。必须由本地 Sidecar 启动时显式授权 <code>all_native_worktrees</code> 范围；既有审核队列配对不会自动获得该权限。</p>
 <p id="feedback" aria-live="polite"></p>
-<p>不会自动向 ChatGPT 发送消息，也不会读取 ChatGPT 对话内容。</p>
+<hr><h2 style="font-size:14px">Web GPT Coach 自动通知（可选）</h2>
+<p>默认关闭。先打开想接收审核的具体 ChatGPT 对话，再绑定；只发送到这个标签页和这条对话，不读取聊天历史。</p>
+<p id="auto-target" style="overflow-wrap:anywhere">未绑定 ChatGPT 对话</p>
+<p id="auto-status">默认关闭</p>
+<button id="auto-bind">绑定当前 ChatGPT 对话</button>
+<button id="auto-enable">启用自动发送</button>
+<button id="auto-pause">暂停</button>
+<button id="auto-unbind">解除绑定</button>
+<button id="auto-check">现在检查一次</button>
+<p id="auto-count"></p><p id="auto-feedback" aria-live="polite"></p>
+<ul id="auto-list" style="padding-left:16px;overflow-wrap:anywhere;font-size:11px;max-height:140px;overflow:auto"></ul>
+<p>发送结果只表示网页输入框已提交，不表示 Web GPT 已审核。出现“不确定”时停止自动发送并要求人工核查。</p>
 <script src="popup.js"></script>
+<script src="autosend-popup.js"></script>
 </body></html>

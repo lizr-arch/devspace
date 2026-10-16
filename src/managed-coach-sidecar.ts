@@ -206,7 +206,9 @@ export class ManagedCoachSidecar {
       ).all(...(native ? [entry.workspaceId] : [])) as EventRow[];
       return send(res, 200, {
         pending_count: total.count,
-        events: rows.slice(0, MAX_EVENTS),
+        // A native Sidecar serves only entry.workspaceId; include that verified scope
+        // in each event so external Coach notifications can locate exact evidence.
+        events: rows.slice(0, MAX_EVENTS).map(row=>({...row,workspace_id:entry.workspaceId})),
       }, cors);
     } catch {
       return send(res, 503, { error: "event store unavailable" }, cors);

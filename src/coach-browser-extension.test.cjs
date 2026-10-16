@@ -33,7 +33,7 @@ function harness(){
     })};
     throw new Error("unexpected request");
   };
-  const context=vm.createContext({chrome:api,fetch,Date,Error,String,Array,Math,Number,Promise});
+  const context=vm.createContext({chrome:api,fetch,Date,Error,String,Array,Math,Number,Promise,importScripts(){}});
   vm.runInContext(code,context);
   const send=payload=>new Promise(resolve=>{
     const ret=listeners.message(payload,{id:api.runtime.id},resolve);
@@ -41,12 +41,13 @@ function harness(){
   });
   return {send,records,history,getBadge:()=>badge,setHealthy:v=>healthy=v,context};
 }
-test("manifest narrow extension-only and no ChatGPT access",()=>{
+test("manifest narrow localhost plus opt-in ChatGPT content script",()=>{
  assert.equal(manifest.manifest_version,3);
- assert.deepEqual(manifest.permissions,["alarms","storage","sidePanel"]);
+ assert.deepEqual(manifest.permissions,["alarms","storage","sidePanel","tabs"]);
  assert.deepEqual(manifest.host_permissions,["http://127.0.0.1/*"]);
- assert.equal(manifest.content_scripts,undefined);
- assert.doesNotMatch(code,/chatgpt.com|chrome.scripting|chrome.tabs/);
+ assert.deepEqual(manifest.content_scripts[0].matches,["https://chatgpt.com/*"]);
+ assert.equal(manifest.content_scripts[0].js[0],"chatgpt-delivery.js");
+ assert.match(code,/importScripts\("auto-worker.js"\)/);
 });
 test("no token means no fetch and explicit pairing required",async()=>{
  const h=harness();
