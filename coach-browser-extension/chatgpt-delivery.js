@@ -1,6 +1,9 @@
 "use strict";
 // Isolated-world script: neither reads the conversation nor contacts the network.
 (() => {
+  // Re-injection after a Chrome extension reload must not install duplicate listeners.
+  if (globalThis.__devspaceCoachDeliveryInstalled) return;
+  globalThis.__devspaceCoachDeliveryInstalled = true;
   const canonical=url=>{
     try {
       const u=new URL(url);
@@ -62,7 +65,11 @@
     finally{sending=false;}
   }
   chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
-    if(msg?.type!=="COACH_AUTO_DELIVER")return false;
+    if(msg?.type==="COACH_AUTO_PING") {
+      reply({ok:true,url:canonical(location.href)});
+      return false;
+    }
+    if(msg?.type!=="COACH_AUTO_DELIVER_V2")return false;
     void deliver(msg).then(reply).catch(()=>reply({ok:false,uncertain:true,reason:"投递异常"}));
     return true;
   });

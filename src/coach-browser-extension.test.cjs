@@ -45,8 +45,8 @@ function harness(){
 }
 test("manifest narrow localhost plus opt-in ChatGPT content script",()=>{
  assert.equal(manifest.manifest_version,3);
- assert.deepEqual(manifest.permissions,["alarms","storage","sidePanel","tabs"]);
- assert.deepEqual(manifest.host_permissions,["http://127.0.0.1/*"]);
+ assert.deepEqual(manifest.permissions,["alarms","storage","sidePanel","tabs","scripting"]);
+ assert.deepEqual(manifest.host_permissions,["http://127.0.0.1/*","https://chatgpt.com/*"]);
  assert.deepEqual(manifest.content_scripts[0].matches,["https://chatgpt.com/*"]);
  assert.equal(manifest.content_scripts[0].js[0],"chatgpt-delivery.js");
  assert.match(code,/importScripts\("auto-worker.js"\)/);

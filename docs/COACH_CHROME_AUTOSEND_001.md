@@ -36,6 +36,14 @@
 4. 切到其他 ChatGPT 会话、关闭标签页、写入人工草稿、在 Web GPT 回答中途模拟收到下一事件：均应拒绝发送，不能覆盖内容。
 5. 刷新/重启浏览器和 Sidecar，确认已发送的不重复；不确定状态必须人工处理。Web GPT 按 MCP 证据真正作裁决后才称完整端到端 PASS。
 
+## 2026-10-16 · Chrome 0.3.1 热修复：内容脚本不可达
+
+用户真实浏览器回报：`pending=3, sent=0, needs_attention=1`，`unknown:coach-lean-diagnose-20261012-handshake01:10` 报「内容脚本不可达」。这是扩展重新加载后原已打开的 ChatGPT 页没有新注入内容脚本的典型场景；不能把它视为已发送。
+
+修复：增加 `scripting` 权限与仅 `https://chatgpt.com/*` 的主机授权。在事件正式发送前通过 `COACH_AUTO_PING` 验证目标会话的现有内容脚本；若缺失则仅向已绑定标签页动态注入一次，重复注入不重复注册监听器。新发送类型改为 `COACH_AUTO_DELIVER_V2`，避免潜在旧版本监听器重复处理。动态注入权限失败时保留 `pending`，不产生未确认的发送。**原有 `needs_attention` 仍须由用户检查对话消息后手动确认；不得自动重试。**
+
+用户需要在 `chrome://extensions` 重新加载 DevSpace Coach Watch 0.3.1，核查新增 ChatGPT 网站权限、配对与当前对话绑定。若登录/配对已经有效则勿重复清除配对。运行 `npm run test:coach:observer` 覆盖自动注入及其他安全门禁。生产 Chrome 真实消息投递仍必须单独验证。
+
 ## 裁决
 
 `ISOLATED_IMPLEMENTATION_DONE`；`MOCK_E2E_PASS`；`REAL_CHROME_DELIVERY_NOT_RUN`；`PRODUCTION_DEPLOY_NOT_RUN`。

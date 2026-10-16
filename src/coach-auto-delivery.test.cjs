@@ -17,9 +17,10 @@ test("all delivery extension scripts are valid JavaScript",()=>{
 });
 
 function workerHarness(overrides={}) {
-  const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[];
+  const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[];
   const tab={id:42,url:URL_OK};
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
+  let contentReady=true,injectionFailure=false;
   const chrome={
     storage:{
       session:{async get(k){return {[k]:session[k]};},async set(v){Object.assign(session,v);},async remove(k){delete session[k];}},
@@ -27,10 +28,21 @@ function workerHarness(overrides={}) {
     },
     tabs:{
       async query(){return [tab];},async get(id){if(id!==42)throw Error("tab_gone");return tab;},
-      async sendMessage(id,m){messages.push({id,m});return typeof delivered==="function"?delivered(id,m):delivered;},
+      async sendMessage(id,m){
+        if(m.type==="COACH_AUTO_PING"){
+          if(!contentReady)throw Error("Receiving end does not exist");
+          return {ok:true,url:tab.url};
+        }
+        messages.push({id,m});return typeof delivered==="function"?delivered(id,m):delivered;
+      },
       onUpdated:{addListener(f){tabUpdates.push(f);}},
       onRemoved:{addListener(f){tabRemovals.push(f);}}
     },
+    scripting:{async executeScript(args){
+      injections.push(args);
+      if(injectionFailure)throw Error("host permission denied");
+      contentReady=true;
+    }},
     runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
@@ -49,8 +61,9 @@ function workerHarness(overrides={}) {
     return new Promise(resolve=>fn({type,...extra},null,resolve));
   }
   async function drain(){for(let i=0;i<5;i++)await tick();}
-  return {session,local,tab,messages,msg,drain,tabUpdates,tabRemovals,
+  return {session,local,tab,messages,injections,msg,drain,tabUpdates,tabRemovals,
     setEvents:x=>{events=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
+    setContentReady:x=>{contentReady=x;},setInjectionFailure:x=>{injectionFailure=x;},
     async poll(){await vm.runInContext("autoPump()",context);}
   };
 }
@@ -75,11 +88,35 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  await h.drain();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal(h.messages[0].id,42);
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V2");
  assert.match(h.messages[0].m.instruction,/APPROVED \/ REWORK \/ BLOCKED/);
  assert.match(h.messages[0].m.instruction,/codex-qa/);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
  await h.poll();assert.equal(h.messages.length,1);
  await h.msg("COACH_AUTO_PAUSE");await h.poll();assert.equal(h.messages.length,1);
+});
+test("reloaded extension reinjects script into already-open ChatGPT tab before sending",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setContentReady(false);
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.drain();await h.poll();
+ assert.equal(h.injections.length,1);
+ assert.equal(h.injections[0].target.tabId,42);
+ assert.deepEqual(Array.from(h.injections[0].files),["chatgpt-delivery.js"]);
+ assert.equal(h.messages.length,1);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
+});
+test("script injection permission denial never sends and keeps event pending",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setContentReady(false);h.setInjectionFailure(true);
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.drain();await h.poll();
+ assert.equal(h.injections.length,2);
+ assert.equal(h.messages.length,0);
+ const state=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(state.summary.pending,1);
+ assert.equal(state.summary.needs_attention,0);
+ assert.match(state.recent[0].reason,/权限/);
 });
 test("incomplete Sidecar event page never silently delivers a truncated queue",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
@@ -167,10 +204,20 @@ function domHarness(options={}) {
    getComputedStyle:()=>({display:"block",visibility:"visible"}),
    setTimeout:(fn)=>fn(),Promise,Error,String,Array,Number});
  vm.runInContext(content,context);
- return {editor,button,location,
+ return {editor,button,location,handlers,context,
+   ping:()=>new Promise(resolve=>handlers[0]({type:"COACH_AUTO_PING"},null,resolve)),
+   reinject:()=>vm.runInContext(content,context),
    deliver:(url=URL_OK)=>new Promise(resolve=>handlers[0](
-     {type:"COACH_AUTO_DELIVER",url,instruction:"请以 Web GPT Coach 身份独立审核测试事件"},null,resolve))};
+     {type:"COACH_AUTO_DELIVER_V2",url,instruction:"请以 Web GPT Coach 身份独立审核测试事件"},null,resolve))};
 }
+test("content-script ping is read-only and reinjection never duplicates listeners",async()=>{
+ const p=domHarness({draft:"用户草稿"});
+ const first=await p.ping();
+ assert.equal(first.ok,true);assert.equal(first.url,URL_OK);
+ assert.equal(p.editor.innerText,"用户草稿");
+ p.reinject();p.reinject();
+ assert.equal(p.handlers.length,1);
+});
 test("content script rejects unrelated tab, existing draft, busy UI and missing controls",async()=>{
  assert.equal((await domHarness({url:"https://evil.example/c/abc"}).deliver()).ok,false);
  assert.match((await domHarness({draft:"用户草稿"}).deliver()).reason,/草稿/);

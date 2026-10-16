@@ -72,6 +72,34 @@ async function autoUnbind() {
   await chrome.storage.session.remove(AUTO_SESSION);
   return {ok:true,state:await autoState()};
 }
+// Chrome declarative content scripts do not attach to tabs opened before an
+// extension reload. A read-only ping checks readiness BEFORE any submit command.
+async function autoReady(tabId,url) {
+  const ping=async()=>{
+    try {
+      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING"});
+      return ready?.ok===true && ready.url===url;
+    } catch { return false; }
+  };
+  if(await ping())return {ok:true};
+  const before=await chrome.tabs.get(tabId).catch(()=>null);
+  if(autoCanonical(before?.url)!==url)
+    return {ok:false,reason:"对话标签页已变化，未发送"};
+  try {
+    await chrome.scripting.executeScript({
+      target:{tabId,allFrames:false},
+      files:["chatgpt-delivery.js"]
+    });
+  } catch {
+    return {ok:false,reason:"内容脚本注入失败，请检查 ChatGPT 网站权限"};
+  }
+  const after=await chrome.tabs.get(tabId).catch(()=>null);
+  if(autoCanonical(after?.url)!==url)
+    return {ok:false,reason:"脚本加载期间标签页发生变化，未发送"};
+  if(!await ping())
+    return {ok:false,reason:"内容脚本加载后仍不可达，未发送"};
+  return {ok:true};
+}
 async function autoResolve(key,action) {
   const ledger=await autoLedger(),r=ledger[key];
   if(!r||r.state!=="needs_attention") return {ok:false,error:"仅可处理待人工核实记录"};
@@ -123,6 +151,15 @@ async function autoPump() {
     const candidate=events.find(e=>ledger[autoKey(e)]?.state==="pending");
     if(!candidate)return;
     const key=autoKey(candidate);
+    // Readiness/injection is safe to repeat: it never edits or submits a message.
+    // On failure retain pending rather than converting "definitely not sent"
+    // into an ambiguous needs_attention state.
+    const prepared=await autoReady(target.tabId,target.url);
+    if(!prepared.ok) {
+      ledger[key]={state:"pending",at:new Date().toISOString(),reason:prepared.reason};
+      await autoSaveLedger(ledger);
+      return;
+    }
     ledger[key]={state:"in_flight",at:new Date().toISOString(),reason:"正在发送"};
     await autoSaveLedger(ledger); // durable BEFORE any DOM action
     // User may have paused or rebound while the network query was in flight.
@@ -137,7 +174,7 @@ async function autoPump() {
     let result=null;
     try {
       result=await chrome.tabs.sendMessage(target.tabId,{
-        type:"COACH_AUTO_DELIVER",url:target.url,instruction:autoInstruction(candidate)
+        type:"COACH_AUTO_DELIVER_V2",url:target.url,instruction:autoInstruction(candidate)
       });
     }catch{result={ok:false,uncertain:true,reason:"内容脚本不可达"};}
     // Re-read durable state: user may have disabled/unbound while DOM action ran.
