@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { codexChildEnvironment } from "../../../dist/codex-proxy-environment.js";
-import { NativeCodexAgentRunner } from "../../../dist/codex-agent-runner.js";
-import { CoachReviewEventStore } from "../../../dist/coach-review-events.js";
-import { AgentObserverStore } from "../../../dist/agent-observer.js";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const distDir = process.env.DEVSPACE_CODEX_SMOKE_DIST_DIR ?? fileURLToPath(new URL("../../../dist", import.meta.url));
+const deployedModule = (name) => import(pathToFileURL(resolve(distDir, name)).href);
+const [{ codexChildEnvironment }, { NativeCodexAgentRunner }, { CoachReviewEventStore }, { AgentObserverStore }] =
+  await Promise.all(["codex-proxy-environment.js", "codex-agent-runner.js", "coach-review-events.js", "agent-observer.js"]
+    .map(deployedModule));
 
 const runTag = Date.now();
 const operationIds = [1, 2, 3].map((n) => `devspace-codex-reliability-001-${runTag}-direct-0${n}`);
