@@ -107,7 +107,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
         const {state,startedAt,finishedAt,elapsedMs,lastNativeEventAt,
           nativeEventCount,timeSinceNativeEventMs,progressState,
           activeSelection,nextSelection,configRevision,
-          errorEventCount,lastErrorCategory}=raw;
+          errorEventCount,lastErrorCategory,failureStage,executionCompleted,evidenceState,reviewState}=raw;
         status={state,startedAt,...(finishedAt?{finishedAt}:{}),
           ...(elapsedMs!==undefined?{elapsedMs}:{}),
           ...(lastNativeEventAt?{lastNativeEventAt}:{}),
@@ -116,6 +116,10 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
           ...(progressState?{progressState}:{}),
           ...(errorEventCount!==undefined?{errorEventCount}:{}),
           ...(lastErrorCategory?{lastErrorCategory}:{}),
+          ...(failureStage?{failureStage}:{}),
+          ...(executionCompleted!==undefined?{executionCompleted}:{}),
+          ...(evidenceState?{evidenceState}:{}),
+          ...(reviewState?{reviewState}:{}),
           ...(activeSelection?{activeSelection}:{}),
           ...(nextSelection?{nextSelection}:{}),
           ...(configRevision!==undefined?{configRevision}:{})};

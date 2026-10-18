@@ -250,7 +250,7 @@ export class CoachReviewEventStore {
   }
   /** Atomically persist a trusted Runner evidence packet and its completion event. */
   recordCompletedWithEvidence(input: {workspaceId:string;operationId:string;evidenceSha256:string;packetJson:string}): CoachEvent {
-    if (typeof input.packetJson !== "string" || Buffer.byteLength(input.packetJson,"utf8") > 65536)
+    if (typeof input.packetJson !== "string" || Buffer.byteLength(input.packetJson,"utf8") > 1024 * 1024)
       throw new TypeError("COACH_EVIDENCE_PACKET_INVALID");
     let data:Record<string,unknown>;
     try { data=JSON.parse(input.packetJson) as Record<string,unknown>; }

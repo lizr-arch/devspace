@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { spawn as nativeSpawn, execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -27,7 +28,7 @@ const fixtureSource=[
 '  return setInterval(()=>{},1000);',
 ' }',
 ' if(mode==="early")return process.exit(7);',
-' if(mode.startsWith("review-")){const verdict={decision:mode==="review-rework"?"REWORK":"APPROVED",reason:"review evidence verified"};return process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify(verdict)}})+"\\n"+JSON.stringify(completed)+"\\n");}',
+' if(mode.startsWith("review-")){const text=mode==="review-invalid"?"not-json":JSON.stringify({decision:mode==="review-rework"?"REWORK":mode==="review-blocked"?"BLOCKED":"APPROVED",reason:"review evidence verified"});return process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"item.completed",item:{type:"agent_message",text}})+"\\n"+JSON.stringify(completed)+"\\n");}',
 ' if(mode==="bad-json")return process.stdout.write("not-json\\n");',
 ' if(mode==="missing-thread")return process.stdout.write(JSON.stringify(completed)+"\\n");',
 ' if(mode==="turn-failed"){process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify({type:"turn.failed"})+"\\n");process.exitCode=1;return;}',
@@ -43,6 +44,12 @@ const fixtureSource=[
 ' if(mode==="large-valid"){const big={type:"item.completed",content:"X".repeat(350000)};return process.stdout.write(JSON.stringify(thread)+"\\n"+JSON.stringify(big)+"\\n"+JSON.stringify(completed)+"\\n");}',
 ' if(mode==="huge")return process.stdout.write("X".repeat(400000));',
 ' if(mode==="edit")fs.writeFileSync("edited-result.txt","changes-from-agent");',
+' if(mode==="large-file")fs.writeFileSync("large-agent-output.txt","x".repeat(140_000));',
+' if(mode==="edit-sensitive")fs.writeFileSync("credentials-placeholder.txt","changed-secret-placeholder");',
+' if(mode==="restore-sensitive")fs.writeFileSync("credential-track.txt","tracked baseline secret placeholder\\n");',
+' if(mode==="pathspec-injection")fs.writeFileSync(":(glob)**","MAGIC_PATH_ONLY");',
+' if(mode==="restore-tracked")fs.writeFileSync("tracked.txt","base\\n");',
+' if(mode==="restore-proto")fs.writeFileSync("__proto__","proto baseline\\n");',
 ' const lines=JSON.stringify(thread)+"\\n"+JSON.stringify(completed)+"\\n";',
 ' process.stdout.write(lines.slice(0,19));',
 ' setTimeout(()=>process.stdout.write(lines.slice(19)),5);',
@@ -149,12 +156,99 @@ async function gates(){
   const verifiedMap=await mapRun.runner.run(makeInput(
     "nested-bulk-map-evidence",child,"success"));
   assert.equal(verifiedMap.state,"COMPLETED",JSON.stringify(verifiedMap));
-  assert.match(mapRun.runner.getEvidence("nested-bulk-map-evidence")?.sourceDiff??"",
-    /CODEX_SCOPED_NON_GIT_SHA256_MANIFEST_V1/);
+  assert.equal(mapRun.runner.getEvidence("nested-bulk-map-evidence")?.sourceDiff,"",
+    "unchanged pre-existing bulk files are covered by fingerprints, not misreported as this run's diff");
+
+  // A dirty workspace's unrelated pre-run files must not enter a successful
+  // run's diff or make an unchanged sensitive file fail evidence capture.
+  const dirtyGit=mkdtempSync(join(root,"dirty-git-baseline-"));
+  execFileSync("/usr/bin/git",["init","-q"],{cwd:dirtyGit});
+  execFileSync("/usr/bin/git",["config","user.email","test@example.invalid"],{cwd:dirtyGit});
+  execFileSync("/usr/bin/git",["config","user.name","Test"],{cwd:dirtyGit});
+  writeFileSync(join(dirtyGit,"tracked.txt"),"base\n");
+  writeFileSync(join(dirtyGit,"credential-track.txt"),"tracked baseline secret placeholder\n");
+  writeFileSync(join(dirtyGit,":(glob)**"),"magic path baseline\n");
+  writeFileSync(join(dirtyGit,"__proto__"),"proto baseline\n");
+  execFileSync("/usr/bin/git",["--literal-pathspecs","add","--","tracked.txt","credential-track.txt",":(glob)**","__proto__"],{cwd:dirtyGit});
+  execFileSync("/usr/bin/git",["commit","-qm","baseline"],{cwd:dirtyGit});
+  writeFileSync(join(dirtyGit,"credential-track.txt"),"pre-existing tracked credential change\n");
+  writeFileSync(join(dirtyGit,"credentials-placeholder.txt"),"pre-existing secret placeholder");
+  writeFileSync(join(dirtyGit,"old-large.txt"),"old".repeat(50_000));
+  const dirty=create(undefined,dirtyGit);
+  const unchangedDirtyStatus=await dirty.runner.run(makeInput("unchanged-dirty-baseline",dirtyGit,"success"));
+  assert.equal(unchangedDirtyStatus.state,"COMPLETED",JSON.stringify(unchangedDirtyStatus));
+  assert.equal(dirty.runner.getEvidence("unchanged-dirty-baseline")?.sourceDiff,"");
+  const dirtyStatus=await dirty.runner.run(makeInput("dirty-worktree-clean-evidence",dirtyGit,"edit"));
+  assert.equal(dirtyStatus.state,"COMPLETED",JSON.stringify(dirtyStatus));
+  assert.equal(dirtyStatus.reviewState,"READY_FOR_GPT_REVIEW");
+  const dirtyEvidence=dirty.runner.getEvidence("dirty-worktree-clean-evidence");
+  assert.match(dirtyEvidence?.sourceDiff??"",/edited-result\.txt/);
+  assert.doesNotMatch(dirtyEvidence?.sourceDiff??"",/credentials-placeholder|old-large\.txt|pre-existing secret/);
+  assert.doesNotMatch(dirtyEvidence?.sourceDiff??"",/credential-track\.txt|pre-existing tracked/);
+
+  const pathspec=create(undefined,dirtyGit);
+  const pathspecStatus=await pathspec.runner.run(makeInput("literal-pathspec-evidence",dirtyGit,"pathspec-injection"));
+  assert.equal(pathspecStatus.state,"COMPLETED",JSON.stringify(pathspecStatus));
+  const pathspecEvidence=pathspec.runner.getEvidence("literal-pathspec-evidence")?.sourceDiff??"";
+  assert.match(pathspecEvidence,/\:\(glob\)\*\*/);
+  assert.match(pathspecEvidence,/MAGIC_PATH_ONLY/);
+  assert.doesNotMatch(pathspecEvidence,/credential-track\.txt|pre-existing tracked/,
+    "Git pathspec magic must not expand the diff into unrelated sensitive workspace changes");
+
+  const largeOutput=create(undefined,dirtyGit);
+  const largeStatus=await largeOutput.runner.run(makeInput("oversized-source-manifest",dirtyGit,"large-file"));
+  assert.equal(largeStatus.state,"COMPLETED",JSON.stringify(largeStatus));
+  const largeEvidence=largeOutput.runner.getEvidence("oversized-source-manifest");
+  assert.match(largeEvidence?.sourceDiff??"",/CODEX_SCOPED_GIT_SHA256_MANIFEST_V1/);
+  assert.match(largeEvidence?.sourceDiff??"",/large-agent-output\.txt/);
+  assert.doesNotMatch(largeEvidence?.sourceDiff??"",/x{100}/);
+
+  const sensitive=create(undefined,dirtyGit);
+  const sensitiveStatus=await sensitive.runner.run(makeInput("changed-sensitive-file",dirtyGit,"edit-sensitive"));
+  assert.equal(sensitiveStatus.state,"FAILED");
+  assert.equal(sensitiveStatus.executionCompleted,true);
+  assert.equal(sensitiveStatus.evidenceState,"FAILED");
+  assert.equal(sensitiveStatus.failureStage,"evidence");
+  assert.equal(sensitiveStatus.reason,"CODEX_EVIDENCE_SENSITIVE_PATH");
+  assert.equal(sensitive.events.listPending("workspace-one").pending_count,0);
+
+  const restored=create(undefined,dirtyGit);
+  const restoredSensitiveStatus=await restored.runner.run(makeInput("restored-sensitive-baseline",dirtyGit,"restore-sensitive"));
+  assert.equal(restoredSensitiveStatus.state,"FAILED");
+  assert.equal(restoredSensitiveStatus.executionCompleted,true);
+  assert.equal(restoredSensitiveStatus.evidenceState,"FAILED");
+  assert.equal(restoredSensitiveStatus.failureStage,"evidence");
+  assert.equal(restoredSensitiveStatus.reason,"CODEX_EVIDENCE_SENSITIVE_PATH",
+    "restoring a pre-run tracked sensitive edit to HEAD must still be detected");
+
+  writeFileSync(join(dirtyGit,"tracked.txt"),"pre-run ordinary dirty change\n");
+  const restoredOrdinary=create(undefined,dirtyGit);
+  const restoredOrdinaryStatus=await restoredOrdinary.runner.run(makeInput("restored-ordinary-baseline",dirtyGit,"restore-tracked"));
+  assert.equal(restoredOrdinaryStatus.state,"COMPLETED",JSON.stringify(restoredOrdinaryStatus));
+  const restoredManifest=restoredOrdinary.runner.getEvidence("restored-ordinary-baseline")?.sourceDiff??"";
+  assert.match(restoredManifest,/CODEX_SCOPED_GIT_SHA256_MANIFEST_V1/);
+  const restoredFile=JSON.parse(restoredManifest.slice(restoredManifest.indexOf("\n")+1)).files
+    .find((f:{path:string})=>f.path==="tracked.txt");
+  assert.equal(restoredFile.state,"file");
+  assert.equal(restoredFile.bytes,5);
+  assert.equal(restoredFile.afterSha256,createHash("sha256").update("base\n").digest("hex"));
+
+  writeFileSync(join(dirtyGit,"__proto__"),"pre-run proto dirty change\n");
+  const restoredProto=create(undefined,dirtyGit);
+  const restoredProtoStatus=await restoredProto.runner.run(makeInput("restored-proto-baseline",dirtyGit,"restore-proto"));
+  assert.equal(restoredProtoStatus.state,"COMPLETED",JSON.stringify(restoredProtoStatus));
+  const protoManifest=restoredProto.runner.getEvidence("restored-proto-baseline")?.sourceDiff??"";
+  assert.match(protoManifest,/CODEX_SCOPED_GIT_SHA256_MANIFEST_V1/);
+  const protoFile=JSON.parse(protoManifest.slice(protoManifest.indexOf("\n")+1)).files
+    .find((f:{path:string})=>f.path==="__proto__");
+  assert.equal(protoFile.state,"file");
+  assert.equal(protoFile.afterSha256,createHash("sha256").update("proto baseline\n").digest("hex"));
+
   const a=create();
   const input=makeInput("successful-edit",a.space,"edit");
   const first=await a.runner.run(input);
   assert.equal(first.state,"COMPLETED",JSON.stringify(first));
+  assert.equal(first.evidenceState,"VERIFIED");
   assert.equal(first.threadId,UUID);
   assert.ok(first.evidenceSha256?.match(/^[0-9a-f]{64}$/));
   assert.ok(existsSync(join(a.space,"edited-result.txt")));
@@ -314,6 +408,20 @@ async function gates(){
   assert.equal(reviewResult.state,"COMPLETED");
   assert.deepEqual(reviewRunner.getReviewRecommendation("persisted-review","workspace-one"),
     {decision:"APPROVED",reason:"review evidence verified"});
+  assert.equal(reviewResult.reviewState,"APPROVED");
+  const blockedReview=await reviewRunner.run(makeInput("persisted-blocked-review",reviewWorkspace,
+    "review-blocked",{internalReview:true}));
+  assert.equal(blockedReview.state,"COMPLETED");
+  assert.equal(blockedReview.executionCompleted,true);
+  assert.equal(blockedReview.evidenceState,"VERIFIED");
+  assert.equal(blockedReview.reviewState,"REVIEW_BLOCKED");
+  const invalidReview=await reviewRunner.run(makeInput("persisted-invalid-review",reviewWorkspace,
+    "review-invalid",{internalReview:true}));
+  assert.equal(invalidReview.state,"COMPLETED");
+  assert.equal(invalidReview.executionCompleted,true);
+  assert.equal(invalidReview.evidenceState,"VERIFIED");
+  assert.equal(invalidReview.reviewState,"REVIEW_BLOCKED",
+    "missing or invalid internal review verdict must stay blocked after execution completes");
   await reviewRunner.close();reviewStore.close();
   stores.splice(stores.indexOf(reviewStore),1);
   const recoveredReviewStore=new CoachReviewEventStore(reviewState);stores.push(recoveredReviewStore);

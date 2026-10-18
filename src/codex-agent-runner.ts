@@ -15,6 +15,7 @@ import { GUARDIAN_SOURCE, createGuardianMarker, readGuardianIdentity } from "./c
 import { AgentObserverStore, normalizeCodexNativeEvent } from "./agent-observer.js";
 import {validateCodexSelection, type CodexSelection, type CodexModel, type CodexEffort} from "./coach-model-policy.js";
 import { analyzeAgentEfficiency, type AuditTrace } from "./agent-efficiency-audit.js";
+import { codexChildEnvironment } from "./codex-proxy-environment.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 // Codex currently emits time-ordered UUIDv7 thread IDs; keep valid RFC versions.
@@ -27,8 +28,11 @@ const CODEX = "/Users/liz/.local/bin/codex";
 const DEFAULT_MAX_OUTPUT = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 const MAX_SNAPSHOT_FILES = 2000;
-const MAX_EVIDENCE_BYTES = 64 * 1024;
+const MAX_EVIDENCE_BYTES = 1024 * 1024;
+const MAX_INLINE_DIFF_BYTES = 32 * 1024;
+type SnapshotFile = { sha256: string; bytes: number; state: "file" | "deleted" };
 type State = "RUNNING" | "COMPLETED" | "FAILED" | "STOPPED" | "INTERRUPTED" | "CLEARED";
+type FailureStage = "spawn" | "provider" | "runtime" | "timeout" | "manual_stop" | "evidence";
 type CodexErrorCategory =
   "authentication" | "model_unavailable" | "rate_or_quota" |
   "provider_5xx" | "transport" | "timeout" | "unclassified";
@@ -58,7 +62,7 @@ function terminateAgent(proc:ProcessLike | undefined, signal:NodeJS.Signals):voi
   try {proc.kill(signal);} catch { /* It may already have exited. */ }
 }
 type Spawn = (file: string, argv: string[], opts: {
-  cwd: string; stdio: ["pipe", "pipe", "pipe"] | ["pipe", "pipe", "pipe", "pipe"]; detached: boolean;
+  cwd: string; stdio: ["pipe", "pipe", "pipe"] | ["pipe", "pipe", "pipe", "pipe"]; detached: boolean; env?: NodeJS.ProcessEnv;
 }) => ProcessLike;
 export interface RunnerInput {
   workspaceId: string;
@@ -91,6 +95,10 @@ export interface RunnerStatus {
   /** Whitelisted diagnosis only; never the raw provider error text. */
   errorEventCount?: number;
   lastErrorCategory?: CodexErrorCategory;
+  failureStage?: FailureStage;
+  executionCompleted?: boolean;
+  evidenceState?: "PENDING" | "VERIFIED" | "FAILED" | "NOT_CREATED";
+  reviewState?: "READY_FOR_GPT_REVIEW" | "REVIEW_BLOCKED" | "REWORK" | "APPROVED";
   /** Native event progress is distinct from runner heartbeat. */
   lastNativeEventAt?:string;
   nativeEventCount?:number;
@@ -133,7 +141,7 @@ export interface NativeRunnerOptions {
   /** Test-only injection; a production caller must never expose it via MCP. */
   spawn?: Spawn;
   /** Test-only fingerprint injection; never used by production MCP wiring. */
-  fingerprint?: (root: string) => Promise<{ sha: string; gitSummary: string | null }>;
+  fingerprint?: (root: string) => Promise<{ sha: string; gitSummary: string | null; changedFiles?: Record<string, SnapshotFile> }>;
   /** Test-only heartbeat cadence; production is fixed at 5000ms. */
   heartbeatIntervalMs?:number;
   observer?: AgentObserverStore;
@@ -206,7 +214,7 @@ function fileHash(path: string): string {
   return hash(readFileSync(path));
 }
 /** Capture actual Git HEAD/index/modified and untracked contents, or a bounded file tree. */
-export async function captureCodexFingerprint(root: string): Promise<{sha: string; gitSummary: string | null}> {
+export async function captureCodexFingerprint(root: string): Promise<{sha: string; gitSummary: string | null; changedFiles: Record<string, SnapshotFile>}> {
   const workspace = directory(root);
   const runGit = (...args: string[]) => execFileSync("/usr/bin/git", args, {
     cwd: workspace, timeout: 5000, maxBuffer: 8 * 1024 * 1024, encoding: "buffer",
@@ -228,19 +236,28 @@ export async function captureCodexFingerprint(root: string): Promise<{sha: strin
     const dirty = runGit("ls-files", "-m", "-o", "--exclude-standard", "-z");
     const deleted = runGit("ls-files", "-d", "-z");
     h.update("git:"); h.update(head); h.update(index); h.update(status); h.update(deleted);
-    const paths = dirty.toString("utf8").split("\0").filter(Boolean).sort();
+    const paths = [...new Set([...dirty.toString("utf8").split("\0"), ...deleted.toString("utf8").split("\0")].filter(Boolean))].sort();
     if (paths.length > MAX_SNAPSHOT_FILES) throw new Error("CODEX_SNAPSHOT_TOO_MANY_FILES");
     let size = 0;
+    const changedFiles: Record<string, SnapshotFile> = Object.create(null) as Record<string, SnapshotFile>;
     for (const entry of paths) {
       const path = join(workspace, entry);
       const rel = relative(workspace, path);
       if (rel === ".." || rel.startsWith(".." + sep)) throw new Error("CODEX_SNAPSHOT_UNSAFE_PATH");
-      const st = lstatSync(path);
-      size += st.isFile() ? st.size : 0;
+      let snapshot: SnapshotFile;
+      try {
+        const st = lstatSync(path);
+        size += st.isFile() ? st.size : 0;
+        snapshot = { sha256: fileHash(path), bytes: st.isFile() ? st.size : 0, state: "file" };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        snapshot = { sha256: hash("deleted:" + entry), bytes: 0, state: "deleted" };
+      }
       if (size > MAX_SNAPSHOT_BYTES) throw new Error("CODEX_SNAPSHOT_TOO_LARGE");
-      h.update(entry); h.update(fileHash(path));
+      h.update(entry); h.update(snapshot.sha256);
+      changedFiles[entry] = snapshot;
     }
-    return { sha:h.digest("hex"), gitSummary: "HEAD=" + head.toString("utf8").trim() +
+    return { sha:h.digest("hex"), changedFiles, gitSummary: "HEAD=" + head.toString("utf8").trim() +
       "; status_entries=" + status.toString("utf8").split("\0").filter(Boolean).length +
       "; modified_or_untracked=" + paths.length };
   }
@@ -248,6 +265,7 @@ export async function captureCodexFingerprint(root: string): Promise<{sha: strin
   // even though its administrative contents are never returned as source diff.
   const skip = new Set([".git", "node_modules", "dist", ".next", ".venv", "venv"]);
   let count = 0, bytes = 0;
+  const changedFiles: Record<string, SnapshotFile> = Object.create(null) as Record<string, SnapshotFile>;
   const walk = (dir: string, prefix = "") => {
     for (const name of readdirSync(dir).sort()) {
       if (skip.has(name)) continue;
@@ -258,18 +276,24 @@ export async function captureCodexFingerprint(root: string): Promise<{sha: strin
       count++; bytes += st.isFile() ? st.size : 0;
       if (count > MAX_SNAPSHOT_FILES || bytes > MAX_SNAPSHOT_BYTES)
         throw new Error("CODEX_SNAPSHOT_LIMIT");
-      h.update(rel); h.update(fileHash(abs));
+      const sha256=fileHash(abs);
+      h.update(rel); h.update(sha256);
+      changedFiles[rel]={sha256,bytes:st.isFile()?st.size:0,state:"file"};
     }
   };
   walk(workspace);
-  return { sha:h.digest("hex"), gitSummary:"non-git snapshot; files=" + count };
+  return { sha:h.digest("hex"), changedFiles, gitSummary:"non-git snapshot; files=" + count };
 }
 
 /** Bounded Git diff or small non-Git source snapshot; never silently discard evidence. */
-export function captureCodexSourceDiff(root: string): string {
+export function captureCodexSourceDiff(
+  root: string,
+  beforeFiles?: Record<string, SnapshotFile>,
+  afterFiles?: Record<string, SnapshotFile>,
+): string {
   const workspace = directory(root);
   const runGit = (...args: string[]) => execFileSync("/usr/bin/git", args, {
-    cwd: workspace, timeout: 5000, maxBuffer: MAX_EVIDENCE_BYTES * 2,
+    cwd: workspace, timeout: 5000, maxBuffer: MAX_SNAPSHOT_BYTES * 2,
     encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
   }) as string;
   const denied = (path:string) =>
@@ -304,21 +328,57 @@ export function captureCodexSourceDiff(root: string): string {
       if(record.startsWith("R")||record.startsWith("C")||record[1]==="R"||record[1]==="C")
         throw new Error("CODEX_EVIDENCE_RENAME_REQUIRES_MANUAL_REVIEW");
       const path=record.slice(3);
-      if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
       paths.push(path);
     }
-    let hasHead=true;
-    try { runGit("rev-parse","HEAD"); }
-    catch {hasHead=false;}
-    if(hasHead){
-      result=runGit("diff","--no-ext-diff","--no-color","HEAD","--",...paths);
-    }else{
-      result=runGit("diff","--no-ext-diff","--no-color","--cached","--",...paths)+
-        runGit("diff","--no-ext-diff","--no-color","--",...paths);
+    const baseline = beforeFiles ?? Object.create(null) as Record<string, SnapshotFile>;
+    const finalFiles = Object.assign(Object.create(null) as Record<string, SnapshotFile>, afterFiles ?? {});
+    // Fingerprints list dirty/untracked files only. A file restored to HEAD
+    // disappears from that list, so read its real final state before building
+    // a manifest; otherwise a clean restored file would be mislabeled deleted.
+    for (const path of [...new Set([...paths, ...Object.keys(baseline), ...Object.keys(finalFiles)])]) {
+      if (finalFiles[path]) continue;
+      const file = join(workspace, path);
+      const rel = relative(workspace, file);
+      if (rel === ".." || rel.startsWith(".." + sep)) throw new Error("CODEX_EVIDENCE_PATH_ESCAPE");
+      try {
+        const st = lstatSync(file);
+        finalFiles[path] = { sha256: fileHash(file), bytes: st.isFile() ? st.size : 0, state: "file" };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        finalFiles[path] = { sha256: hash("deleted:" + path), bytes: 0, state: "deleted" };
+      }
     }
-    const untracked=runGit("ls-files","--others","--exclude-standard","-z")
-      .split("\0").filter(Boolean);
-    for(const path of untracked)result+="\n--- /dev/null\n+++ b/"+path+"\n"+safeText(path);
+    const changedPaths = [...new Set([...paths, ...Object.keys(baseline), ...Object.keys(finalFiles)])]
+      .filter((path) => baseline[path]?.sha256 !== finalFiles[path]?.sha256 ||
+        baseline[path]?.state !== finalFiles[path]?.state);
+    for (const path of changedPaths) if (denied(path)) throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+    let untracked:string[]=[];
+    if(changedPaths.length){
+      let hasHead=true;
+      try { runGit("rev-parse","HEAD"); }
+      catch {hasHead=false;}
+      if(hasHead){
+        result=runGit("--literal-pathspecs","diff","--no-ext-diff","--no-color","HEAD","--",...changedPaths);
+      }else{
+        result=runGit("--literal-pathspecs","diff","--no-ext-diff","--no-color","--cached","--",...changedPaths)+
+          runGit("--literal-pathspecs","diff","--no-ext-diff","--no-color","--",...changedPaths);
+      }
+      untracked=runGit("ls-files","--others","--exclude-standard","-z")
+        .split("\0").filter((path) => path && changedPaths.includes(path));
+    }
+    const hasOversizedUntracked=untracked.some((path)=>(finalFiles[path]?.bytes??0)>MAX_INLINE_DIFF_BYTES);
+    if(!hasOversizedUntracked){
+      for(const path of untracked)result+="\n--- /dev/null\n+++ b/"+path+"\n"+safeText(path);
+    }
+    if(changedPaths.some((path)=>baseline[path]) || hasOversizedUntracked ||
+       Buffer.byteLength(result,"utf8")>MAX_INLINE_DIFF_BYTES){
+      const manifest=changedPaths.map((path)=>({path,
+        beforeSha256:baseline[path]?.sha256??null,
+        afterSha256:finalFiles[path]?.sha256??null,
+        bytes:finalFiles[path]?.bytes??0,
+        state:finalFiles[path]?.state??"deleted"}));
+      result="CODEX_SCOPED_GIT_SHA256_MANIFEST_V1\n"+JSON.stringify({fullInventory:true,files:manifest});
+    }
   }else{
     // The 32 MiB/2000-file scoped snapshot is preserved. Small text
     // workspaces have readable source. Larger maps / binaries get an ENTIRE
@@ -331,7 +391,11 @@ export function captureCodexSourceDiff(root: string): string {
       for(const name of readdirSync(dir).sort()){
         if(skip.has(name))continue;
         const path=prefix?prefix+"/"+name:name;
-        if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+        if(denied(path)){
+          if(beforeFiles && afterFiles && beforeFiles[path]?.sha256===afterFiles[path]?.sha256 &&
+             beforeFiles[path]?.state===afterFiles[path]?.state)continue;
+          throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+        }
         const abs=join(dir,name),st=lstatSync(abs);
         if(st.isDirectory()){walk(abs,path);continue;}
         if(!st.isFile())throw new Error("CODEX_EVIDENCE_UNSAFE_FILE");
@@ -350,7 +414,30 @@ export function captureCodexSourceDiff(root: string): string {
       }
     };
     walk(workspace);
-    if(hashOnly){
+    if(beforeFiles && afterFiles){
+      const changed=[...new Set([...Object.keys(beforeFiles),...Object.keys(afterFiles)])]
+        .filter((path)=>beforeFiles[path]?.sha256!==afterFiles[path]?.sha256 ||
+          beforeFiles[path]?.state!==afterFiles[path]?.state);
+      for(const path of changed)if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+      const files=changed.map((path)=>({path,beforeSha256:beforeFiles[path]?.sha256??null,
+        afterSha256:afterFiles[path]?.sha256??null,bytes:afterFiles[path]?.bytes??0,
+        state:afterFiles[path]?.state??"deleted"}));
+      let inline="";
+      let canInline=true;
+      for(const file of files){
+        if(file.state==="deleted"){
+          inline+=`\n--- ${file.path}\n+++ /dev/null\n# beforeSha256=${file.beforeSha256}\n`;
+          continue;
+        }
+        if(file.bytes>MAX_INLINE_DIFF_BYTES){canInline=false;break;}
+        const content=readFileSync(join(workspace,file.path));
+        if(content.includes(0)){canInline=false;break;}
+        inline+=`\n--- ${file.path}\n+++ ${file.path}\n# beforeSha256=${file.beforeSha256??"absent"} afterSha256=${file.afterSha256}\n${content.toString("utf8")}`;
+        if(Buffer.byteLength(inline,"utf8")>MAX_INLINE_DIFF_BYTES){canInline=false;break;}
+      }
+      result=canInline?inline:"CODEX_SCOPED_NON_GIT_SHA256_MANIFEST_V1\n"+
+        JSON.stringify({fullInventory:false,files});
+    }else if(hashOnly){
       result="CODEX_SCOPED_NON_GIT_SHA256_MANIFEST_V1\n"+
         JSON.stringify({files:inventory,fullInventory:true,totalBytes:bytes});
       if(Buffer.byteLength(result,"utf8")>MAX_EVIDENCE_BYTES)
@@ -491,6 +578,7 @@ export class NativeCodexAgentRunner {
     if(r&&workspaceId&&r.status.workspaceId!==workspaceId)throw new Error("CODEX_WORKSPACE_MISMATCH");
     if (!r || r.status.state!=="RUNNING") return false;
     r.stop=true;
+    r.status.failureStage="manual_stop";
     terminateAgent(r.process,"SIGTERM");
     const escalation=r.process ? setTimeout(()=>terminateAgent(r.process,"SIGKILL"),1500) : undefined;
     try {
@@ -553,6 +641,8 @@ export class NativeCodexAgentRunner {
                     decision:parsed.decision as "APPROVED"|"REWORK"|"BLOCKED",
                     reason:parsed.reason,
                   };
+                  r.status.reviewState=parsed.decision==="BLOCKED"?"REVIEW_BLOCKED":
+                    parsed.decision==="REWORK"?"REWORK":"APPROVED";
                 }
               } catch { /* Invalid reviewer response becomes BLOCKED by policy. */ }
             }
@@ -635,9 +725,10 @@ export class NativeCodexAgentRunner {
         ? [this.codexPath,...args]
         : ["-e",GUARDIAN_SOURCE,"--",marker,this.codexPath,...args];
       const child=this.spawn(this.nodePath,spawnArgs,
-        {cwd:input.workspaceRoot,stdio:this.options.spawn ? ["pipe","pipe","pipe"] : ["pipe","pipe","pipe","pipe"],detached:process.platform!=="win32"});
+        {cwd:input.workspaceRoot,stdio:this.options.spawn ? ["pipe","pipe","pipe"] : ["pipe","pipe","pipe","pipe"],detached:process.platform!=="win32",
+          ...(!this.options.spawn?{env:codexChildEnvironment()}: {})});
       r.process=child;
-      child.on("error",()=>{failed=true;});
+      child.on("error",()=>{failed=true;r.status.failureStage="spawn";});
       // Attach output capture BEFORE identity polling; Codex may emit its
       // thread.started JSON prior to consuming stdin.
       child.stdout?.on("data",(c:Buffer)=>append(c,true));
@@ -654,7 +745,7 @@ export class NativeCodexAgentRunner {
         this.options.events.recordGuardian({workspaceId:input.workspaceId,operationId:input.operationId,identity});
       }
       // The runner sends only the authorized prompt via stdin, never in process argv.
-      child.stdin?.on("error",()=>{failed=true;});
+      child.stdin?.on("error",()=>{failed=true;r.status.failureStage="runtime";});
       child.stdin?.end(input.prompt);
       // Transport liveness, NOT a claim of model progress or successful actions.
       if(this.options.observer)heartbeatTimer=setInterval(()=>{
@@ -687,6 +778,7 @@ export class NativeCodexAgentRunner {
         timer=setTimeout(()=>{
           r.stop=true;
           r.timedOut=true;
+          r.status.failureStage="timeout";
           terminateAgent(child,"SIGTERM");
           killTimer=setTimeout(()=>{terminateAgent(child,"SIGKILL");},1500);
         },input.timeoutMs ?? 900000);
@@ -701,7 +793,9 @@ export class NativeCodexAgentRunner {
       const success= !r.stop && !failed && !oversize && code===0 &&
         completed && Boolean(threadId);
       if(success) {
-        const sourceDiff = captureCodexSourceDiff(input.workspaceRoot);
+        r.status.executionCompleted=true;
+        r.status.evidenceState="PENDING";
+        const sourceDiff = captureCodexSourceDiff(input.workspaceRoot,before.changedFiles??{},after.changedFiles??{});
         const evidenceBase={
           operationId:input.operationId,workspaceId:input.workspaceId,
           threadId:threadId!,exitCode:code,eventTypes:types,
@@ -727,8 +821,15 @@ export class NativeCodexAgentRunner {
         r.evidence=evidence;
         r.status.evidenceSha256=evidenceSha256;
         r.status.eventId=recorded.event_id;
+        r.status.evidenceState="VERIFIED";
+        if(!input.internalReview)r.status.reviewState="READY_FOR_GPT_REVIEW";
+        else if(!r.reviewRecommendation)r.status.reviewState="REVIEW_BLOCKED";
         r.status.state="COMPLETED";
       } else {
+        r.status.executionCompleted=false;
+        r.status.evidenceState="NOT_CREATED";
+        r.status.failureStage ??= r.timedOut?"timeout":r.stop?"manual_stop":agentErrorEvent?"provider":
+          code!==0?"runtime":"runtime";
         r.status.state=r.stop?"STOPPED":"FAILED";
         r.status.reason = r.timedOut?"codex_execution_timeout":r.stop?"codex_stopped_by_request"
           : oversize?"codex_json_output_limit_exceeded"
@@ -745,6 +846,13 @@ export class NativeCodexAgentRunner {
     }catch(error){
       r.status.state=r.stop?"STOPPED":"FAILED";
       r.status.reason=error instanceof Error?error.message:"codex_execution_failed";
+      if(r.status.executionCompleted){
+        r.status.failureStage="evidence";
+        r.status.evidenceState="FAILED";
+      }else{
+        r.status.evidenceState="NOT_CREATED";
+        r.status.failureStage ??= r.timedOut?"timeout":r.stop?"manual_stop":"runtime";
+      }
       terminateAgent(r.process,"SIGKILL");
       // Never fabricate a completion event on a failure.
     }finally{
