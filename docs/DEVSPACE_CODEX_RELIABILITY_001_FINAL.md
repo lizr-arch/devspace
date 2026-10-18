@@ -75,7 +75,7 @@ Web GPT / OAuth MCP 客户端
 | T11 READY_FOR_GPT_REVIEW | PASS | 真实 Native Runner 成功后产生一条可查询 review event；没有伪造审核 APPROVED。 |
 | T12 Git 与其他任务安全 | PASS | 只 fast-forward 本任务提交；原有 `AGENTS.md`、`package.json`、`src/server/express-routes.ts` 修改和未跟踪 Gemini 文件均保留；无游戏/其他任务进程被终止。 |
 
-**构建与测试：** `npm run typecheck` PASS；最终 `npm run build` PASS（两次 Vite build 完成，只有大 chunk 警告）；以下精准测试全部 PASS：`codex-proxy-environment.test.ts`、`codex-agent-runner.test.ts`、`codex-agent-mcp.test.ts`、`codex-worker-lifecycle.test.ts`、`coach-review-events.test.ts`；`git diff --check` 无输出。文档规则命令 `npm --prefix tools/docs test` 因仓库没有 `tools/` 目录及其 `package.json` 返回 ENOENT；报告只记录现场，没有运行全量 DevSpace 测试。
+**构建与测试：** `npm run typecheck` PASS；最终 `npm run build` PASS（两次 Vite build 完成，只有大 chunk 警告）；以下精准测试全部 PASS：`codex-proxy-environment.test.ts`、`codex-agent-runner.test.ts`、`codex-agent-mcp.test.ts`、`codex-worker-lifecycle.test.ts`、`coach-review-events.test.ts`；`git diff --check` 无输出。命令输出保存在 [focused-tests-final.log](../reports/evidence/DEVSPACE-CODEX-RELIABILITY-001/focused-tests-final.log)。文档规则命令 `npm --prefix tools/docs test` 因仓库没有 `tools/` 目录及其 `package.json` 返回 ENOENT；报告只记录现场，没有运行全量 DevSpace 测试。
 
 ## 7. 真实 Codex 成功记录
 
@@ -108,5 +108,5 @@ Web GPT / OAuth MCP 客户端
 
 - main 已从 `72106131ac5b0a628be285f57dde00fa3d8dd75d` fast-forward 至代码提交 `b94a653580ace9cfd7fb5a0bdc31efdcafbadc95`；本报告作为后续独立提交合入；未 push，未重写历史。
 - 本任务工作分支为 `codex/devspace-codex-reliability-001`；隔离 worktree 保留以便审阅，没有清理其他 worktree。
-- main 原有未提交修改及 Gemini 未跟踪文件仍保留；没有纳入本次提交。main 原先领先 origin 5 个提交；代码提交后领先 6 个，报告合入后领先 7 个。
+- main 原有未提交修改及 Gemini 未跟踪文件仍保留；没有纳入本次提交。main 原先领先 origin 5 个提交；代码提交后领先 6 个，报告合入后领先 7 个，补充验证日志合入后领先 8 个。
 - 备份 dist、临时构建日志和其他历史 smoke 输出均保留；未清空数据库、旧证据或工作树。

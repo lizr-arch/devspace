@@ -1,0 +1,11 @@
+
+> @waishnav/devspace@1.1.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+codex proxy environment: PASS
+COACH006B1_NATIVE_CODEX_RUNNER_CORE_GATES_PASS
+COACH006B1_MCP_CLIENT_START_STATUS_EVIDENCE_STOP_AND_RESTART_PASS
+worker lease fencing and no-replay quarantine PASS
+worker private UDS and Coach feed lifecycle/recovery PASS
+COACH006A3_NATIVE_EVENT_STORE_PASS
+EXIT_CODE=0
