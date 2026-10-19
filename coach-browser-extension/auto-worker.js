@@ -134,8 +134,8 @@ async function autoUnbind() {
 async function autoReady(tabId,url) {
   const ping=async()=>{
     try {
-      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING_V4"});
-      return ready?.ok===true && ready.protocol===4 && ready.url===url;
+      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING_V5"});
+      return ready?.ok===true && ready.protocol===5 && ready.url===url;
     } catch { return false; }
   };
   if(await ping())return {ok:true};
@@ -252,7 +252,7 @@ async function autoPump() {
     let result=null;
     try {
       result=await chrome.tabs.sendMessage(target.tabId,{
-        type:"COACH_AUTO_DELIVER_V4",url:target.url,instruction:autoInstruction(candidate)
+        type:"COACH_AUTO_DELIVER_V5",url:target.url,instruction:autoInstruction(candidate)
       });
     }catch{result={ok:false,uncertain:true,reason:"内容脚本不可达"};}
     // Re-read durable state: user may have disabled/unbound while DOM action ran.

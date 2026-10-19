@@ -20,7 +20,7 @@ function workerHarness(overrides={}) {
   const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[];
   const tab={id:42,url:URL_OK};
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
-  let contentReady=true,injectionFailure=false,pingProtocol=4;
+  let contentReady=true,injectionFailure=false,pingProtocol=5;
   const chrome={
     storage:{
       session:{async get(k){return {[k]:session[k]};},async set(v){Object.assign(session,v);},async remove(k){delete session[k];}},
@@ -29,7 +29,7 @@ function workerHarness(overrides={}) {
     tabs:{
       async query(){return [tab];},async get(id){if(id!==42)throw Error("tab_gone");return tab;},
       async sendMessage(id,m){
-        if(m.type==="COACH_AUTO_PING_V4"){
+        if(m.type==="COACH_AUTO_PING_V5"){
           if(!contentReady)throw Error("Receiving end does not exist");
           return {ok:true,protocol:pingProtocol,url:tab.url};
         }
@@ -41,9 +41,9 @@ function workerHarness(overrides={}) {
     scripting:{async executeScript(args){
       injections.push(args);
       if(injectionFailure)throw Error("host permission denied");
-      contentReady=true;pingProtocol=4;
+      contentReady=true;pingProtocol=5;
     }},
-    runtime:{getManifest:()=>({version:"0.3.4"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
+    runtime:{getManifest:()=>({version:"0.3.5"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
@@ -89,7 +89,7 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  await h.drain();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal(h.messages[0].id,42);
- assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V4");
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V5");
  assert.match(h.messages[0].m.instruction,/APPROVED \/ REWORK \/ BLOCKED/);
  assert.match(h.messages[0].m.instruction,/codex-qa/);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
@@ -107,14 +107,14 @@ test("reloaded extension reinjects script into already-open ChatGPT tab before s
  assert.equal(h.messages.length,1);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
-test("old content script replies but is rejected by v4 protocol and replaced safely",async()=>{
+test("old content script replies but is rejected by v5 protocol and replaced safely",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- h.setPingProtocol(3); // prior injected V3 script responds to previous version
+ h.setPingProtocol(4); // prior injected V4 script responds to previous version
  await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
  await h.drain();await h.poll();
  assert.equal(h.injections.length,1);
  assert.equal(h.messages.length,1);
- assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V4");
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V5");
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
 test("script injection permission denial never sends and keeps event pending",async()=>{
@@ -149,7 +149,7 @@ test("opening extension popup reconciles scoped and unknown keys even when queue
    "ws-qa:codex-qa:12":{state:"needs_attention",reason:"旧版脚本的编辑器失败"}
  };
  const state=(await h.msg("COACH_AUTO_STATUS")).state;
- assert.equal(state.version,"0.3.4");
+ assert.equal(state.version,"0.3.5");
  assert.equal(state.summary.needs_attention,1);
  assert.equal(state.summary.pending,0);
  assert.match(state.blocking,/人工核实/);
@@ -318,14 +318,29 @@ function domHarness(options={}) {
    },
    querySelector(q){return options.busy && q.startsWith("[data-testid")?{}:null;},
    createRange(){return {selectNodeContents(){},collapse(){}};},
-   execCommand(_cmd,_show,s){editor.innerText=s;editor.textContent=s;return !options.execFail;}
+   execCommand(_cmd,_show,s){
+     const actual=options.corruptInsert?s.replace("独立审核","独立审理"):s;
+     editor.innerText=options.paragraphRender?actual.replace(/\n/g,"\n\n"):actual;
+     editor.textContent=options.paragraphRender?actual.replace(/\n/g,""):actual;
+     if(options.delayedEditorReads) {
+       let reads=0;
+       let committed=actual;
+       Object.defineProperty(editor,"innerText",{configurable:true,
+         get(){reads++;return reads<=options.delayedEditorReads?"":committed;},
+         set(v){committed=v;}});
+       Object.defineProperty(editor,"textContent",{configurable:true,
+         get(){return reads<=options.delayedEditorReads?"":committed;},
+         set(v){committed=v;}});
+     }
+     return !options.execFail;
+   }
  };
  const window={top:null,getSelection(){return {removeAllRanges(){},addRange(){}}}};
  window.top=window;
  const location={href:options.url||URL_OK};
  const chrome={runtime:{onMessage:{addListener(f){handlers.push(f);}}}};
  if(options.oldContentScript)handlers.push((m,_sender,reply)=>{
-   if(m?.type==="COACH_AUTO_PING_V3"){reply({ok:true,protocol:3,url:URL_OK});return false;}
+   if(m?.type==="COACH_AUTO_PING_V4"){reply({ok:true,protocol:4,url:URL_OK});return false;}
    return false;
  });
  const context=vm.createContext({document,window,chrome,location,URL,
@@ -334,25 +349,26 @@ function domHarness(options={}) {
  vm.runInContext(content,context);
  return {editor,button,location,handlers,context,
    getClicks:()=>clicks,getButtonChecks:()=>buttonChecks,
-   ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V4"},null,resolve)),
+   ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V5"},null,resolve)),
    reinject:()=>vm.runInContext(content,context),
-   deliver:(url=URL_OK)=>new Promise(resolve=>handlers[0](
-     {type:"COACH_AUTO_DELIVER_V4",url,instruction:"请以 Web GPT Coach 身份独立审核测试事件"},null,resolve))};
+   deliver:(url=URL_OK,instruction="请以 Web GPT Coach 身份独立审核测试事件")=>
+     new Promise(resolve=>handlers[handlers.length-1](
+       {type:"COACH_AUTO_DELIVER_V5",url,instruction},null,resolve))};
 }
 test("content-script ping is read-only and reinjection never duplicates listeners",async()=>{
  const p=domHarness({draft:"用户草稿"});
  const first=await p.ping();
  assert.equal(first.ok,true);assert.equal(first.url,URL_OK);
- assert.equal(first.protocol,4);
+ assert.equal(first.protocol,5);
  assert.equal(p.editor.innerText,"用户草稿");
  p.reinject();p.reinject();
  assert.equal(p.handlers.length,1);
 });
-test("new v4 content-script registration coexists with old v3 listener without duplicate send",async()=>{
+test("new v5 content-script registration coexists with old v4 listener without duplicate send",async()=>{
  const p=domHarness({oldContentScript:true});
  assert.equal(p.handlers.length,2);
- const ping=await p.ping();assert.equal(ping.protocol,4);
- const msg={type:"COACH_AUTO_DELIVER_V4",url:URL_OK,
+ const ping=await p.ping();assert.equal(ping.protocol,5);
+ const msg={type:"COACH_AUTO_DELIVER_V5",url:URL_OK,
    instruction:"请以 Web GPT Coach 身份独立审核测试事件"};
  let oldCalled=0;
  const old=p.handlers[0];
@@ -361,6 +377,27 @@ test("new v4 content-script registration coexists with old v3 listener without d
  const res=await new Promise(resolve=>p.handlers[1](msg,null,resolve));
  assert.equal(res.ok,true);assert.equal(res.submitted,true);
  p.reinject();assert.equal(p.handlers.length,2);
+});
+test("ProseMirror paragraph line breaks do not reject intact multiline review instructions",async()=>{
+ const instruction="请以 Web GPT Coach 身份独立审核测试事件\n事件 ID：18\n工作区 ID：ws-test\n任务 ID：test18";
+ const page=domHarness({paragraphRender:true});
+ const result=await page.deliver(URL_OK,instruction);
+ assert.equal(result.submitted,true);
+ assert.equal(page.getClicks(),1);
+});
+test("framework rendering delay is awaited before checking input equality",async()=>{
+ const page=domHarness({delayedEditorReads:8});
+ const result=await page.deliver();
+ assert.equal(result.submitted,true);
+ assert.equal(page.getClicks(),1);
+});
+test("corrupted instruction remains a retained draft; auto-send never clicks",async()=>{
+ const page=domHarness({corruptInsert:true});
+ const result=await page.deliver();
+ assert.equal(result.ok,false);
+ assert.match(result.reason,/一致性校验/);
+ assert.equal(page.getClicks(),0);
+ assert.match(page.editor.innerText,/独立审理/);
 });
 test("auto-click waits for delayed ChatGPT send control and clicks only once",async()=>{
  const page=domHarness({readyAfterChecks:6});
