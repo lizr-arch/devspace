@@ -17,7 +17,8 @@ test("all delivery extension scripts are valid JavaScript",()=>{
 });
 
 function workerHarness(overrides={}) {
-  const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[];
+  const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[],receipts=[];
+  let receiptFailure=false;
   const tab={id:42,url:URL_OK};
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
   let contentReady=true,injectionFailure=false,pingProtocol=5;
@@ -43,13 +44,20 @@ function workerHarness(overrides={}) {
       if(injectionFailure)throw Error("host permission denied");
       contentReady=true;pingProtocol=5;
     }},
-    runtime:{getManifest:()=>({version:"0.3.5"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
+    runtime:{getManifest:()=>({version:"0.3.6"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
   const fetch=async(url,options)=>{
-    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/events$/);
+    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events|delivery-receipt)$/);
     assert.match(options.headers.Authorization,/^Bearer A{43}$/);
+    if(url.endsWith("/delivery-receipt")){
+      const identity=JSON.parse(options.body);
+      receipts.push(identity);
+      return receiptFailure?{ok:false,status:503}:{ok:true,json:async()=>({
+        ok:true,receipt:{...identity,result:"dom_submitted",recorded_at:"2026-10-19T00:00:00Z"}
+      })};
+    }
     return {ok:true,json:async()=>({pending_count:pendingCount??events.length,events})};
   };
   const context=vm.createContext({chrome,fetch,URL,Date,Number,Object,Array,
@@ -61,7 +69,8 @@ function workerHarness(overrides={}) {
     return new Promise(resolve=>fn({type,...extra},null,resolve));
   }
   async function drain(){for(let i=0;i<5;i++)await tick();}
-  return {session,local,tab,messages,injections,msg,drain,tabUpdates,tabRemovals,
+  return {session,local,tab,messages,injections,receipts,msg,drain,tabUpdates,tabRemovals,
+    setReceiptFailure:x=>{receiptFailure=x;},
     setEvents:x=>{events=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
     setContentReady:x=>{contentReady=x;},setPingProtocol:x=>{pingProtocol=x;},
     setInjectionFailure:x=>{injectionFailure=x;},
@@ -95,6 +104,37 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
  await h.poll();assert.equal(h.messages.length,1);
  await h.msg("COACH_AUTO_PAUSE");await h.poll();assert.equal(h.messages.length,1);
+});
+test("DOM-submitted receipt is identity-scoped, durable and never requires a second chat send",async()=>{
+ const h=workerHarness();
+ h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setReceiptFailure(true);
+ await h.msg("COACH_AUTO_BIND");
+ await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ const state=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(state.summary.sent,1);
+ assert.equal(state.summary.receipt_pending,1,"server outage cannot erase a DOM receipt");
+ assert.equal(h.messages.length,1);
+ assert.ok(h.receipts.length>=1);
+ assert.deepEqual(JSON.parse(JSON.stringify(h.receipts[0])),{
+   event_id:12,workspace_id:"ws-qa",operation_id:"codex-qa"});
+ h.setReceiptFailure(false);
+ await h.poll();
+ assert.equal(h.messages.length,1,"receipt replay must never re-send the message");
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.receipt_pending,0);
+ assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].receiptState,"synced");
+ await h.poll();
+ assert.equal(h.messages.length,1);
+ assert.equal(h.receipts.filter(x=>x.event_id===12).length>=2,true);
+});
+test("manual send acknowledgement never fabricates an automatic DOM receipt",async()=>{
+ const h=workerHarness();
+ h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"pending"}};
+ await h.msg("COACH_AUTO_RESOLVE",{key:"ws-qa:codex-qa:12",action:"mark_sent"});
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.equal(h.receipts.length,0);
 });
 test("reloaded extension reinjects script into already-open ChatGPT tab before sending",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
@@ -149,7 +189,7 @@ test("opening extension popup reconciles scoped and unknown keys even when queue
    "ws-qa:codex-qa:12":{state:"needs_attention",reason:"旧版脚本的编辑器失败"}
  };
  const state=(await h.msg("COACH_AUTO_STATUS")).state;
- assert.equal(state.version,"0.3.5");
+ assert.equal(state.version,"0.3.6");
  assert.equal(state.summary.needs_attention,1);
  assert.equal(state.summary.pending,0);
  assert.match(state.blocking,/人工核实/);

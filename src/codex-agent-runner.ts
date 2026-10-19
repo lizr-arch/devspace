@@ -509,6 +509,15 @@ export class NativeCodexAgentRunner {
   status(operationId: string,workspaceId?:string): RunnerStatus {
     assertId(operationId,"operation_id");
     const record=this.records.get(operationId);
+    // The immutable Codex completion state and the later Coach decision live in
+    // separate durable tables. Never rely on the completed runner's cached
+    // READY_FOR_GPT_REVIEW value after a Web GPT review is committed.
+    const reviewedState=(scope:string,evidenceSha256?:string):RunnerStatus["reviewState"]|undefined=>{
+      if(!evidenceSha256)return undefined;
+      const receipt=this.options.events.getReview(scope,operationId);
+      if(!receipt || receipt.evidence_sha256!==evidenceSha256)return undefined;
+      return receipt.decision==="BLOCKED"?"REVIEW_BLOCKED":receipt.decision;
+    };
     if (record) {
       if(workspaceId && record.status.workspaceId!==workspaceId)
         throw new Error("CODEX_WORKSPACE_MISMATCH");
@@ -521,7 +530,10 @@ export class NativeCodexAgentRunner {
         silence>=120_000?"SUSPECTED_STALL":
         !record.status.nativeEventCount && silence<15_000?"STARTING":
         silence>=15_000?"AWAITING_MODEL":"EVENTS_FLOWING";
-      return {...record.status,elapsedMs:record.status.elapsedMs??elapsed,
+      const persistedReview=record.status.state==="COMPLETED"
+        ?reviewedState(record.status.workspaceId,record.status.evidenceSha256):undefined;
+      return {...record.status,...(persistedReview?{reviewState:persistedReview}:{}),
+        elapsedMs:record.status.elapsedMs??elapsed,
         progressState,
         ...(record.status.state==="RUNNING"?{timeSinceNativeEventMs:silence}:{}),
         activeSelection:config?.active??{model:record.input.model,reasoningEffort:record.input.reasoningEffort},
@@ -534,7 +546,10 @@ export class NativeCodexAgentRunner {
         const config=this.options.events.getRunConfig(workspaceId,operationId);
         let evidence:{exitCode?:unknown;evidenceSha256?:unknown}|undefined;
         if(durable.state==="COMPLETED")try{evidence=this.options.events.getEvidence(workspaceId,operationId) as typeof evidence;}catch{/* Corrupt proof remains unavailable. */}
+        const durableEvidence=typeof evidence?.evidenceSha256==="string"?evidence.evidenceSha256:undefined;
+        const review=durable.state==="COMPLETED"?reviewedState(workspaceId,durableEvidence):undefined;
         return {operationId,workspaceId,state:durable.state,progressState:"FINISHED",
+        ...(review?{reviewState:review}:{}),
         ...(config?{activeSelection:config.active,nextSelection:config.next,configRevision:config.revision}:{}),
         startedAt:durable.startedAt,...(durable.finishedAt?{finishedAt:durable.finishedAt}:{}),
         ...(durable.threadId?{threadId:durable.threadId}:{}),

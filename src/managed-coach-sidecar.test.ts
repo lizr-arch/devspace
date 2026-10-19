@@ -272,7 +272,7 @@ try {
   await readonlyClient.connect(roc);
   try {
     const advertised = (await readonlyClient.listTools()).tools.map((tool) => tool.name);
-    assert.deepEqual(advertised, ["coach_sidecar_status"]);
+    assert.deepEqual(advertised, ["coach_delivery_receipt","coach_sidecar_status"]);
   } finally {
     await readonlyClient.close();
     await readonlyServer.close();
@@ -285,7 +285,7 @@ try {
   const nativeLocks = new JobResourceLocks();
   const nativeSidecar = new ManagedCoachSidecar(nativeLocks, native.path);
   const nativePort = await freePort();
-  const pair = await nativeSidecar.start({ workspaceId: "native-ws", workspaceRoot: workspace, port: nativePort });
+  const pair = await nativeSidecar.start({ workspaceId: "native-ws", workspaceRoot: workspace, port: nativePort, pairedExtensionId:id });
   try {
     const headers = { Authorization: "Bearer " + pair.token };
     const response = await fetch("http://127.0.0.1:" + nativePort + "/events", { headers });
@@ -296,11 +296,48 @@ try {
     assert.equal(data.events[0]?.event_id, eventA.event_id);
     assert.equal(data.events[0]?.operation_id, "native-completed");
     assert.ok(!text.includes("cross-workspace-secret"));
+    const endpoint="http://127.0.0.1:"+nativePort+"/delivery-receipt";
+    const receiptPayload={workspace_id:"native-ws",event_id:eventA.event_id,operation_id:"native-completed"};
+    const payloadHeaders={...headers,Origin:"chrome-extension://"+id,"Content-Type":"application/json"};
+    assert.equal((await fetch(endpoint,{method:"POST",headers,body:JSON.stringify(receiptPayload)})).status,403,
+      "The bearer alone cannot produce a browser-origin receipt");
+    assert.equal((await fetch(endpoint,{method:"POST",headers:{...payloadHeaders,Origin:"https://evil.invalid"},
+      body:JSON.stringify(receiptPayload)})).status,403);
+    assert.equal((await fetch(endpoint,{method:"POST",headers:{...payloadHeaders,Authorization:"Bearer wrong"},
+      body:JSON.stringify(receiptPayload)})).status,401);
+    assert.equal((await fetch(endpoint,{method:"POST",headers:payloadHeaders,
+      body:JSON.stringify({...receiptPayload,workspace_id:"other-ws"})})).status,400);
+    assert.equal((await fetch(endpoint,{method:"POST",headers:payloadHeaders,
+      body:JSON.stringify({...receiptPayload,operation_id:"different"})})).status,404);
+    assert.equal((await fetch(endpoint,{method:"POST",headers:payloadHeaders,
+      body:JSON.stringify({...receiptPayload,unexpected:"forged"})})).status,400);
+    const accepted=await fetch(endpoint,{method:"POST",headers:payloadHeaders,body:JSON.stringify(receiptPayload)});
+    assert.equal(accepted.status,200);
+    assert.equal((await accepted.json() as {receipt:{result:string}}).receipt.result,"dom_submitted");
+    const durableReceipt=nativeSidecar.getDeliveryReceipt("native-ws",eventA.event_id);
+    assert.equal(durableReceipt?.operation_id,"native-completed");
+    const replay=await fetch(endpoint,{method:"POST",headers:payloadHeaders,body:JSON.stringify(receiptPayload)});
+    assert.equal(replay.status,200);
+    assert.equal((await replay.json() as {receipt:{recorded_at:string}}).receipt.recorded_at,
+      durableReceipt?.recorded_at,"duplicate POST must never create a new delivery claim");
+    assert.equal(nativeSidecar.getDeliveryReceipt("other-ws",eventA.event_id),undefined);
     native.submitReview({ workspaceId: "native-ws", eventId: eventA.event_id, decision: "APPROVED", evidenceSha256: "a".repeat(64) });
     const post = await fetch("http://127.0.0.1:" + nativePort + "/events", { headers });
     assert.equal((await post.json() as { pending_count:number }).pending_count, 0);
   } finally { await nativeSidecar.close(); native.close(); }
   assert.equal(nativeLocks.snapshot().length, 0);
+  // A newly started sidecar must recover the already acknowledged identity,
+  // not create a second delivery claim or require the old bearer token.
+  const restartedSidecar=new ManagedCoachSidecar(new JobResourceLocks(),native.path);
+  const restartedPort=await freePort();
+  await restartedSidecar.start({workspaceId:"native-ws",workspaceRoot:workspace,
+    port:restartedPort,pairedExtensionId:id});
+  try {
+    assert.equal(restartedSidecar.getDeliveryReceipt("native-ws",eventA.event_id)?.result,
+      "dom_submitted");
+    assert.equal(restartedSidecar.getDeliveryReceipt("native-ws",eventA.event_id)?.operation_id,
+      "native-completed");
+  } finally {await restartedSidecar.close();}
   console.log("managed coach sidecar + native events + TaskRunner + MCP gates PASS");
 } finally {
   await manager.close();

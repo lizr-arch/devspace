@@ -98,6 +98,25 @@ export function registerSidecarTools(
 
   registerAppTool(
     server,
+    "coach_delivery_receipt",
+    {
+      title: "Inspect Chrome Coach delivery evidence",
+      description: "Read one browser-submitted, bearer-authenticated event receipt after exact Sidecar event identity verification. A DOM submission receipt is not proof ChatGPT accepted the message or completed a review.",
+      inputSchema: {workspaceId:workspaceIdSchema,eventId:z.number().int().positive()},
+      outputSchema: resultOutputSchema({receipt:z.unknown().optional(),error:optionalError}),
+      _meta:{},
+      annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+    },
+    async ({workspaceId,eventId})=>{
+      workspaces.getWorkspace(workspaceId);
+      const receipt=managedCoachSidecar.getDeliveryReceipt?.(workspaceId,eventId);
+      const result=receipt?"Browser DOM submission receipt found.":"No verified browser receipt exists for this event.";
+      return {content:[textBlock(result)],structuredContent:{result,...(receipt?{receipt}:{})}};
+    }
+  );
+
+  registerAppTool(
+    server,
     "coach_sidecar_status",
     {
       title: "Coach feed status",

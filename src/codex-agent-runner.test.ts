@@ -399,6 +399,32 @@ async function gates(){
   assert.throws(()=>restartedRunner.start(makeInput("same-after-restart",durableRetry.space,"different prompt")),
     /DURABLE_IDENTITY_CONFLICT/);
 
+  // Web GPT's persisted decision must supersede the runner's in-memory
+  // READY_FOR_GPT_REVIEW, including after a process restart.
+  const webReview=create();
+  const webOperation="external-webgpt-review-status";
+  const webDone=await webReview.runner.run(makeInput(webOperation,webReview.space,"success"));
+  assert.equal(webDone.reviewState,"READY_FOR_GPT_REVIEW");
+  assert.ok(webDone.eventId && webDone.evidenceSha256);
+  assert.equal(webReview.runner.status(webOperation,"workspace-one").reviewState,
+    "READY_FOR_GPT_REVIEW");
+  assert.throws(()=>webReview.runner.status(webOperation,"other-workspace"),
+    /CODEX_WORKSPACE_MISMATCH/);
+  const webReceipt=webReview.events.submitReview({workspaceId:"workspace-one",
+    eventId:webDone.eventId!,decision:"BLOCKED",evidenceSha256:webDone.evidenceSha256!});
+  assert.equal(webReceipt.decision,"BLOCKED");
+  assert.equal(webReview.runner.status(webOperation,"workspace-one").reviewState,
+    "REVIEW_BLOCKED","persisted decision must invalidate cached runner review state");
+  let accidentalRestart=0;
+  const recoveredWebRunner=new NativeCodexAgentRunner({
+    events:webReview.events,nodePath:NODE,codexPath:fixture,
+    spawn:(file,args,opts)=>{accidentalRestart++;return nativeSpawn(file,args,opts);}
+  });
+  runners.push(recoveredWebRunner);
+  assert.equal(recoveredWebRunner.status(webOperation,"workspace-one").reviewState,
+    "REVIEW_BLOCKED","after restart, the decision must come from durable SQLite");
+  assert.equal(accidentalRestart,0);
+
   const reviewState=mkdtempSync(join(root,"review-state-"));
   const reviewWorkspace=mkdtempSync(join(root,"review-workspace-"));
   const reviewStore=new CoachReviewEventStore(reviewState);

@@ -95,8 +95,11 @@ async function autoState() {
   const target=await autoTarget(), ledger=await autoLedger();
   if(autoReconcileStored(ledger))await autoSaveLedger(ledger);
   const lastCheck=(await chrome.storage.session.get(AUTO_LAST_CHECK))[AUTO_LAST_CHECK]||null;
-  const summary={pending:0,sent:0,needs_attention:0,in_flight:0};
-  for(const x of Object.values(ledger))if(x && summary[x.state]!==undefined)summary[x.state]++;
+  const summary={pending:0,sent:0,needs_attention:0,in_flight:0,receipt_pending:0};
+  for(const x of Object.values(ledger)) {
+    if(x && summary[x.state]!==undefined)summary[x.state]++;
+    if(x?.state==="sent" && x.receiptState==="pending")summary.receipt_pending++;
+  }
   const recent=Object.entries(ledger).filter(([,x])=>x?.state!=="merged")
     .slice(-10).reverse()
     .map(([key,x])=>({key,state:x.state,at:x.at||"",reason:x.reason||""}));
@@ -170,6 +173,36 @@ async function autoResolve(key,action) {
   if(action==="retry")void autoPump();
   return {ok:true,state:await autoState()};
 }
+// Receipt upload is never a second ChatGPT send. A server ACK is retryable,
+// while the browser's durable "sent" record remains permanently deduplicated.
+// Only an actual content-script DOM submission can create a receipt.
+async function autoSyncReceipts(pair,ledger) {
+  let attempts=0;
+  for(const record of Object.values(ledger)) {
+    if(record?.state!=="sent" || record.receiptState!=="pending")continue;
+    if(++attempts>5)break;
+    const identity=record.receiptIdentity;
+    if(!identity || !AUTO_ID.test(identity.workspace_id) ||
+       !AUTO_ID.test(identity.operation_id) ||
+       !Number.isSafeInteger(identity.event_id) || identity.event_id<=0)continue;
+    try {
+      const response=await fetch("http://127.0.0.1:"+pair.port+"/delivery-receipt",{
+        method:"POST",cache:"no-store",
+        headers:{Authorization:"Bearer "+pair.token,"Content-Type":"application/json"},
+        body:JSON.stringify(identity)
+      });
+      if(!response.ok)continue;
+      const data=await response.json();
+      if(data?.ok!==true || data.receipt?.result!=="dom_submitted" ||
+         data.receipt.workspace_id!==identity.workspace_id ||
+         data.receipt.operation_id!==identity.operation_id ||
+         data.receipt.event_id!==identity.event_id)continue;
+      record.receiptState="synced";
+      record.receiptAt=data.receipt.recorded_at;
+      await autoSaveLedger(ledger);
+    } catch { /* Keep durable pending receipt. Never re-submit the chat. */ }
+  }
+}
 async function autoPump() {
   if(autoBusy)return;
   autoBusy=true;
@@ -216,6 +249,7 @@ async function autoPump() {
         ledger[key]={state:"pending",at:new Date().toISOString(),reason:""};
     }
     await autoSaveLedger(ledger);
+    await autoSyncReceipts(pair,ledger);
     // Never silently truncate deduplication history; manual maintenance is required.
     if(events.some(e=>!ledger[autoKey(e)])) {
       code="ledger_full";message="事件账本已达到安全上限";return;
@@ -262,9 +296,13 @@ async function autoPump() {
     const definitelyNotSent=result?.ok===false && result?.notSubmitted===true;
     current[key]={state:submitted?"sent":definitelyNotSent?"pending":"needs_attention",
       at:new Date().toISOString(),
+      ...(submitted?{receiptState:"pending",
+        receiptIdentity:{event_id:candidate.event_id,workspace_id:candidate.workspace_id,
+          operation_id:candidate.operation_id}}:{}),
       reason:submitted ? "DOM 已提交（尚不代表 Web GPT 审核完成）" :
       String(result?.reason||"DOM 结果不确定，需人工检查").slice(0,120)};
     await autoSaveLedger(current);
+    if(submitted)await autoSyncReceipts(pair,current);
     code=submitted?"dom_submitted":definitelyNotSent?"not_submitted":"needs_attention";
     message=submitted?"网页输入框已提交，仍需确认服务端收到":
       (String(result?.reason||"网页投递结果不确定").slice(0,120));
