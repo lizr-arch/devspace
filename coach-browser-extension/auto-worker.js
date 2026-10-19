@@ -7,6 +7,13 @@ const AUTO_ALARM = "coach-auto-delivery";
 const AUTO_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const AUTO_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 let autoBusy = false;
+const AUTO_LAST_CHECK = "coachAutoLastCheck";
+const autoVersion = () => chrome.runtime.getManifest?.()?.version || "unknown";
+async function autoRecordCheck(code,message) {
+  await chrome.storage.session.set({[AUTO_LAST_CHECK]:{
+    code,message,at:new Date().toISOString()
+  }});
+}
 
 function autoCanonical(url) {
   try {
@@ -31,6 +38,7 @@ function autoKey(e) {return (e.workspace_id||"unknown") + ":" + e.operation_id +
 // trusted feed supplies the exact same (operation_id, event_id) pair.
 // Keep a "merged" audit marker, never silently discard a prior send outcome.
 function autoReconcileLegacy(ledger,events) {
+  let changed=false;
   for(const e of events) {
     if(!e.workspace_id)continue;
     const oldKey="unknown:"+e.operation_id+":"+e.event_id;
@@ -47,7 +55,28 @@ function autoReconcileLegacy(ledger,events) {
       reason:winning?.reason||"由旧版无工作区事件记录安全归并"};
     ledger[oldKey]={...old,state:"merged",mergedInto:newKey,
       reason:"旧版标识已归并；原状态："+old.state};
+    changed=true;
   }
+  return changed;
+}
+// Passive, exact identity-only migration: no network, no DOM or message send.
+// A stored scoped key is already evidence of the same trusted Sidecar identity.
+// Ambiguous matches across workspaces stay untouched.
+function autoReconcileStored(ledger) {
+  const records=Object.keys(ledger);
+  const events=[];
+  for(const key of records) {
+    const m=/^unknown:(.+):([1-9][0-9]*)$/.exec(key);
+    if(!m || ledger[key]?.state==="merged")continue;
+    const suffix=":"+m[1]+":"+m[2];
+    const scoped=records.filter(k=>k!==key&&!k.startsWith("unknown:")&&
+      k.endsWith(suffix)&&ledger[k]?.state!=="merged");
+    if(scoped.length!==1)continue;
+    const workspace=scoped[0].slice(0,-suffix.length);
+    if(!AUTO_ID.test(workspace))continue;
+    events.push({workspace_id:workspace,operation_id:m[1],event_id:Number(m[2])});
+  }
+  return autoReconcileLegacy(ledger,events);
 }
 function autoValid(e) {
   return e && e.event_type === "READY_FOR_GPT_REVIEW" &&
@@ -64,13 +93,18 @@ function autoInstruction(e) {
 }
 async function autoState() {
   const target=await autoTarget(), ledger=await autoLedger();
+  if(autoReconcileStored(ledger))await autoSaveLedger(ledger);
+  const lastCheck=(await chrome.storage.session.get(AUTO_LAST_CHECK))[AUTO_LAST_CHECK]||null;
   const summary={pending:0,sent:0,needs_attention:0,in_flight:0};
   for(const x of Object.values(ledger))if(x && summary[x.state]!==undefined)summary[x.state]++;
   const recent=Object.entries(ledger).filter(([,x])=>x?.state!=="merged")
     .slice(-10).reverse()
     .map(([key,x])=>({key,state:x.state,at:x.at||"",reason:x.reason||""}));
   return {enabled:!!target?.enabled, bound:!!target?.url, url:target?.url||"",
-    tabId:target?.tabId??null,summary,recent};
+    version:autoVersion(), lastCheck,
+    blocking:summary.needs_attention>0 ?
+      "有 "+summary.needs_attention+" 条发送结果待人工核实，已暂停队列":""
+    ,tabId:target?.tabId??null,summary,recent};
 }
 async function autoBind() {
   const tabs=await chrome.tabs.query({active:true,currentWindow:true});
@@ -100,8 +134,8 @@ async function autoUnbind() {
 async function autoReady(tabId,url) {
   const ping=async()=>{
     try {
-      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING"});
-      return ready?.ok===true && ready.url===url;
+      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING_V3"});
+      return ready?.ok===true && ready.protocol===3 && ready.url===url;
     } catch { return false; }
   };
   if(await ping())return {ok:true};
@@ -136,24 +170,35 @@ async function autoResolve(key,action) {
 async function autoPump() {
   if(autoBusy)return;
   autoBusy=true;
+  let code="checking",message="正在检查";
   try {
     const target=await autoTarget();
-    if(!target?.enabled || !autoCanonical(target.url) || !Number.isSafeInteger(target.tabId))return;
+    if(!target?.enabled || !autoCanonical(target.url) || !Number.isSafeInteger(target.tabId)) {
+      code="not_enabled";message="未绑定或自动发送已暂停";return;
+    }
     const pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
     if(!pair || !Number.isInteger(pair.port) || pair.port<1 || pair.port>65535 ||
-       !AUTO_TOKEN.test(pair.token))return;
+       !AUTO_TOKEN.test(pair.token)) {
+      code="not_paired";message="未配对有效的 Sidecar 会话";return;
+    }
     const tab=await chrome.tabs.get(target.tabId).catch(()=>null);
-    if(autoCanonical(tab?.url)!==target.url)return; // wrong tab never receives instructions
+    if(autoCanonical(tab?.url)!==target.url) {
+      code="wrong_tab";message="已绑定标签页不在原对话";return;
+    } // wrong tab never receives instructions
     const response=await fetch("http://127.0.0.1:"+pair.port+"/events",{
       method:"GET",cache:"no-store",headers:{Authorization:"Bearer "+pair.token}
     });
-    if(!response.ok)return;
+    if(!response.ok) {
+      code="sidecar_http";message="Sidecar 请求未通过（HTTP "+response.status+"）";return;
+    }
     const body=await response.json();
     // /events is capped at 50. An incomplete page cannot prove queue completeness.
     // Halt rather than incorrectly treating a partial queue as fully delivered.
     if(!Array.isArray(body.events)||body.events.length>50 ||
        !Number.isSafeInteger(body.pending_count) ||
-       body.pending_count < body.events.length || body.pending_count>body.events.length)return;
+       body.pending_count < body.events.length || body.pending_count>body.events.length) {
+      code="invalid_feed";message="Sidecar 队列不完整或格式不匹配，停止发送";return;
+    }
     const ledger=await autoLedger();
     // In-flight from a prior service-worker lifetime is an unknown outcome.
     for(const [k,r] of Object.entries(ledger)) {
@@ -169,11 +214,17 @@ async function autoPump() {
     }
     await autoSaveLedger(ledger);
     // Never silently truncate deduplication history; manual maintenance is required.
-    if(events.some(e=>!ledger[autoKey(e)]))return;
+    if(events.some(e=>!ledger[autoKey(e)])) {
+      code="ledger_full";message="事件账本已达到安全上限";return;
+    }
     // Unresolved unknown delivery stops automatic progression, to avoid duplicates.
-    if(Object.values(ledger).some(x=>x.state==="needs_attention"))return;
+    if(Object.values(ledger).some(x=>x.state==="needs_attention")) {
+      code="needs_attention";message="有发送结果待人工核实；禁止自动重发";return;
+    }
     const candidate=events.find(e=>ledger[autoKey(e)]?.state==="pending");
-    if(!candidate)return;
+    if(!candidate) {
+      code="no_candidate";message="已同步 Sidecar，没有新的待投递事件";return;
+    }
     const key=autoKey(candidate);
     // Readiness/injection is safe to repeat: it never edits or submits a message.
     // On failure retain pending rather than converting "definitely not sent"
@@ -182,7 +233,7 @@ async function autoPump() {
     if(!prepared.ok) {
       ledger[key]={state:"pending",at:new Date().toISOString(),reason:prepared.reason};
       await autoSaveLedger(ledger);
-      return;
+      code="content_unreachable";message=prepared.reason;return;
     }
     ledger[key]={state:"in_flight",at:new Date().toISOString(),reason:"正在发送"};
     await autoSaveLedger(ledger); // durable BEFORE any DOM action
@@ -193,12 +244,12 @@ async function autoPump() {
        autoCanonical(latestTab?.url)!==target.url) {
       ledger[key]={state:"pending",at:new Date().toISOString(),reason:"绑定会话或授权已变化，取消发送"};
       await autoSaveLedger(ledger);
-      return;
+      code="grant_changed";message="发送前授权或标签页已变化";return;
     }
     let result=null;
     try {
       result=await chrome.tabs.sendMessage(target.tabId,{
-        type:"COACH_AUTO_DELIVER_V2",url:target.url,instruction:autoInstruction(candidate)
+        type:"COACH_AUTO_DELIVER_V3",url:target.url,instruction:autoInstruction(candidate)
       });
     }catch{result={ok:false,uncertain:true,reason:"内容脚本不可达"};}
     // Re-read durable state: user may have disabled/unbound while DOM action ran.
@@ -211,9 +262,16 @@ async function autoPump() {
       reason:submitted ? "DOM 已提交（尚不代表 Web GPT 审核完成）" :
       String(result?.reason||"DOM 结果不确定，需人工检查").slice(0,120)};
     await autoSaveLedger(current);
+    code=submitted?"dom_submitted":definitelyNotSent?"not_submitted":"needs_attention";
+    message=submitted?"网页输入框已提交，仍需确认服务端收到":
+      (String(result?.reason||"网页投递结果不确定").slice(0,120));
   }catch{
+    code="unexpected_error";message="队列读取或提交异常，保留不确定发送状态";
     // In-flight marker remains durable and will become needs_attention on next poll.
-  }finally{autoBusy=false;}
+  }finally{
+    await autoRecordCheck(code,message).catch(()=>{});
+    autoBusy=false;
+  }
 }
 chrome.runtime.onInstalled.addListener(()=>chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5}));
 chrome.runtime.onStartup.addListener(()=>chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5}));

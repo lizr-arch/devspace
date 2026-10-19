@@ -55,6 +55,18 @@
 
 部署提示：在 `chrome://extensions` 重载同路径 DevSpace Coach Watch **0.3.2**，必要时重新配对并绑定当前 ChatGPT 对话。恢复发送前先核查旧事件 #10 是否实际出现在聊天中；确认没有发送后方可使用「确认未发出，重试」。新版本不会自行处理旧版的不确定记录。原 DevSpace Sidecar 不需要重启。
 
+## 2026-10-19 · Chrome 0.3.3 热修复：旧内容脚本残留与透明状态
+
+现场反馈在 0.3.2 提交后仍为 `pending=9, sent=0, needs_attention=1`，因此原新版本并未完成队列迁移，不能声称浏览器端已通过。进一步发现一个真实协议漏洞：旧扩展加载过的页面内容脚本可能在 Chrome 扩展重载后仍回应原 `COACH_AUTO_PING`；0.3.2 无法识别其内容脚本版本，会错把旧编辑器代码视为可用。
+
+0.3.3 使用独立 `COACH_AUTO_PING_V3` + `COACH_AUTO_DELIVER_V3` 和回包 `protocol:3` 校验。旧 V2 脚本不处理 V3 投递，新代码即使同页保留旧监听器也只安装一次 V3 监听器。后台只有确认 V3 回包才复用旧标签页，否则为已绑定 ChatGPT 标签页重新注入新版脚本。
+
+**被动迁移**：读取弹窗状态时，只根据本地账本中唯一匹配的已授权 `workspaceId:operationId:eventId` 与旧 `unknown:operationId:eventId` 进行安全归并，无需网络、不触发发送；找不到唯一工作区的不动。历史不确定态仍须用户核实，不能因为迁移而自动重新发送。
+
+**诊断可见性**：弹窗显示扩展实际运行版本、最近轮询结果、队列阻断原因；`现在检查一次` 不再一律提示“操作成功”。无效配对、Sidecar HTTP 拒绝、未绑定/未启用、队列锁定都有不同状态。仍不展示令牌或聊天内容。
+
+原 Sidecar 可继续运行，无需重启。只需在原 `chrome://extensions` 重载同目录扩展，并确认弹窗显示 **v0.3.3**；若看到仍为旧版本，则本地 Chrome 尚未加载此次源文件，不能把队列的旧数值解释为 0.3.3 运行结果。重载后留意仍有一条 `needs_attention`，先核实原对话未发送后再人工重试。所有测试是 Node 模拟；尚无真实 Chrome 发送成功证据。
+
 ## 裁决
 
 `ISOLATED_IMPLEMENTATION_DONE`；`MOCK_E2E_PASS`；`REAL_CHROME_DELIVERY_NOT_RUN`；`PRODUCTION_DEPLOY_NOT_RUN`。

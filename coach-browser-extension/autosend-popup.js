@@ -5,7 +5,10 @@ async function autoStatus() {
   if (!result || !result.ok) return;
   const state = result.state;
   findAuto("auto-target").textContent = state.url || "未绑定 ChatGPT 对话";
-  findAuto("auto-status").textContent = state.enabled ? "自动发送已启用" : "自动发送已暂停";
+  findAuto("auto-status").textContent = (state.enabled ? "自动发送已启用" : "自动发送已暂停") + " · 扩展 v" + (state.version || chrome.runtime.getManifest().version);
+  findAuto("auto-diagnostic").textContent = state.blocking || (state.lastCheck ?
+    ("最近检查：" + state.lastCheck.message + "（" + state.lastCheck.code + "）") :
+    "还没有运行队列检查");
   findAuto("auto-count").textContent = JSON.stringify(state.summary);
   const list = findAuto("auto-list");
   list.replaceChildren();
@@ -37,7 +40,9 @@ for (const [id,type] of [
   findAuto(id).addEventListener("click",async () => {
     try {
       const result = await chrome.runtime.sendMessage({type});
-      findAuto("auto-feedback").textContent = result.ok ? "操作成功" : (result.error || "操作失败");
+      findAuto("auto-feedback").textContent = !result.ok ? (result.error || "操作失败") :
+        type==="COACH_AUTO_PUMP" ?
+        (result.state?.blocking || result.state?.lastCheck?.message || "已检查队列") : "操作成功";
       await autoStatus();
     } catch {
       findAuto("auto-feedback").textContent = "后台通信失败";

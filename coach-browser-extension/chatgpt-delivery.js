@@ -1,9 +1,10 @@
 "use strict";
 // Isolated-world script: neither reads the conversation nor contacts the network.
 (() => {
-  // Re-injection after a Chrome extension reload must not install duplicate listeners.
-  if (globalThis.__devspaceCoachDeliveryInstalled) return;
-  globalThis.__devspaceCoachDeliveryInstalled = true;
+  // V2 content scripts can survive an extension reload in an open ChatGPT tab.
+  // V3 must coexist safely: only this version handles V3 messages.
+  if (globalThis.__devspaceCoachDeliveryV3Installed) return;
+  globalThis.__devspaceCoachDeliveryV3Installed = true;
   const canonical=url=>{
     try {
       const u=new URL(url);
@@ -86,11 +87,11 @@
     finally{sending=false;}
   }
   chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
-    if(msg?.type==="COACH_AUTO_PING") {
-      reply({ok:true,url:canonical(location.href)});
+    if(msg?.type==="COACH_AUTO_PING_V3") {
+      reply({ok:true,protocol:3,url:canonical(location.href)});
       return false;
     }
-    if(msg?.type!=="COACH_AUTO_DELIVER_V2")return false;
+    if(msg?.type!=="COACH_AUTO_DELIVER_V3")return false;
     void deliver(msg).then(reply).catch(()=>reply({ok:false,uncertain:true,reason:"投递异常"}));
     return true;
   });

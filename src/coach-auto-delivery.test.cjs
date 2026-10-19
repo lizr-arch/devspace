@@ -20,7 +20,7 @@ function workerHarness(overrides={}) {
   const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[];
   const tab={id:42,url:URL_OK};
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
-  let contentReady=true,injectionFailure=false;
+  let contentReady=true,injectionFailure=false,pingProtocol=3;
   const chrome={
     storage:{
       session:{async get(k){return {[k]:session[k]};},async set(v){Object.assign(session,v);},async remove(k){delete session[k];}},
@@ -29,9 +29,9 @@ function workerHarness(overrides={}) {
     tabs:{
       async query(){return [tab];},async get(id){if(id!==42)throw Error("tab_gone");return tab;},
       async sendMessage(id,m){
-        if(m.type==="COACH_AUTO_PING"){
+        if(m.type==="COACH_AUTO_PING_V3"){
           if(!contentReady)throw Error("Receiving end does not exist");
-          return {ok:true,url:tab.url};
+          return {ok:true,protocol:pingProtocol,url:tab.url};
         }
         messages.push({id,m});return typeof delivered==="function"?delivered(id,m):delivered;
       },
@@ -41,9 +41,9 @@ function workerHarness(overrides={}) {
     scripting:{async executeScript(args){
       injections.push(args);
       if(injectionFailure)throw Error("host permission denied");
-      contentReady=true;
+      contentReady=true;pingProtocol=3;
     }},
-    runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},
+    runtime:{getManifest:()=>({version:"0.3.3"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
@@ -63,7 +63,8 @@ function workerHarness(overrides={}) {
   async function drain(){for(let i=0;i<5;i++)await tick();}
   return {session,local,tab,messages,injections,msg,drain,tabUpdates,tabRemovals,
     setEvents:x=>{events=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
-    setContentReady:x=>{contentReady=x;},setInjectionFailure:x=>{injectionFailure=x;},
+    setContentReady:x=>{contentReady=x;},setPingProtocol:x=>{pingProtocol=x;},
+    setInjectionFailure:x=>{injectionFailure=x;},
     async poll(){await vm.runInContext("autoPump()",context);}
   };
 }
@@ -88,7 +89,7 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  await h.drain();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal(h.messages[0].id,42);
- assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V2");
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V3");
  assert.match(h.messages[0].m.instruction,/APPROVED \/ REWORK \/ BLOCKED/);
  assert.match(h.messages[0].m.instruction,/codex-qa/);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
@@ -104,6 +105,16 @@ test("reloaded extension reinjects script into already-open ChatGPT tab before s
  assert.equal(h.injections[0].target.tabId,42);
  assert.deepEqual(Array.from(h.injections[0].files),["chatgpt-delivery.js"]);
  assert.equal(h.messages.length,1);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
+});
+test("old content script replies but is rejected by v3 protocol and replaced safely",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setPingProtocol(2); // prior injected page responds to old version
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.drain();await h.poll();
+ assert.equal(h.injections.length,1);
+ assert.equal(h.messages.length,1);
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V3");
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
 test("script injection permission denial never sends and keeps event pending",async()=>{
@@ -129,6 +140,41 @@ test("legacy unknown and scoped records coalesce without replaying uncertain del
  assert.equal(s.summary.pending,0);assert.equal(s.summary.needs_attention,1);
  assert.equal(s.recent.length,1);
  assert.equal(h.local.coachAutoLedger["unknown:codex-qa:12"].state,"merged");
+ assert.equal(h.messages.length,0);
+});
+test("opening extension popup reconciles scoped and unknown keys even when queue is blocked",async()=>{
+ const h=workerHarness();
+ h.local.coachAutoLedger={
+   "unknown:codex-qa:12":{state:"pending",at:"old"},
+   "ws-qa:codex-qa:12":{state:"needs_attention",reason:"旧版脚本的编辑器失败"}
+ };
+ const state=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(state.version,"0.3.3");
+ assert.equal(state.summary.needs_attention,1);
+ assert.equal(state.summary.pending,0);
+ assert.match(state.blocking,/人工核实/);
+ assert.equal(h.local.coachAutoLedger["unknown:codex-qa:12"].state,"merged");
+ assert.equal(h.messages.length,0);
+});
+test("ambiguous workspace matches preserve original ledger identities on offline status",async()=>{
+ const h=workerHarness();
+ h.local.coachAutoLedger={
+   "unknown:codex-qa:12":{state:"pending"},
+   "ws-qa:codex-qa:12":{state:"pending"},
+   "ws-other:codex-qa:12":{state:"pending"}
+ };
+ const state=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(state.summary.pending,3);
+ assert.equal(h.local.coachAutoLedger["unknown:codex-qa:12"].state,"pending");
+});
+test("manual Check reports blocker instead of generic success even with a working Sidecar",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"needs_attention"}};
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();
+ const res=await h.msg("COACH_AUTO_PUMP");
+ assert.equal(res.ok,true);
+ assert.equal(res.state.lastCheck.code,"needs_attention");
+ assert.equal(res.state.summary.needs_attention,1);
  assert.equal(h.messages.length,0);
 });
 test("confirmed legacy sent state suppresses scoped duplicate send",async()=>{
@@ -249,23 +295,42 @@ function domHarness(options={}) {
  window.top=window;
  const location={href:options.url||URL_OK};
  const chrome={runtime:{onMessage:{addListener(f){handlers.push(f);}}}};
+ if(options.oldContentScript)handlers.push((m,_sender,reply)=>{
+   if(m?.type==="COACH_AUTO_PING"){reply({ok:true,url:URL_OK});return false;}
+   return false;
+ });
  const context=vm.createContext({document,window,chrome,location,URL,
    getComputedStyle:()=>({display:"block",visibility:"visible"}),
    setTimeout:(fn)=>fn(),Promise,Error,String,Array,Number});
  vm.runInContext(content,context);
  return {editor,button,location,handlers,context,
-   ping:()=>new Promise(resolve=>handlers[0]({type:"COACH_AUTO_PING"},null,resolve)),
+   ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V3"},null,resolve)),
    reinject:()=>vm.runInContext(content,context),
    deliver:(url=URL_OK)=>new Promise(resolve=>handlers[0](
-     {type:"COACH_AUTO_DELIVER_V2",url,instruction:"请以 Web GPT Coach 身份独立审核测试事件"},null,resolve))};
+     {type:"COACH_AUTO_DELIVER_V3",url,instruction:"请以 Web GPT Coach 身份独立审核测试事件"},null,resolve))};
 }
 test("content-script ping is read-only and reinjection never duplicates listeners",async()=>{
  const p=domHarness({draft:"用户草稿"});
  const first=await p.ping();
  assert.equal(first.ok,true);assert.equal(first.url,URL_OK);
+ assert.equal(first.protocol,3);
  assert.equal(p.editor.innerText,"用户草稿");
  p.reinject();p.reinject();
  assert.equal(p.handlers.length,1);
+});
+test("new v3 content-script registration coexists with old v2 listener without duplicate send",async()=>{
+ const p=domHarness({oldContentScript:true});
+ assert.equal(p.handlers.length,2);
+ const ping=await p.ping();assert.equal(ping.protocol,3);
+ const msg={type:"COACH_AUTO_DELIVER_V3",url:URL_OK,
+   instruction:"请以 Web GPT Coach 身份独立审核测试事件"};
+ let oldCalled=0;
+ const old=p.handlers[0];
+ assert.equal(old(msg,null,()=>oldCalled++),false);
+ assert.equal(oldCalled,0);
+ const res=await new Promise(resolve=>p.handlers[1](msg,null,resolve));
+ assert.equal(res.ok,true);assert.equal(res.submitted,true);
+ p.reinject();assert.equal(p.handlers.length,2);
 });
 test("missing composer reports conclusively no submission",async()=>{
  const p=domHarness({missing:true});
