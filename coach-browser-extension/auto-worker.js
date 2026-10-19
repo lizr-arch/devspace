@@ -134,8 +134,8 @@ async function autoUnbind() {
 async function autoReady(tabId,url) {
   const ping=async()=>{
     try {
-      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING_V3"});
-      return ready?.ok===true && ready.protocol===3 && ready.url===url;
+      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING_V4"});
+      return ready?.ok===true && ready.protocol===4 && ready.url===url;
     } catch { return false; }
   };
   if(await ping())return {ok:true};
@@ -159,9 +159,12 @@ async function autoReady(tabId,url) {
 }
 async function autoResolve(key,action) {
   const ledger=await autoLedger(),r=ledger[key];
-  if(!r||r.state!=="needs_attention") return {ok:false,error:"仅可处理待人工核实记录"};
-  if(action==="mark_sent") ledger[key]={...r,state:"sent",reason:"人工确认已发送",at:new Date().toISOString()};
-  else if(action==="retry") ledger[key]={...r,state:"pending",reason:"人工核实未发送后重试",at:new Date().toISOString()};
+  if(!r || !["pending","needs_attention"].includes(r.state))
+    return {ok:false,error:"仅可处理待发送或待人工核实记录"};
+  if(action==="mark_sent") ledger[key]={...r,state:"sent",
+    reason:"用户确认消息已在目标对话中手动发送",at:new Date().toISOString()};
+  else if(action==="retry" && r.state==="needs_attention")
+    ledger[key]={...r,state:"pending",reason:"人工核实未发送后重试",at:new Date().toISOString()};
   else return {ok:false,error:"invalid_action"};
   await autoSaveLedger(ledger);
   if(action==="retry")void autoPump();
@@ -249,7 +252,7 @@ async function autoPump() {
     let result=null;
     try {
       result=await chrome.tabs.sendMessage(target.tabId,{
-        type:"COACH_AUTO_DELIVER_V3",url:target.url,instruction:autoInstruction(candidate)
+        type:"COACH_AUTO_DELIVER_V4",url:target.url,instruction:autoInstruction(candidate)
       });
     }catch{result={ok:false,uncertain:true,reason:"内容脚本不可达"};}
     // Re-read durable state: user may have disabled/unbound while DOM action ran.

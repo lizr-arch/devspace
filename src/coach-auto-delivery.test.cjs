@@ -20,7 +20,7 @@ function workerHarness(overrides={}) {
   const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[];
   const tab={id:42,url:URL_OK};
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
-  let contentReady=true,injectionFailure=false,pingProtocol=3;
+  let contentReady=true,injectionFailure=false,pingProtocol=4;
   const chrome={
     storage:{
       session:{async get(k){return {[k]:session[k]};},async set(v){Object.assign(session,v);},async remove(k){delete session[k];}},
@@ -29,7 +29,7 @@ function workerHarness(overrides={}) {
     tabs:{
       async query(){return [tab];},async get(id){if(id!==42)throw Error("tab_gone");return tab;},
       async sendMessage(id,m){
-        if(m.type==="COACH_AUTO_PING_V3"){
+        if(m.type==="COACH_AUTO_PING_V4"){
           if(!contentReady)throw Error("Receiving end does not exist");
           return {ok:true,protocol:pingProtocol,url:tab.url};
         }
@@ -41,9 +41,9 @@ function workerHarness(overrides={}) {
     scripting:{async executeScript(args){
       injections.push(args);
       if(injectionFailure)throw Error("host permission denied");
-      contentReady=true;pingProtocol=3;
+      contentReady=true;pingProtocol=4;
     }},
-    runtime:{getManifest:()=>({version:"0.3.3"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
+    runtime:{getManifest:()=>({version:"0.3.4"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
@@ -89,7 +89,7 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  await h.drain();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal(h.messages[0].id,42);
- assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V3");
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V4");
  assert.match(h.messages[0].m.instruction,/APPROVED \/ REWORK \/ BLOCKED/);
  assert.match(h.messages[0].m.instruction,/codex-qa/);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
@@ -107,14 +107,14 @@ test("reloaded extension reinjects script into already-open ChatGPT tab before s
  assert.equal(h.messages.length,1);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
-test("old content script replies but is rejected by v3 protocol and replaced safely",async()=>{
+test("old content script replies but is rejected by v4 protocol and replaced safely",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- h.setPingProtocol(2); // prior injected page responds to old version
+ h.setPingProtocol(3); // prior injected V3 script responds to previous version
  await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
  await h.drain();await h.poll();
  assert.equal(h.injections.length,1);
  assert.equal(h.messages.length,1);
- assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V3");
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V4");
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
 test("script injection permission denial never sends and keeps event pending",async()=>{
@@ -149,7 +149,7 @@ test("opening extension popup reconciles scoped and unknown keys even when queue
    "ws-qa:codex-qa:12":{state:"needs_attention",reason:"旧版脚本的编辑器失败"}
  };
  const state=(await h.msg("COACH_AUTO_STATUS")).state;
- assert.equal(state.version,"0.3.3");
+ assert.equal(state.version,"0.3.4");
  assert.equal(state.summary.needs_attention,1);
  assert.equal(state.summary.pending,0);
  assert.match(state.blocking,/人工核实/);
@@ -198,6 +198,26 @@ test("incomplete Sidecar event page never silently delivers a truncated queue",a
  await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
  assert.equal(h.messages.length,0);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,0);
+});
+test("user may mark manually sent pending event without an automatic duplicate",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"pending",reason:"准备发送"}};
+ const marked=await h.msg("COACH_AUTO_RESOLVE",
+   {key:"ws-qa:codex-qa:12",action:"mark_sent"});
+ assert.equal(marked.ok,true);
+ assert.equal(marked.state.summary.sent,1);
+ assert.equal(marked.state.summary.pending,0);
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.drain();await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.match(h.local.coachAutoLedger["ws-qa:codex-qa:12"].reason,/手动发送/);
+});
+test("pending manual mark never permits a retry without a failed send",async()=>{
+ const h=workerHarness();
+ h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"pending"}};
+ const r=await h.msg("COACH_AUTO_RESOLVE",{key:"ws-qa:codex-qa:12",action:"retry"});
+ assert.equal(r.ok,false);
+ assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"pending");
 });
 test("old Sidecar lacking workspace_id still notifies, explicitly marking uncertainty",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
@@ -270,16 +290,25 @@ test("unpairing sidecar removes ability to send new events",async()=>{
 });
 function domHarness(options={}) {
  const handlers=[];
+ let buttonChecks=0,clicks=0;
  const editor={isConnected:true,hidden:false,innerText:options.draft||"",
    textContent:options.draft||"",isContentEditable:!options.noEditable,
-   getAttribute:name=>name==="contenteditable"&&!options.noEditable?"true":null,focus(){}};
+   getAttribute:name=>name==="contenteditable"&&!options.noEditable?"true":null,
+   closest:name=>name==="form"&&options.formSubmit?form:null,focus(){}};
  const extraEditor={...editor,innerText:"",textContent:""};
- const button={isConnected:true,hidden:false,disabled:!!options.disabled,
-   getAttribute:()=>null,click(){if(!options.noClear){editor.innerText="";editor.textContent="";}}};
+ const button={isConnected:true,hidden:false,
+   get disabled(){return !!options.disabled;},
+   getAttribute:()=>null,
+   click(){clicks++;if(!options.noClear){editor.innerText="";editor.textContent="";}}};
+ const form={querySelectorAll:q=>q==='button[type="submit"]'?[button]:[]};
  const document={
    querySelectorAll(q){
      if(options.missing)return [];
-     if(q.startsWith("button[data-testid=\"send-button\"]"))return [button];
+     if(q.startsWith("button[data-testid=\"send-button\"]")){
+       buttonChecks++;
+       if(options.missingSend||buttonChecks<(options.readyAfterChecks||1)||options.formSubmit)return [];
+       return [button];
+     }
      const mode=options.editorMode||"legacy";
      if(q.startsWith("#prompt-textarea"))return ["legacy","multi"].includes(mode)?[editor]:[];
      if(q.includes('aria-label="Ask ChatGPT"'))return mode==="multi"?[extraEditor]:
@@ -296,7 +325,7 @@ function domHarness(options={}) {
  const location={href:options.url||URL_OK};
  const chrome={runtime:{onMessage:{addListener(f){handlers.push(f);}}}};
  if(options.oldContentScript)handlers.push((m,_sender,reply)=>{
-   if(m?.type==="COACH_AUTO_PING"){reply({ok:true,url:URL_OK});return false;}
+   if(m?.type==="COACH_AUTO_PING_V3"){reply({ok:true,protocol:3,url:URL_OK});return false;}
    return false;
  });
  const context=vm.createContext({document,window,chrome,location,URL,
@@ -304,25 +333,26 @@ function domHarness(options={}) {
    setTimeout:(fn)=>fn(),Promise,Error,String,Array,Number});
  vm.runInContext(content,context);
  return {editor,button,location,handlers,context,
-   ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V3"},null,resolve)),
+   getClicks:()=>clicks,getButtonChecks:()=>buttonChecks,
+   ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V4"},null,resolve)),
    reinject:()=>vm.runInContext(content,context),
    deliver:(url=URL_OK)=>new Promise(resolve=>handlers[0](
-     {type:"COACH_AUTO_DELIVER_V3",url,instruction:"请以 Web GPT Coach 身份独立审核测试事件"},null,resolve))};
+     {type:"COACH_AUTO_DELIVER_V4",url,instruction:"请以 Web GPT Coach 身份独立审核测试事件"},null,resolve))};
 }
 test("content-script ping is read-only and reinjection never duplicates listeners",async()=>{
  const p=domHarness({draft:"用户草稿"});
  const first=await p.ping();
  assert.equal(first.ok,true);assert.equal(first.url,URL_OK);
- assert.equal(first.protocol,3);
+ assert.equal(first.protocol,4);
  assert.equal(p.editor.innerText,"用户草稿");
  p.reinject();p.reinject();
  assert.equal(p.handlers.length,1);
 });
-test("new v3 content-script registration coexists with old v2 listener without duplicate send",async()=>{
+test("new v4 content-script registration coexists with old v3 listener without duplicate send",async()=>{
  const p=domHarness({oldContentScript:true});
  assert.equal(p.handlers.length,2);
- const ping=await p.ping();assert.equal(ping.protocol,3);
- const msg={type:"COACH_AUTO_DELIVER_V3",url:URL_OK,
+ const ping=await p.ping();assert.equal(ping.protocol,4);
+ const msg={type:"COACH_AUTO_DELIVER_V4",url:URL_OK,
    instruction:"请以 Web GPT Coach 身份独立审核测试事件"};
  let oldCalled=0;
  const old=p.handlers[0];
@@ -331,6 +361,37 @@ test("new v3 content-script registration coexists with old v2 listener without d
  const res=await new Promise(resolve=>p.handlers[1](msg,null,resolve));
  assert.equal(res.ok,true);assert.equal(res.submitted,true);
  p.reinject();assert.equal(p.handlers.length,2);
+});
+test("auto-click waits for delayed ChatGPT send control and clicks only once",async()=>{
+ const page=domHarness({readyAfterChecks:6});
+ const result=await page.deliver();
+ assert.equal(result.ok,true);
+ assert.equal(result.submitted,true);
+ assert.ok(page.getButtonChecks()>=6);
+ assert.equal(page.getClicks(),1);
+});
+test("auto-click accepts a unique submit button only in the same composer form",async()=>{
+ const page=domHarness({formSubmit:true});
+ const result=await page.deliver();
+ assert.equal(result.submitted,true);
+ assert.equal(page.getClicks(),1);
+});
+test("unavailable or disabled send button never clicks and preserves the draft",async()=>{
+ for(const options of [{missingSend:true},{disabled:true}]){
+   const page=domHarness(options);
+   const result=await page.deliver();
+   assert.equal(result.ok,false);
+   assert.match(result.reason,/发送按钮/);
+   assert.equal(page.getClicks(),0);
+   assert.match(page.editor.innerText,/独立审核/);
+ }
+});
+test("no auto-click when the user already owns a draft",async()=>{
+ const page=domHarness({draft:"用户草稿"});
+ const result=await page.deliver();
+ assert.equal(result.notSubmitted,true);
+ assert.equal(page.getClicks(),0);
+ assert.equal(page.editor.innerText,"用户草稿");
 });
 test("missing composer reports conclusively no submission",async()=>{
  const p=domHarness({missing:true});

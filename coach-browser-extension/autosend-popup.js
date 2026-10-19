@@ -15,17 +15,23 @@ async function autoStatus() {
   for (const item of state.recent) {
     const li = document.createElement("li");
     li.textContent = item.key + " " + item.state + " " + item.reason;
-    if (item.state === "needs_attention") {
+    if (item.state === "pending" || item.state === "needs_attention") {
       const sent = document.createElement("button");
-      sent.textContent = "确认已发出";
+      sent.textContent = "确认已手动发送";
+      sent.addEventListener("click", () => {
+        if(window.confirm("只有确认这条审核通知已经进入绑定的 ChatGPT 对话时才标记已发送。否则会漏掉审核。继续？"))
+          void resolveAuto(item.key, "mark_sent");
+      });
+      li.append(sent);
+    }
+    if (item.state === "needs_attention") {
       const retry = document.createElement("button");
       retry.textContent = "确认未发出，重试";
-      sent.addEventListener("click", () => void resolveAuto(item.key, "mark_sent"));
       retry.addEventListener("click", () => {
         if (window.confirm("必须先检查绑定的 ChatGPT 对话，确认消息没有发出。否则可能重复发送。继续？"))
           void resolveAuto(item.key, "retry");
       });
-      li.append(sent,retry);
+      li.append(retry);
     }
     list.append(li);
   }

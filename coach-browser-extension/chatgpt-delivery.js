@@ -1,10 +1,10 @@
 "use strict";
 // Isolated-world script: neither reads the conversation nor contacts the network.
 (() => {
-  // V2 content scripts can survive an extension reload in an open ChatGPT tab.
-  // V3 must coexist safely: only this version handles V3 messages.
-  if (globalThis.__devspaceCoachDeliveryV3Installed) return;
-  globalThis.__devspaceCoachDeliveryV3Installed = true;
+  // A stale V3 script may remain alive across a Chrome extension reload.
+  // V4 messages are handled only by this version; never install twice.
+  if (globalThis.__devspaceCoachDeliveryV4Installed) return;
+  globalThis.__devspaceCoachDeliveryV4Installed = true;
   const canonical=url=>{
     try {
       const u=new URL(url);
@@ -36,11 +36,28 @@
       .filter(el=>el.isContentEditable===true || el.getAttribute("contenteditable")==="true");
     return candidates.length===1?candidates[0]:null;
   };
-  const findSend=()=>single(
-    'button[data-testid="send-button"],button[aria-label="Send prompt"],'+
-    'button[aria-label="Send message"],button[aria-label="发送消息"],'+
-    'button[aria-label="Send"],button[aria-label="发送"]'
+  // React updates the send control asynchronously after insertText. Restrict the
+  // fallback to a submit button belonging to the editor's own form.
+  const findSend=editor=>{
+    const selector='button[data-testid="send-button"],'+
+      'button[data-testid="composer-send-button"],'+
+      'button[aria-label="Send prompt"],button[aria-label="Send message"],'+
+      'button[aria-label="Send"],button[aria-label="发送消息"],button[aria-label="发送"]';
+    const form=editor.closest?.("form");
+    const candidates=[...new Set([
+      ...document.querySelectorAll(selector),
+      ...(form?[...form.querySelectorAll('button[type="submit"]')]:[])
+    ])].filter(visible);
+    return candidates.length===1?candidates[0]:null;
+  };
+  const busy=()=>!!document.querySelector(
+    '[data-testid="stop-button"],button[aria-label="Stop generating"],'+
+    'button[aria-label="Stop"],button[aria-label="停止生成"]'
   );
+  const intact=(editor,msg)=>
+    canonical(location.href)===msg.url && editor.isConnected &&
+    (editor.innerText||editor.textContent||"").trim()===msg.instruction;
+  const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   let sending=false;
   async function deliver(msg) {
     if(sending)return {ok:false,notSubmitted:true,reason:"投递正在进行"};
@@ -52,8 +69,7 @@
     if(!editor)return {ok:false,notSubmitted:true,reason:"找不到唯一的 ChatGPT 编辑器（旧版或带标签的新版输入框）"};
     if((editor.innerText||editor.textContent||"").trim())
       return {ok:false,notSubmitted:true,reason:"用户已有草稿，未覆盖"};
-    if(document.querySelector('[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop"],button[aria-label="停止生成"]'))
-      return {ok:false,notSubmitted:true,reason:"Web GPT 正在生成"};
+    if(busy())return {ok:false,notSubmitted:true,reason:"Web GPT 正在生成"};
     if(!editor.isConnected)return {ok:false,notSubmitted:true,reason:"编辑器已变化"};
     sending=true;
     try {
@@ -68,16 +84,28 @@
         return {ok:false,reason:"不能安全输入审核指令"};
       if((editor.innerText||editor.textContent||"").trim()!==msg.instruction)
         return {ok:false,reason:"输入内容没有得到确认"};
-      const send=findSend();
-      if(!send||send.disabled||send.getAttribute("aria-disabled")==="true")
-        return {ok:false,reason:"发送按钮不可用，保留草稿等待人工处理"};
-      if(canonical(location.href)!==msg.url)return {ok:false,reason:"页面已导航"};
-      if(document.querySelector('[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop"],button[aria-label="停止生成"]'))
-        return {ok:false,reason:"生成状态变化，已保留草稿"};
+      // Allow the page to commit the editor's input and enable its send button.
+      // At most one click is ever attempted. No Enter-key fallback (it can
+      // insert a newline or create a duplicate submission).
+      let send=null;
+      for(let i=0;i<20;i++){
+        if(!intact(editor,msg))return {ok:false,reason:"发送前页面或草稿已变化，需人工确认"};
+        if(busy())return {ok:false,reason:"生成状态变化，已保留草稿"};
+        const candidate=findSend(editor);
+        if(candidate&&!candidate.disabled&&candidate.getAttribute("aria-disabled")!=="true"){
+          send=candidate;
+          break;
+        }
+        await wait(100);
+      }
+      if(!send)return {ok:false,reason:"输入已填入，但 2 秒内发送按钮仍不可用，请人工检查"};
+      if(!intact(editor,msg)||busy()||!visible(send)||send.disabled||
+          send.getAttribute("aria-disabled")==="true")
+        return {ok:false,reason:"点击前发送条件变化，已保留草稿"};
       send.click();
       // Only inspect composer; DO NOT read or scrape any conversation messages.
       for(let i=0;i<12;i++){
-        await new Promise(r=>setTimeout(r,250));
+        await wait(250);
         if(canonical(location.href)!==msg.url)return {ok:false,reason:"发送时页面变化"};
         if((editor.innerText||editor.textContent||"").trim()==="")
           return {ok:true,submitted:true};
@@ -87,11 +115,11 @@
     finally{sending=false;}
   }
   chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
-    if(msg?.type==="COACH_AUTO_PING_V3") {
-      reply({ok:true,protocol:3,url:canonical(location.href)});
+    if(msg?.type==="COACH_AUTO_PING_V4") {
+      reply({ok:true,protocol:4,url:canonical(location.href)});
       return false;
     }
-    if(msg?.type!=="COACH_AUTO_DELIVER_V3")return false;
+    if(msg?.type!=="COACH_AUTO_DELIVER_V4")return false;
     void deliver(msg).then(reply).catch(()=>reply({ok:false,uncertain:true,reason:"投递异常"}));
     return true;
   });

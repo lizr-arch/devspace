@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DevSpace Coach Watch",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Opt-in delivery of local Codex review events to one explicitly bound ChatGPT conversation.",
   "permissions": [
     "alarms",
