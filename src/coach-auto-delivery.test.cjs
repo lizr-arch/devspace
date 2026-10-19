@@ -44,7 +44,7 @@ function workerHarness(overrides={}) {
       if(injectionFailure)throw Error("host permission denied");
       contentReady=true;pingProtocol=5;
     }},
-    runtime:{getManifest:()=>({version:"0.3.6"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
+    runtime:{getManifest:()=>({version:"0.3.7"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
@@ -101,6 +101,7 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V5");
  assert.match(h.messages[0].m.instruction,/APPROVED \/ REWORK \/ BLOCKED/);
  assert.match(h.messages[0].m.instruction,/codex-qa/);
+ assert.match(h.messages[0].m.instruction,/coach_webgpt_submit_review/);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
  await h.poll();assert.equal(h.messages.length,1);
  await h.msg("COACH_AUTO_PAUSE");await h.poll();assert.equal(h.messages.length,1);
@@ -189,7 +190,7 @@ test("opening extension popup reconciles scoped and unknown keys even when queue
    "ws-qa:codex-qa:12":{state:"needs_attention",reason:"旧版脚本的编辑器失败"}
  };
  const state=(await h.msg("COACH_AUTO_STATUS")).state;
- assert.equal(state.version,"0.3.6");
+ assert.equal(state.version,"0.3.7");
  assert.equal(state.summary.needs_attention,1);
  assert.equal(state.summary.pending,0);
  assert.match(state.blocking,/人工核实/);

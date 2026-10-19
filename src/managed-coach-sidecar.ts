@@ -13,7 +13,7 @@ const EXTENSION_ID = /^[a-p]{32}$/;
 
 type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string };
 type EventRow = { event_id: string | number; operation_id: string; event_type: string; created_at: string };
-type DeliveryReceipt = {event_id:number;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
+export type DeliveryReceipt = {event_id:number;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
 type Entry = SidecarInput & { token: Buffer; server: Server; database: Database.Database; receiptDb?:Database.Database; jobId: string; startedAt: string };
 
 export interface CoachSidecarStatus { workspaceId: string; serviceName: string; port: number; state: "running"|"stopped"; startedAt?: string; pairedExtensionId?: string; reason?:string; }
@@ -23,7 +23,7 @@ export interface ManagedCoachSidecarControl {
   stop(workspaceId:string):Promise<void>;
   status(workspaceId:string):CoachSidecarStatus|undefined|Promise<CoachSidecarStatus|undefined>;
   activeServiceIdsForRoot(root:string):string[];
-  getDeliveryReceipt?(workspaceId:string,eventId:number):DeliveryReceipt|undefined;
+  getDeliveryReceipt?(workspaceId:string,eventId:number):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
   close():Promise<void>;
 }
 

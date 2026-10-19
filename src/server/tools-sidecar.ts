@@ -109,7 +109,8 @@ export function registerSidecarTools(
     },
     async ({workspaceId,eventId})=>{
       workspaces.getWorkspace(workspaceId);
-      const receipt=managedCoachSidecar.getDeliveryReceipt?.(workspaceId,eventId);
+      if(!managedCoachSidecar.getDeliveryReceipt)throw new Error("COACH_RECEIPT_READER_NOT_SUPPORTED");
+      const receipt=await managedCoachSidecar.getDeliveryReceipt(workspaceId,eventId);
       const result=receipt?"Browser DOM submission receipt found.":"No verified browser receipt exists for this event.";
       return {content:[textBlock(result)],structuredContent:{result,...(receipt?{receipt}:{})}};
     }

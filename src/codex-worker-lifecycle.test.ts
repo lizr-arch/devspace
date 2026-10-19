@@ -56,10 +56,23 @@ try{
   const feedUrl=`http://127.0.0.1:${coachPort}`;
   const authorized=await fetch(feedUrl+"/health",{headers:{Authorization:`Bearer ${paired.token}`}});
   assert.equal(authorized.status,200);
+  const receiptEvent=controlStore.recordCompleted({workspaceId:"ws-coach",
+    operationId:"worker-browser-delivery",evidenceSha256:"a".repeat(64)});
+  const browserReceipt={workspace_id:"ws-coach",operation_id:"worker-browser-delivery",
+    event_id:receiptEvent.event_id};
+  const receiptResponse=await fetch(feedUrl+"/delivery-receipt",{
+    method:"POST",headers:{Authorization:`Bearer ${paired.token}`,
+      Origin:`chrome-extension://${extensionId}`,"Content-Type":"application/json"},
+    body:JSON.stringify(browserReceipt)});
+  assert.equal(receiptResponse.status,200);
+  assert.equal((await apiGenerationOne.getDeliveryReceipt("ws-coach",receiptEvent.event_id))?.result,
+    "dom_submitted","Worker IPC must expose exactly the signed delivery identity");
   const restartedApi=new CodexWorkerCoachClient(defaultCodexWorkerSocket(serviceRoot),defaultCodexWorkerKey(serviceRoot),controlStore);
   await apiGenerationOne.close();
   assert.equal((await fetch(feedUrl+"/health",{headers:{Authorization:`Bearer ${paired.token}`}})).status,200,"API control client shutdown leaves Coach running");
   const sameFeed=await restartedApi.status("ws-coach");assert.equal(sameFeed?.port,coachPort);assert.equal(sameFeed?.pairedExtensionId,extensionId);
+  assert.equal((await restartedApi.getDeliveryReceipt("ws-coach",receiptEvent.event_id))?.operation_id,
+    "worker-browser-delivery","API generation change must not lose browser receipts");
   const approvedFeed=await fetch(feedUrl+"/agent/events?cursor=0",{headers:{Authorization:`Bearer ${paired.token}`,Origin:`chrome-extension://${extensionId}`}});
   assert.equal(approvedFeed.status,200,"explicit cross-workspace observer scope is retained");
   assert.equal((await fetch(feedUrl+"/agent/events?cursor=0",{headers:{Authorization:`Bearer ${paired.token}`,Origin:"chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}})).status,403);
@@ -74,6 +87,8 @@ try{
   const recoveryDeadline=Date.now()+8000;let recoveredStatus=await recoveredApi.status("ws-coach");
   while(recoveredStatus?.state!=="running"&&Date.now()<recoveryDeadline){await new Promise(resolveWait=>setTimeout(resolveWait,250));recoveredStatus=await recoveredApi.status("ws-coach");}
   assert.equal(recoveredStatus?.port,coachPort);assert.equal(recoveredStatus?.pairedExtensionId,extensionId);
+  assert.equal((await recoveredApi.getDeliveryReceipt("ws-coach",receiptEvent.event_id))?.result,
+    "dom_submitted","Worker restart must restore owner-scoped receipts");
   assert.equal((await fetch(feedUrl+"/health",{headers:{Authorization:`Bearer ${paired.token}`}})).status,200,"the same protected token/scope recover after a transient port collision");
   await recoveredApi.stop("ws-coach");assert.equal(await recoveredApi.status("ws-coach"),undefined);
   await recoveredApi.close();await restartedApi.close();controlStore.close();

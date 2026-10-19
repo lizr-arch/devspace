@@ -12,7 +12,7 @@ import { NativeCodexAgentRunner, type RunnerInput, type RunnerStatus } from "./c
 import type { ServerConfig } from "./config.js";
 import type { CodexAgentControl } from "./codex-agent-control.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
-import { ManagedCoachSidecar, type CoachSidecarStartResult, type CoachSidecarStatus } from "./managed-coach-sidecar.js";
+import { ManagedCoachSidecar, type CoachSidecarStartResult, type CoachSidecarStatus, type DeliveryReceipt } from "./managed-coach-sidecar.js";
 import type { ManagedCoachSidecarControl } from "./managed-coach-sidecar.js";
 
 const MAX_MESSAGE=64*1024;
@@ -30,7 +30,8 @@ type CoachStartInput={workspaceId:string;workspaceRoot:string;port:number;paired
 type RpcRequestWithCoach=RpcRequest
   | {version:1;token:string;op:"coach_start";input:CoachStartInput}
   | {version:1;token:string;op:"coach_stop";workspaceId:string}
-  | {version:1;token:string;op:"coach_status";workspaceId:string};
+  | {version:1;token:string;op:"coach_status";workspaceId:string}
+  | {version:1;token:string;op:"coach_delivery_receipt";workspaceId:string;eventId:number};
 type RpcCall=RpcRequestWithCoach extends infer T?T extends RpcRequestWithCoach?Omit<T,"version"|"token">:never:never;
 
 function secretAt(path:string,create:boolean):Buffer {
@@ -128,6 +129,10 @@ export function createCodexWorkerDispatcher(input:{runner:NativeCodexAgentRunner
           try{const key=join(input.stateDir,COACH_KEY_FILE),st=lstatSync(key);if(st.isFile()&&!st.isSymbolicLink()&&st.uid===(getuid?.()??-1))unlinkSync(key);}catch{/* token absent */}
         }
         return {stopped:true};
+      }
+      case "coach_delivery_receipt": {
+        authorizeWorkspace(request.workspaceId,input.workspaceStore.getSession(request.workspaceId)?.root??"");
+        return input.coach.getDeliveryReceipt(request.workspaceId,request.eventId);
       }
       case "coach_status": {
         const current=input.coach.status(request.workspaceId);
@@ -339,6 +344,9 @@ export class CodexWorkerClient implements CodexAgentControl {
   coachStart(input:CoachStartInput):Promise<CoachSidecarStartResult>{return this.call({op:"coach_start",input});}
   coachStop(workspaceId:string):Promise<void>{return this.call({op:"coach_stop",workspaceId}).then(()=>{});}
   coachStatus(workspaceId:string):Promise<CoachSidecarStatus|undefined>{return this.call({op:"coach_status",workspaceId});}
+  coachDeliveryReceipt(workspaceId:string,eventId:number):Promise<DeliveryReceipt|undefined>{
+    return this.call({op:"coach_delivery_receipt",workspaceId,eventId});
+  }
 }
 
 export class CodexWorkerCoachClient implements ManagedCoachSidecarControl {
@@ -347,6 +355,9 @@ export class CodexWorkerCoachClient implements ManagedCoachSidecarControl {
   start(input:CoachStartInput):Promise<CoachSidecarStartResult>{return this.worker.coachStart(input);}
   stop(workspaceId:string):Promise<void>{return this.worker.coachStop(workspaceId);}
   status(workspaceId:string):Promise<CoachSidecarStatus|undefined>{return this.worker.coachStatus(workspaceId);}
+  getDeliveryReceipt(workspaceId:string,eventId:number):Promise<DeliveryReceipt|undefined>{
+    return this.worker.coachDeliveryReceipt(workspaceId,eventId);
+  }
   activeServiceIdsForRoot(root:string):string[]{return this.events.coachFeedWorkspaceIdsForRoot(root);}
   async close():Promise<void>{/* API lifecycle never stops the independent Worker or Coach Feed. */}
 }

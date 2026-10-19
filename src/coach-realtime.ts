@@ -19,7 +19,7 @@ import type { WorkspaceRegistry } from "./workspaces.js";
 
 const ID=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const sha=/^[a-f0-9]{64}$/;
-type Phase="ACTIVE"|"REVIEWING"|"DISPATCHING"|"DONE"|"BLOCKED"|"PAUSED";
+type Phase="ACTIVE"|"AWAITING_WEBGPT"|"REVIEWING"|"DISPATCHING"|"DONE"|"BLOCKED"|"PAUSED";
 export interface CoachRealtimeStage {
   prompt:string;
   testTaskId:string;
@@ -35,6 +35,8 @@ export interface CoachRealtimeSpec {
   reviewerModel:CodexModel;
   reviewerEffort:CodexEffort;
   maxReworks:number;
+  /** Original local reviewer remains default. */
+  reviewerMode?:"local"|"webgpt";
   stages:CoachRealtimeStage[];
   /** Server-pinned approval, never accepted from the caller. */
   approvedManifestSha256?:string;
@@ -79,7 +81,11 @@ export class CoachRealtimeEngine {
       "spec_json TEXT NOT NULL, current_operation TEXT NOT NULL,"+
       "phase TEXT NOT NULL, stage_idx INTEGER NOT NULL, rework_count INTEGER NOT NULL,"+
       "last_error TEXT, updated_at TEXT NOT NULL);"+
-      "CREATE INDEX IF NOT EXISTS realtime_active_ws ON realtime_plans(workspace_id,phase);");
+      "CREATE INDEX IF NOT EXISTS realtime_active_ws ON realtime_plans(workspace_id,phase);"+
+      "CREATE TABLE IF NOT EXISTS realtime_web_feedback("+
+      "plan_id TEXT NOT NULL,event_id INTEGER NOT NULL,operation_id TEXT NOT NULL,"+
+      "decision TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,"+
+      "PRIMARY KEY(plan_id,event_id));");
     this.gate=d.gate??new CoachReviewGate({events:d.events,tasks:d.tasks});
     this.unsub=d.events.onCompleted(event=> {
       // The runner emits completion before it releases its resource lock.
@@ -102,6 +108,8 @@ export class CoachRealtimeEngine {
       !Number.isInteger(spec.maxReworks)||spec.maxReworks<0||spec.maxReworks>5||
       !Array.isArray(spec.stages)||spec.stages.length<1||spec.stages.length>8)
       throw new TypeError("COACH_REALTIME_INVALID_PLAN");
+    if(spec.reviewerMode!==undefined && !["local","webgpt"].includes(spec.reviewerMode))
+      throw new TypeError("COACH_REALTIME_INVALID_REVIEWER_MODE");
     validateCodexSelection({model:spec.reviewerModel,reasoningEffort:spec.reviewerEffort});
     for(const stage of spec.stages) {
       validateCodexSelection(stage);
@@ -113,6 +121,11 @@ export class CoachRealtimeEngine {
   register(spec:CoachRealtimeSpec):CoachRealtimePlan {
     this.assertSpec(spec);
     const ws=this.d.workspaces.getWorkspace(spec.workspaceId);
+    // An unattended Web GPT plan can mutate files without a human click.
+    // Never enroll an attached or dirty main checkout; only managed worktrees.
+    if(spec.reviewerMode==="webgpt" &&
+       (ws.mode!=="worktree" || ws.worktree?.managed!==true))
+      throw new Error("COACH_WEBGPT_MANAGED_WORKTREE_REQUIRED");
     const root=realpathSync(ws.root);
     const existing=this.get(spec.planId);
     if(existing) {
@@ -140,7 +153,7 @@ export class CoachRealtimeEngine {
     const sealed={...spec,approvedManifestSha256:manifest.manifestSha256};
     if(this.all().length>=180)throw new Error("COACH_REALTIME_PLAN_CAPACITY");
     if(this.all().some(p=>p.workspaceId===spec.workspaceId &&
-        ["ACTIVE","REVIEWING","DISPATCHING"].includes(p.phase)))
+        ["ACTIVE","AWAITING_WEBGPT","REVIEWING","DISPATCHING"].includes(p.phase)))
       throw new Error("COACH_REALTIME_WORKSPACE_ALREADY_ENROLLED");
     // The approved task manifest bytes are sealed into the durable plan,
     // not merely held in the per-session in-memory approvedTasks cache.
@@ -168,7 +181,8 @@ export class CoachRealtimeEngine {
   pause(planId:string):CoachRealtimePlan {
     const row=this.get(planId);
     if(!row)throw new Error("COACH_REALTIME_PLAN_NOT_FOUND");
-    if(row.phase==="ACTIVE")this.transition(row,"PAUSED","paused_by_user");
+    if(row.phase==="ACTIVE"||row.phase==="AWAITING_WEBGPT")
+      this.transition(row,"PAUSED","paused_by_user");
     // No process is stopped; a running reviewer is allowed to finish.
     else if(row.phase!=="PAUSED")throw new Error("COACH_REALTIME_CANNOT_PAUSE_DISPATCH");
     return this.get(planId)!;
@@ -180,6 +194,57 @@ export class CoachRealtimeEngine {
     this.wake(planId);
     return this.get(planId)!;
   }
+  /** Atomic intent: record bounded human-readable Web GPT feedback before
+   * submitting the cryptographically matched review receipt. Retry after a
+   * crash is idempotent; no runner is dispatched by a bare conversational text. */
+  async submitWebVerdict(input:{planId:string;workspaceId:string;operationId:string;
+      eventId:number;decision:"APPROVED"|"REWORK"|"BLOCKED";evidenceSha256:string;
+      reason:string}):Promise<CoachRealtimePlan>{
+    const plan=this.get(input.planId);
+    if(plan?.spec.reviewerMode==="webgpt" && plan.workspaceId===input.workspaceId){
+      // Network retries of the same signed review are idempotent even after
+      // the plan advanced to another stage. Different decisions never alias.
+      const previous=this.db.prepare("SELECT operation_id,decision,reason FROM realtime_web_feedback WHERE plan_id=? AND event_id=?")
+        .get(input.planId,input.eventId) as {operation_id:string;decision:string;reason:string}|undefined;
+      const receipt=this.d.events.getReview(input.workspaceId,input.operationId);
+      if(previous && receipt && previous.operation_id===input.operationId &&
+         previous.decision===input.decision && previous.reason===input.reason &&
+         receipt.event_id===input.eventId && receipt.decision===input.decision &&
+         receipt.evidence_sha256===input.evidenceSha256)return plan;
+    }
+    if(!plan||plan.spec.reviewerMode!=="webgpt"||plan.workspaceId!==input.workspaceId||
+       plan.currentOperationId!==input.operationId||plan.phase!=="AWAITING_WEBGPT")
+      throw new Error("COACH_WEBGPT_NOT_AWAITING_VERDICT");
+    if(!Number.isSafeInteger(input.eventId)||input.eventId<=0||
+       !/^[a-f0-9]{64}$/.test(input.evidenceSha256)||
+       !["APPROVED","REWORK","BLOCKED"].includes(input.decision)||
+       typeof input.reason!=="string"||input.reason.trim().length<16||
+       input.reason.length>1200||[...input.reason].some(ch=>ch.charCodeAt(0)<32))
+      throw new Error("COACH_WEBGPT_INVALID_VERDICT");
+    const event=this.d.events.getAgentRun(input.workspaceId,input.operationId);
+    const packet=this.d.events.getEvidence(input.workspaceId,input.operationId) as
+      {finalFingerprint?:string;evidenceSha256?:string}|undefined;
+    if(event?.eventId!==input.eventId || packet?.evidenceSha256!==input.evidenceSha256)
+      throw new Error("COACH_WEBGPT_EVIDENCE_MISMATCH");
+    if((await captureCodexFingerprint(plan.workspaceRoot)).sha!==packet.finalFingerprint)
+      throw new Error("COACH_WEBGPT_STALE_FINGERPRINT");
+    if(input.decision==="APPROVED"){
+      await this.gate.verifyTest({workspaceId:input.workspaceId,workspaceRoot:plan.workspaceRoot,
+        eventId:input.eventId,taskId:plan.spec.stages[plan.stageIndex].testTaskId});
+    }
+    this.db.prepare("INSERT OR IGNORE INTO realtime_web_feedback VALUES(?,?,?,?,?,?)")
+      .run(plan.planId,input.eventId,input.operationId,input.decision,input.reason,new Date().toISOString());
+    const saved=this.db.prepare("SELECT operation_id,decision,reason FROM realtime_web_feedback WHERE plan_id=? AND event_id=?")
+      .get(plan.planId,input.eventId) as {operation_id:string;decision:string;reason:string};
+    if(saved.operation_id!==input.operationId||saved.decision!==input.decision||
+       saved.reason!==input.reason)throw new Error("COACH_WEBGPT_FEEDBACK_CONFLICT");
+    await this.gate.submit({workspaceId:input.workspaceId,workspaceRoot:plan.workspaceRoot,
+      operationId:input.operationId,eventId:input.eventId,
+      decision:input.decision,evidenceSha256:input.evidenceSha256});
+    this.wake(plan.planId);
+    return this.get(plan.planId)!;
+  }
+
   private transition(plan:CoachRealtimePlan,phase:Phase,reason:string|null,
       currentOperation=plan.currentOperationId,stageIndex=plan.stageIndex,
       reworkCount=plan.reworkCount):void {
@@ -191,7 +256,7 @@ export class CoachRealtimeEngine {
   }
   private wakeByOperation(ws:string,op:string):void {
     for(const plan of this.all())if(plan.workspaceId===ws && plan.currentOperationId===op &&
-      plan.phase==="ACTIVE")this.wake(plan.planId);
+      (plan.phase==="ACTIVE"||plan.phase==="AWAITING_WEBGPT"))this.wake(plan.planId);
   }
   wake(planId:string):void {
     if(this.closing||this.busy.has(planId))return;
@@ -207,7 +272,7 @@ export class CoachRealtimeEngine {
         if(reason.includes("STALE_EVIDENCE"))this.transition(plan,"BLOCKED",reason);
         return;
       }
-      if(plan.phase==="ACTIVE"||plan.phase==="REVIEWING"||plan.phase==="DISPATCHING")
+      if(plan.phase==="ACTIVE"||plan.phase==="AWAITING_WEBGPT"||plan.phase==="REVIEWING"||plan.phase==="DISPATCHING")
         this.transition(plan,"BLOCKED",reason);
     }).finally(()=>this.busy.delete(planId));
     this.pending.add(pending);
@@ -216,16 +281,23 @@ export class CoachRealtimeEngine {
   async recover():Promise<void>{
     if(this.closing)return;
     for(const plan of this.all()) {
-      if(plan.phase==="ACTIVE")this.wake(plan.planId);
-      // If a process was being launched or reviewed when the DevSpace
-      // service was killed, NEVER replay it blindly after reboot.
-      if((plan.phase==="REVIEWING"||plan.phase==="DISPATCHING")&&!this.busy.has(plan.planId))
-        this.transition(plan,"BLOCKED","unknown_outcome_after_restart_manual_reconciliation_required");
+      if(plan.phase==="ACTIVE"||plan.phase==="AWAITING_WEBGPT")this.wake(plan.planId);
+      // A previously dispatched operation may be reconciled by its durable
+      // identity. A missing/unknown child is BLOCKED, never launched twice.
+      if(plan.phase==="DISPATCHING"&&!this.busy.has(plan.planId)){
+        const child=this.d.events.getAgentRun(plan.workspaceId,plan.currentOperationId);
+        if(child && ["RUNNING","COMPLETED"].includes(child.state)){
+          this.transition(plan,"ACTIVE",null);
+          this.wake(plan.planId);
+        } else this.transition(plan,"BLOCKED","unknown_dispatch_outcome_requires_reconciliation");
+      }
+      if(plan.phase==="REVIEWING"&&!this.busy.has(plan.planId))
+        this.transition(plan,"BLOCKED","unknown_review_outcome_after_restart");
     }
   }
   private async process(planId:string):Promise<void>{
     const p=this.get(planId);
-    if(!p||p.phase!=="ACTIVE")return;
+    if(!p||(p.phase!=="ACTIVE"&&p.phase!=="AWAITING_WEBGPT"))return;
     const run=this.d.events.getAgentRun(p.workspaceId,p.currentOperationId);
     if(!run||run.state==="RUNNING")return;
     if(run.state!=="COMPLETED"||!run.eventId){
@@ -242,33 +314,57 @@ export class CoachRealtimeEngine {
     if(!packet||packet.evidenceSha256===undefined || packet.operationId!==p.currentOperationId ||
        packet.workspaceId!==p.workspaceId|| packet.threadId!==run.threadId)
       {this.transition(p,"BLOCKED","immutable_evidence_invalid");return;}
-    if(this.d.events.getReview(p.workspaceId,p.currentOperationId)){
-      // External reviewer already decided; an automatic coordinator must not
-      // override or duplicate the user/Coach's previous disposition.
+    const externalReview=this.d.events.getReview(p.workspaceId,p.currentOperationId);
+    if(p.spec.reviewerMode!=="webgpt" && externalReview){
       this.transition(p,"BLOCKED","review_already_decided_outside_realtime");
       return;
     }
     if((await captureCodexFingerprint(p.workspaceRoot)).sha!==packet.finalFingerprint){
       this.transition(p,"BLOCKED","stale_fingerprint");return;
     }
-    this.transition(p,"REVIEWING",null);
-    const reviewing=this.get(planId)!;
-    const reviewOp=this.operationId(p,"review");
-    const recommendation=await this.review(reviewing,run.eventId,packet,reviewOp);
-    // Closing a server mid-review must NOT dispatch another subprocess.
-    // The persisted REVIEWING state will require manual reconciliation.
+    let recommendation:RealtimeReviewRecommendation;
+    if(p.spec.reviewerMode==="webgpt"){
+      // Web GPT owns the verdict; never substitute an unsupervised local review.
+      if(p.phase==="ACTIVE"){
+        this.transition(p,"AWAITING_WEBGPT",null);
+        if(!externalReview)return;
+      }
+      if(!externalReview)return;
+      const feedback=this.db.prepare("SELECT operation_id,decision,reason FROM realtime_web_feedback WHERE plan_id=? AND event_id=?")
+        .get(p.planId,run.eventId) as {operation_id:string;decision:string;reason:string}|undefined;
+      if(!feedback||feedback.operation_id!==p.currentOperationId||
+         feedback.decision!==externalReview.decision||
+         externalReview.evidence_sha256!==packet.evidenceSha256){
+        this.transition(this.get(planId)!,"BLOCKED","external_review_missing_bounded_feedback");return;
+      }
+      recommendation={decision:externalReview.decision,reason:feedback.reason};
+      if(recommendation.decision==="APPROVED"){
+        const proof=this.d.events.getVerifiedTest(run.eventId);
+        if(!proof||proof.workspace_id!==p.workspaceId||
+           proof.tested_fingerprint!==packet.finalFingerprint){
+          this.transition(this.get(planId)!,"BLOCKED","external_approval_missing_verified_test");return;
+        }
+      }
+    }else{
+      this.transition(p,"REVIEWING",null);
+      const reviewing=this.get(planId)!;
+      const reviewOp=this.operationId(p,"review");
+      recommendation=await this.review(reviewing,run.eventId,packet,reviewOp);
+      if(this.closing)return;
+      if((await captureCodexFingerprint(p.workspaceRoot)).sha!==packet.finalFingerprint)
+        throw new Error("COACH_REALTIME_REVIEW_MUTATED_WORKSPACE");
+      if(recommendation.decision==="APPROVED"){
+        const taskId=p.spec.stages[p.stageIndex].testTaskId;
+        await this.gate.verifyTest({workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,eventId:run.eventId,taskId});
+      }
+      await this.gate.submit({workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,
+        operationId:p.currentOperationId,eventId:run.eventId,
+        evidenceSha256:String(packet.evidenceSha256),decision:recommendation.decision});
+    }
     if(this.closing)return;
-    // Never accept a recommendation if the reviewer modified anything.
     if((await captureCodexFingerprint(p.workspaceRoot)).sha!==packet.finalFingerprint)
       throw new Error("COACH_REALTIME_REVIEW_MUTATED_WORKSPACE");
     const decision=recommendation.decision;
-    if(decision==="APPROVED") {
-      const taskId=p.spec.stages[p.stageIndex].testTaskId;
-      await this.gate.verifyTest({workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,eventId:run.eventId,taskId});
-    }
-    await this.gate.submit({workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,
-      operationId:p.currentOperationId,eventId:run.eventId,
-      evidenceSha256:String(packet.evidenceSha256),decision});
     if(decision==="BLOCKED") {
       this.transition(this.get(planId)!,"BLOCKED","reviewer_blocked:"+recommendation.reason);return;
     }

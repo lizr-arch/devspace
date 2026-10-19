@@ -88,6 +88,9 @@ function autoInstruction(e) {
   return "请以 Web GPT Coach 身份独立审核一项本地 Codex CLI 已完成任务。"+
   "通过 DevSpace MCP 读取真实源码、Git 差异、不可变完成证据和测试结果，不要重复运行该 Codex 任务；"+
   "验证之后仅作 APPROVED / REWORK / BLOCKED 裁决，并在 REWORK 时下发具体修复任务。"+
+  "请先查询 coach_realtime_status：若当前任务属于 reviewerMode=webgpt 的已批准自动计划，"+
+  "必须使用 coach_webgpt_submit_review 提交有证据的裁决与具体原因，由本地调度器安全推进；"+
+  "否则使用原有 codex_agent_submit_review。严禁仅输出裁决文字而不写回。"+
   "这是审核通知，不代表已经通过验收。"+
   "\n事件 ID："+e.event_id+"\n工作区 ID："+(e.workspace_id||"旧版 Sidecar 未返回；请通过 DevSpace MCP 按任务 ID 查证，若无法唯一匹配则停止") + "\n任务 ID："+e.operation_id;
 }

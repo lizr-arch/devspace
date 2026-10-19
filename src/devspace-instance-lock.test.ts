@@ -4,8 +4,6 @@ import { existsSync,mkdtempSync, readFileSync,rmSync,writeFileSync } from "node:
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
-import { createServer } from "./server.js";
 import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
 
 const wait=async(check:()=>boolean,ms=7000)=>{
@@ -53,6 +51,12 @@ if(process.argv[2]==="--lock-owner-child"){
   const afterKill=new DevSpaceInstanceLock(state);
   afterKill.release();
 
+  // Load the full server only in the parent after the SIGKILL handshake:
+  // importing the heavyweight server in the lock-holder child could delay
+  // its readiness beyond the bounded timeout on cold machines.
+  const [{loadConfig},{createServer}]=await Promise.all([
+    import("./config.js"),import("./server.js")
+  ]);
   // The ACTUAL DevSpace factory locks before any native event reconciliation.
   const config=loadConfig({
     DEVSPACE_CONFIG_DIR:join(root,"config"),

@@ -146,3 +146,6 @@ try {
  await runner.close();await client.close();await server.close();store.close();
  rmSync(tmp,{force:true,recursive:true});
 }
+// Execute the opt-in Web GPT-owned closed-loop integration in the existing
+// Coach Mac entrypoint without touching the operator's dirty package.json.
+await import("./coach-webgpt-loop.test.js");

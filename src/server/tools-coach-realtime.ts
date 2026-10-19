@@ -25,6 +25,7 @@ export function registerCoachRealtimeTools(server:McpServer,ctx:ServerContext):v
   const safe=plans.map(p=>({planId:p!.planId,workspaceId:p!.workspaceId,phase:p!.phase,
    currentOperationId:p!.currentOperationId,stageIndex:p!.stageIndex,
    reworkCount:p!.reworkCount,maxReworks:p!.spec.maxReworks,
+   reviewerMode:p!.spec.reviewerMode==="webgpt"?"webgpt":"local",
    lastErrorCode:p!.lastError?.split(":")[0].slice(0,80)??null,updatedAt:p!.updatedAt}));
   return {content:[textBlock("Realtime Coach plans: "+safe.length)],structuredContent:{result:"ok",plans:safe}};
  });
@@ -46,6 +47,39 @@ export function registerCoachRealtimeTools(server:McpServer,ctx:ServerContext):v
   return {content:[textBlock("Enrolled explicitly approved realtime Coach plan "+plan.planId)],
    structuredContent:{result:"registered",plan:{planId:plan.planId,phase:plan.phase,
     currentOperationId:plan.currentOperationId}}};
+ });
+ registerAppTool(server,"coach_webgpt_register",{
+   title:"Enroll explicit Web GPT-reviewed autonomous development plan",
+   description:"Enroll a preapproved staged Codex plan. Web GPT, NOT the local reviewer, owns every signed verdict. Only a bounded, tested, exact-event decision may dispatch rework or another stage. Default off.",
+   inputSchema:{planId:id,workspaceId:id,initialOperationId:id,
+     reviewerModel:z.enum(CODEX_MODELS),reviewerEffort:z.enum(CODEX_EFFORTS),
+     maxReworks:z.number().int().min(0).max(5),
+     stages:z.array(stage).min(1).max(8)},
+   outputSchema:resultOutputSchema({plan:z.unknown(),error:z.unknown().optional()}),
+   _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
+ },async(spec)=>{
+   const ws=ctx.workspaces.getWorkspace(spec.workspaceId);
+   if(!ws.approvedTasks || !checkManifestIntegrity(ws.root,ws.approvedTasks))
+     throw new Error("COACH_WEBGPT_TASK_MANIFEST_NOT_APPROVED");
+   const plan=ctx.coachRealtime.register({...spec,reviewerMode:"webgpt"});
+   return {content:[textBlock("Enrolled Web GPT review plan "+plan.planId)],
+     structuredContent:{result:"registered",plan:{planId:plan.planId,phase:plan.phase,
+       currentOperationId:plan.currentOperationId}}};
+ });
+ registerAppTool(server,"coach_webgpt_submit_review",{
+   title:"Submit Web GPT Coach decision and resume approved autonomous plan",
+   description:"After independent review, atomically associate a bounded explanation with this exact signed event, verify preapproved tests for APPROVED, commit immutable review, and wake the persisted plan. REWORK automatically launches only the planned bounded next operation. Must never use this tool without independent inspection.",
+   inputSchema:{planId:id,workspaceId:id,operationId:id,eventId:z.number().int().positive(),
+     decision:z.enum(["APPROVED","REWORK","BLOCKED"]),
+     evidenceSha256:z.string().regex(/^[a-f0-9]{64}$/),
+     reason:z.string().min(16).max(1200).refine(s=>![...s].some(ch=>ch.charCodeAt(0)<32))},
+   outputSchema:resultOutputSchema({plan:z.unknown(),error:z.unknown().optional()}),
+   _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:false},
+ },async(input)=>{
+   const p=await ctx.coachRealtime.submitWebVerdict(input);
+   return {content:[textBlock("Web GPT review accepted for "+input.operationId+"; plan "+p.planId+" = "+p.phase)],
+     structuredContent:{result:input.decision,plan:{planId:p.planId,phase:p.phase,
+       currentOperationId:p.currentOperationId,stageIndex:p.stageIndex,reworkCount:p.reworkCount}}};
  });
  for(const [name,action] of [["coach_realtime_pause","pause"],["coach_realtime_resume","resume"]] as const){
   registerAppTool(server,name,{
