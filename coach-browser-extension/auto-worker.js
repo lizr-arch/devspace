@@ -27,6 +27,28 @@ async function autoSaveLedger(ledger) {
   await chrome.storage.local.set({[AUTO_LEDGER]: ledger});
 }
 function autoKey(e) {return (e.workspace_id||"unknown") + ":" + e.operation_id + ":" + e.event_id;}
+// The legacy Sidecar omitted workspace_id. Reconcile identities only after a
+// trusted feed supplies the exact same (operation_id, event_id) pair.
+// Keep a "merged" audit marker, never silently discard a prior send outcome.
+function autoReconcileLegacy(ledger,events) {
+  for(const e of events) {
+    if(!e.workspace_id)continue;
+    const oldKey="unknown:"+e.operation_id+":"+e.event_id;
+    const newKey=autoKey(e);
+    const old=ledger[oldKey];
+    if(!old || old.state==="merged" || oldKey===newKey)continue;
+    const present=ledger[newKey];
+    const risk={"pending":0,"sent":1,"in_flight":2,"needs_attention":3};
+    const normalize=x=>x?.state==="in_flight" ?
+      {...x,state:"needs_attention",reason:"旧版记录投递结果不确定，请核实"}:x;
+    const a=normalize(old), b=normalize(present);
+    const winning= !b || (risk[a.state]??3)>(risk[b.state]??3)?a:b;
+    ledger[newKey]={...winning,at:winning?.at||new Date().toISOString(),
+      reason:winning?.reason||"由旧版无工作区事件记录安全归并"};
+    ledger[oldKey]={...old,state:"merged",mergedInto:newKey,
+      reason:"旧版标识已归并；原状态："+old.state};
+  }
+}
 function autoValid(e) {
   return e && e.event_type === "READY_FOR_GPT_REVIEW" &&
     Number.isSafeInteger(e.event_id) && e.event_id > 0 &&
@@ -44,7 +66,8 @@ async function autoState() {
   const target=await autoTarget(), ledger=await autoLedger();
   const summary={pending:0,sent:0,needs_attention:0,in_flight:0};
   for(const x of Object.values(ledger))if(x && summary[x.state]!==undefined)summary[x.state]++;
-  const recent=Object.entries(ledger).slice(-10).reverse()
+  const recent=Object.entries(ledger).filter(([,x])=>x?.state!=="merged")
+    .slice(-10).reverse()
     .map(([key,x])=>({key,state:x.state,at:x.at||"",reason:x.reason||""}));
   return {enabled:!!target?.enabled, bound:!!target?.url, url:target?.url||"",
     tabId:target?.tabId??null,summary,recent};
@@ -138,6 +161,7 @@ async function autoPump() {
         at:new Date().toISOString(),reason:"上次投递结果不确定，禁止自动重发"};
     }
     const events=body.events.filter(autoValid).sort((a,b)=>a.event_id-b.event_id);
+    autoReconcileLegacy(ledger,events);
     for(const e of events) {
       const key=autoKey(e);
       if(!ledger[key] && Object.keys(ledger).length<2048)
@@ -180,10 +204,11 @@ async function autoPump() {
     // Re-read durable state: user may have disabled/unbound while DOM action ran.
     const current=await autoLedger();
     if(current[key]?.state!=="in_flight")return;
-    current[key]={state:result?.ok===true && result?.submitted===true ? "sent":"needs_attention",
+    const submitted=result?.ok===true && result?.submitted===true;
+    const definitelyNotSent=result?.ok===false && result?.notSubmitted===true;
+    current[key]={state:submitted?"sent":definitelyNotSent?"pending":"needs_attention",
       at:new Date().toISOString(),
-      reason:result?.ok===true && result?.submitted===true ?
-      "DOM 已提交（尚不代表 Web GPT 审核完成）":
+      reason:submitted ? "DOM 已提交（尚不代表 Web GPT 审核完成）" :
       String(result?.reason||"DOM 结果不确定，需人工检查").slice(0,120)};
     await autoSaveLedger(current);
   }catch{

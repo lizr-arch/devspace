@@ -118,6 +118,34 @@ test("script injection permission denial never sends and keeps event pending",as
  assert.equal(state.summary.needs_attention,0);
  assert.match(state.recent[0].reason,/权限/);
 });
+test("legacy unknown and scoped records coalesce without replaying uncertain delivery",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.local.coachAutoLedger={
+   "unknown:codex-qa:12":{state:"pending",at:"old"},
+   "ws-qa:codex-qa:12":{state:"needs_attention",reason:"找不到唯一的 ChatGPT 编辑器"},
+ };
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ const s=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(s.summary.pending,0);assert.equal(s.summary.needs_attention,1);
+ assert.equal(s.recent.length,1);
+ assert.equal(h.local.coachAutoLedger["unknown:codex-qa:12"].state,"merged");
+ assert.equal(h.messages.length,0);
+});
+test("confirmed legacy sent state suppresses scoped duplicate send",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.local.coachAutoLedger={"unknown:codex-qa:12":{state:"sent",reason:"DOM 已提交"}};
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
+ assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"sent");
+});
+test("legacy event identity mismatch never causes cross-task merging",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.local.coachAutoLedger={"unknown:other-task:12":{state:"needs_attention"}};
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.equal(h.local.coachAutoLedger["unknown:other-task:12"].state,"needs_attention");
+});
 test("incomplete Sidecar event page never silently delivers a truncated queue",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setPendingCount(51);await h.msg("COACH_AUTO_BIND");
@@ -154,6 +182,17 @@ test("unknown DOM outcome becomes needs_attention and is never blindly replayed"
  assert.equal(h.messages.length,1);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.needs_attention,1);
 });
+test("confirmed no-input preflight failure remains pending without blocking later retry",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setDelivery({ok:false,notSubmitted:true,reason:"找不到唯一的 ChatGPT 编辑器"});
+ await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ let s=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(s.summary.pending,1);assert.equal(s.summary.needs_attention,0);
+ h.setDelivery({ok:true,submitted:true});
+ await h.poll();
+ s=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(s.summary.sent,1);assert.equal(s.summary.needs_attention,0);
+});
 test("worker recovery preserves in-flight ambiguity and blocks duplicate delivery",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"in_flight",at:"earlier"}};
@@ -186,12 +225,22 @@ test("unpairing sidecar removes ability to send new events",async()=>{
 function domHarness(options={}) {
  const handlers=[];
  const editor={isConnected:true,hidden:false,innerText:options.draft||"",
-   textContent:options.draft||"",getAttribute:()=>"true",focus(){}};
+   textContent:options.draft||"",isContentEditable:!options.noEditable,
+   getAttribute:name=>name==="contenteditable"&&!options.noEditable?"true":null,focus(){}};
+ const extraEditor={...editor,innerText:"",textContent:""};
  const button={isConnected:true,hidden:false,disabled:!!options.disabled,
    getAttribute:()=>null,click(){if(!options.noClear){editor.innerText="";editor.textContent="";}}};
  const document={
-   querySelectorAll(q){if(options.missing)return [];return q.startsWith("#prompt-textarea")?[editor]:
-     q==='button[data-testid="send-button"]'?[button]:[];},
+   querySelectorAll(q){
+     if(options.missing)return [];
+     if(q.startsWith("button[data-testid=\"send-button\"]"))return [button];
+     const mode=options.editorMode||"legacy";
+     if(q.startsWith("#prompt-textarea"))return ["legacy","multi"].includes(mode)?[editor]:[];
+     if(q.includes('aria-label="Ask ChatGPT"'))return mode==="multi"?[extraEditor]:
+       mode==="labelled"?[editor]:[];
+     if(q.includes('aria-label="向 ChatGPT 提问"'))return mode==="chinese"?[editor]:[];
+     return [];
+   },
    querySelector(q){return options.busy && q.startsWith("[data-testid")?{}:null;},
    createRange(){return {selectNodeContents(){},collapse(){}};},
    execCommand(_cmd,_show,s){editor.innerText=s;editor.textContent=s;return !options.execFail;}
@@ -217,6 +266,32 @@ test("content-script ping is read-only and reinjection never duplicates listener
  assert.equal(p.editor.innerText,"用户草稿");
  p.reinject();p.reinject();
  assert.equal(p.handlers.length,1);
+});
+test("missing composer reports conclusively no submission",async()=>{
+ const p=domHarness({missing:true});
+ const r=await p.deliver();
+ assert.equal(r.ok,false);assert.equal(r.notSubmitted,true);
+ assert.equal(p.editor.innerText,"");
+});
+test("labelled modern ChatGPT composer works, with Chinese locale and deduped selectors",async()=>{
+ const a=await domHarness({editorMode:"labelled"}).deliver();
+ assert.equal(a.ok,true);assert.equal(a.submitted,true);
+ const b=await domHarness({editorMode:"chinese"}).deliver();
+ assert.equal(b.ok,true);assert.equal(b.submitted,true);
+});
+test("competing or non-editable composers fail closed without typing",async()=>{
+ const multi=domHarness({editorMode:"multi"});
+ assert.match((await multi.deliver()).reason,/唯一/);
+ assert.equal(multi.editor.innerText,"");
+ const disabled=domHarness({editorMode:"labelled",noEditable:true});
+ assert.match((await disabled.deliver()).reason,/唯一/);
+ assert.equal(disabled.editor.innerText,"");
+});
+test("short stop-generation control blocks delivery before typing",async()=>{
+ const p=domHarness({busy:true});
+ const r=await p.deliver();
+ assert.equal(r.ok,false);assert.equal(r.notSubmitted,true);
+ assert.equal(p.editor.innerText,"");
 });
 test("content script rejects unrelated tab, existing draft, busy UI and missing controls",async()=>{
  assert.equal((await domHarness({url:"https://evil.example/c/abc"}).deliver()).ok,false);

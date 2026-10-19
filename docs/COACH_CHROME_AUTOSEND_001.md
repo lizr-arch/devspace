@@ -44,6 +44,17 @@
 
 用户需要在 `chrome://extensions` 重新加载 DevSpace Coach Watch 0.3.1，核查新增 ChatGPT 网站权限、配对与当前对话绑定。若登录/配对已经有效则勿重复清除配对。运行 `npm run test:coach:observer` 覆盖自动注入及其他安全门禁。生产 Chrome 真实消息投递仍必须单独验证。
 
+## 2026-10-19 · Chrome 0.3.2 真实用户故障修复
+
+来自已配对的浏览器现场状态：`pending=9, sent=0, needs_attention=1`，同一四个旧审核事件同时存在 `unknown:operationId:eventId` 与 `workspaceId:operationId:eventId` 两套键；新工作区键中的事件 #10 报「找不到唯一的 ChatGPT 编辑器」。
+
+- 扩展继续只识别唯一可见且确实为可编辑状态的 ChatGPT 输入框。除了旧 `#prompt-textarea`，增加明确的 `aria-label="Ask ChatGPT"`、`aria-label="向 ChatGPT 提问"` 候选以及已知的发送按钮标签；不扫描任意编辑区域，不覆盖用户草稿。在检测到停止生成按钮时拒绝发送。
+- 仅在获得 Sidecar 经过配对认证的 **确切相同** `operation_id + event_id` 且有新 `workspace_id` 时，旧键才会归并。原旧键转为 `merged` 审计痕迹，独立于活动计数；`sent` 与 `needs_attention` 的结果不会被当作新任务而自动重发。若两个键状态冲突，遵循最保守状态；无法精确匹配的不迁移。
+- 内容脚本对**明确在输入前返回**的失败增加 `notSubmitted`，Worker 保留 `pending` 并在后续轮询重试，不再误判为 `needs_attention`。已插入文本、已按发送、或结果不明则仍进入人工核查。迁移前已经出现的 `needs_attention` 不自动重置。
+- `npm run test:coach:observer` 包含上述身份归并、防重发、编辑器候选与多编辑器拒绝、草稿保护、生成状态、发送前失败的回归。模拟测试通过不意味着真实 Chrome 页面提交成功。
+
+部署提示：在 `chrome://extensions` 重载同路径 DevSpace Coach Watch **0.3.2**，必要时重新配对并绑定当前 ChatGPT 对话。恢复发送前先核查旧事件 #10 是否实际出现在聊天中；确认没有发送后方可使用「确认未发出，重试」。新版本不会自行处理旧版的不确定记录。原 DevSpace Sidecar 不需要重启。
+
 ## 裁决
 
 `ISOLATED_IMPLEMENTATION_DONE`；`MOCK_E2E_PASS`；`REAL_CHROME_DELIVERY_NOT_RUN`；`PRODUCTION_DEPLOY_NOT_RUN`。
