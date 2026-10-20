@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer, request, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, lstatSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import Database from "better-sqlite3";
 import { ManagedCoachSidecar } from "./managed-coach-sidecar.js";
 import { CoachReviewEventStore } from "./coach-review-events.js";
@@ -44,7 +44,7 @@ db.exec("create table events(event_id integer primary key, operation_id text, ev
 db.close();
 const locks = new JobResourceLocks();
 const manager = new ManagedCoachSidecar(locks);
-const id = "a".repeat(32);
+const id = "bapcebjlgncogfpgbhllioaichcldkbl";
 let port = await freePort();
 try {
   // All denial paths must leave the resource registry untouched.
@@ -126,7 +126,8 @@ try {
   assert.equal((await fetch(url + "/events", { method: "POST", headers: auth })).status, 405);
   assert.equal((await fetch(url + "/events", { method: "PUT", headers: auth })).status, 405);
   assert.equal(sha(dbPath), oldHash);
-  assert.equal((await fetch(url + "/events?token=invalid", { headers: auth })).status, 404);
+  assert.equal((await fetch(url + "/events?token=invalid", { headers: auth })).status, 400,
+    "unknown feed selectors must fail closed before database access");
   const preflight = await fetch(url + "/events", { method: "OPTIONS", headers: { Origin: origin } });
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers.get("access-control-allow-origin"), origin);
@@ -215,12 +216,14 @@ try {
   // denial for unknown workspace and a read-only MCP server's tool inventory.
   const toolLocks = new JobResourceLocks();
   const toolManager = new ManagedCoachSidecar(toolLocks);
+  const toolEvents=new CoachReviewEventStore(join(root,"tool-state"));
   const fakeWorkspace = { getWorkspace: (workspaceId: string) => {
     if (workspaceId !== "w") throw new Error("Unknown workspace");
     return { root: workspace };
   }};
   const createContext = (readOnly: boolean) => ({
-    config: { readOnly }, workspaces: fakeWorkspace, managedCoachSidecar: toolManager,
+    config: { readOnly }, workspaces: fakeWorkspace,
+    managedCoachSidecar: toolManager, coachReviewEvents:toolEvents,
   }) as unknown as ServerContext;
   const toolServer = new McpServer({ name: "coach-a2-tool-test", version: "1.0.0" });
   registerSidecarTools(toolServer, createContext(false));
@@ -246,6 +249,8 @@ try {
     const startData = startResponse.structuredContent as Record<string, unknown>;
     const pairedToken = startData.token as string;
     assert.match(pairedToken, /^[A-Za-z0-9_-]{43}$/);
+    assert.deepEqual(toolEvents.coachFeedConfig()?.authorizedWorkspaceIds,["w"],
+      "explicit Sidecar tool start persists only the selected workspace");
     const statusResponse = await client.callTool({
       name: "coach_sidecar_status", arguments: { workspaceId: "w" },
     });
@@ -258,6 +263,8 @@ try {
       name: "stop_coach_sidecar", arguments: { workspaceId: "w" },
     });
     assert.equal(stopResponse.isError ?? false, false);
+    assert.equal(toolEvents.coachFeedConfig(),undefined,
+      "explicit stop must revoke the automatic restart consent");
     assert.equal(toolLocks.snapshot().length, 0);
   } finally {
     await toolManager.close();
@@ -276,16 +283,21 @@ try {
   } finally {
     await readonlyClient.close();
     await readonlyServer.close();
+    toolEvents.close();
   }
 
   // Native (DevSpace stateDir) event source: scope all rows to this exact workspace.
   const native = new CoachReviewEventStore(join(root, "state"));
   const eventA = native.recordCompleted({ workspaceId: "native-ws", operationId: "native-completed", evidenceSha256: "a".repeat(64) });
-  native.recordCompleted({ workspaceId: "other-ws", operationId: "cross-workspace-secret", evidenceSha256: "b".repeat(64) });
+  const eventB=native.recordCompleted({ workspaceId: "other-ws", operationId: "cross-workspace-secret", evidenceSha256: "b".repeat(64) });
   const nativeLocks = new JobResourceLocks();
   const nativeSidecar = new ManagedCoachSidecar(nativeLocks, native.path);
   const nativePort = await freePort();
   const pair = await nativeSidecar.start({ workspaceId: "native-ws", workspaceRoot: workspace, port: nativePort, pairedExtensionId:id });
+  const handoffPath=join(dirname(native.path),"coach-current-pairing.json");
+  assert.equal(existsSync(handoffPath),true);
+  assert.equal(lstatSync(handoffPath).mode&0o777,0o600);
+  assert.equal(JSON.parse(readFileSync(handoffPath,"utf8")).token,pair.token);
   try {
     const headers = { Authorization: "Bearer " + pair.token };
     const response = await fetch("http://127.0.0.1:" + nativePort + "/events", { headers });
@@ -324,15 +336,48 @@ try {
     native.submitReview({ workspaceId: "native-ws", eventId: eventA.event_id, decision: "APPROVED", evidenceSha256: "a".repeat(64) });
     const post = await fetch("http://127.0.0.1:" + nativePort + "/events", { headers });
     assert.equal((await post.json() as { pending_count:number }).pending_count, 0);
+    // Authorizations are persisted as an exact consent set, never
+    // silently widened to all workspaces registered in the event database.
+    native.saveCoachFeedConfig({workspaceId:"native-ws",workspaceRoot:workspace,
+      port:nativePort,pairedExtensionId:id,observeAllNativeAgents:false,
+      authorizedWorkspaceIds:["native-ws","other-ws"]});
+    assert.deepEqual(native.coachFeedConfig()?.authorizedWorkspaceIds,["native-ws","other-ws"]);
+    assert.throws(()=>native.saveCoachFeedConfig({workspaceId:"native-ws",
+      workspaceRoot:workspace,port:nativePort,observeAllNativeAgents:false,
+      authorizedWorkspaceIds:["other-ws"]}),/COACH_FEED_CONFIG_INVALID/);
+    assert.deepEqual(native.coachFeedConfig()?.authorizedWorkspaceIds,["native-ws","other-ws"]);
+    native.clearCoachFeedConfig();
+    assert.equal(native.coachFeedConfig(),undefined);
   } finally { await nativeSidecar.close(); native.close(); }
+  assert.equal(existsSync(handoffPath),false,"stop revokes current pairing handoff");
   assert.equal(nativeLocks.snapshot().length, 0);
   // A newly started sidecar must recover the already acknowledged identity,
   // not create a second delivery claim or require the old bearer token.
   const restartedSidecar=new ManagedCoachSidecar(new JobResourceLocks(),native.path);
   const restartedPort=await freePort();
-  await restartedSidecar.start({workspaceId:"native-ws",workspaceRoot:workspace,
-    port:restartedPort,pairedExtensionId:id});
+  const multi=await restartedSidecar.start({workspaceId:"native-ws",workspaceRoot:workspace,
+    port:restartedPort,pairedExtensionId:id,
+    authorizedWorkspaceIds:["native-ws","other-ws"]});
   try {
+    const base="http://127.0.0.1:"+restartedPort;
+    const headers={Authorization:"Bearer "+multi.token};
+    const union=await fetch(base+"/events",{headers});
+    assert.equal(union.status,200);
+    const body=await union.json() as {pending_count:number;events:{event_id:number;workspace_id:string}[]};
+    assert.equal(body.pending_count,1);
+    assert.equal(body.events[0]?.workspace_id,"other-ws");
+    assert.equal(body.events[0]?.event_id,eventB.event_id);
+    const filtered=await fetch(base+"/events?workspaceId=native-ws",{headers});
+    assert.equal((await filtered.json() as {pending_count:number}).pending_count,0);
+    assert.equal((await fetch(base+"/events?workspaceId=unauthorized",{headers})).status,403);
+    assert.equal((await fetch(base+"/events?workspaceId=other-ws&workspaceId=native-ws",{headers})).status,400);
+    const scopeReceipt={workspace_id:"other-ws",event_id:eventB.event_id,operation_id:"cross-workspace-secret"};
+    const posted=await fetch(base+"/delivery-receipt",{method:"POST",body:JSON.stringify(scopeReceipt),
+      headers:{...headers,Origin:"chrome-extension://"+id,"Content-Type":"application/json"}});
+    assert.equal(posted.status,200);
+    assert.equal(restartedSidecar.getDeliveryReceipt("other-ws",eventB.event_id)?.operation_id,
+      "cross-workspace-secret");
+    assert.equal(restartedSidecar.getDeliveryReceipt("unapproved-ws",eventB.event_id),undefined);
     assert.equal(restartedSidecar.getDeliveryReceipt("native-ws",eventA.event_id)?.result,
       "dom_submitted");
     assert.equal(restartedSidecar.getDeliveryReceipt("native-ws",eventA.event_id)?.operation_id,

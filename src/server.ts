@@ -401,6 +401,28 @@ function createServerWithOwnedState(
   const coachRealtime=new CoachRealtimeEngine(config.stateDir,{
     events:coachReviewEvents,tasks,runner:getNativeCodexRunner,workspaces,
   });
+  // Worker mode already has a durable, fenced Sidecar recovery loop. Mirror
+  // that policy only in the non-Worker API path; the persisted consent is
+  // written by the explicit start tool, never inferred from open worktrees.
+  let sidecarRecoveryClosing=false,sidecarRecoveryPending:Promise<void>|undefined;
+  const restoreLocalCoach=()=>{
+    if(codexWorkerSocket||sidecarRecoveryClosing||sidecarRecoveryPending)return;
+    const saved=coachReviewEvents.coachFeedConfig();
+    if(!saved)return;
+    sidecarRecoveryPending=(async()=>{
+      try{
+        if(await managedCoachSidecar.status(saved.workspaceId))return;
+        const ws=workspaces.getWorkspace(saved.workspaceId);
+        if(ws.root!==saved.workspaceRoot)throw new Error("COACH_FEED_WORKSPACE_CHANGED");
+        for(const id of saved.authorizedWorkspaceIds)workspaces.getWorkspace(id);
+        if(sidecarRecoveryClosing)return;
+        await managedCoachSidecar.start(saved);
+      }catch{/* Missing roots or bound ports fail closed until a later retry. */}
+    })().finally(()=>{sidecarRecoveryPending=undefined;});
+  };
+  if(!codexWorkerSocket)restoreLocalCoach();
+  const sidecarRecoveryTimer=codexWorkerSocket?undefined:setInterval(restoreLocalCoach,5000);
+  sidecarRecoveryTimer?.unref();
   const toolNames = toolNamesFor(config);
   const widgetMeta = (
     toolName: string,
@@ -468,6 +490,8 @@ function createServerWithOwnedState(
     close: () => {
       if (closed) return closePending ?? Promise.resolve();
       closed = true;
+      sidecarRecoveryClosing=true;
+      if(sidecarRecoveryTimer)clearInterval(sidecarRecoveryTimer);
       mcpSessions.close();
       resourceMonitor.close();
       jobs.close();
@@ -481,7 +505,7 @@ function createServerWithOwnedState(
       workspaceStore.close?.();
       closePending = Promise.allSettled([
         coachRealtime.close(),
-        managedCoachSidecar.close(),
+        (async()=>{await sidecarRecoveryPending;await managedCoachSidecar.close();})(),
         nativeCodexRunner?.close(),
       ]).then(() => {
         agentObserver.close();

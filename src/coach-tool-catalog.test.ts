@@ -26,5 +26,5 @@ assert.ok(!ro.includes("coach_realtime_pause"));
 assert.ok(!ro.includes("coach_realtime_resume"));
 assert.ok(!ro.includes("codex_agent_update_config"));
 assert.ok(!ro.includes("codex_agent_start"));
-assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037$/);
+assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");

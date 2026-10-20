@@ -32,6 +32,9 @@ export function registerSidecarTools(
           pairedExtensionId: extensionIdSchema,
           // Explicit elevated scope. Existing v0.2 starts default to off.
           adminObserverScope: z.literal("all_native_worktrees").optional(),
+          // Explicit, bounded event scope. Never discover or authorize all
+          // registered worktrees automatically.
+          authorizedWorkspaceIds: z.array(workspaceIdSchema).min(1).max(8).optional(),
         },
         outputSchema: resultOutputSchema({
           sidecar: z.unknown().optional(),
@@ -46,15 +49,20 @@ export function registerSidecarTools(
           openWorldHint: false,
         },
       },
-      async ({ workspaceId, port, pairedExtensionId, adminObserverScope }) => {
+      async ({ workspaceId, port, pairedExtensionId, adminObserverScope,authorizedWorkspaceIds }) => {
         const workspace = workspaces.getWorkspace(workspaceId);
-        const started = await managedCoachSidecar.start({
-          workspaceId,
-          workspaceRoot: workspace.root,
-          port,
-          pairedExtensionId,
-          observeAllNativeAgents: adminObserverScope === "all_native_worktrees",
-        });
+        const ids=authorizedWorkspaceIds??[workspaceId];
+        if(!ids.includes(workspaceId)||new Set(ids).size!==ids.length)
+          throw new Error("COACH_FEED_SCOPE_INVALID");
+        // Each additional workspace requires the same explicit MCP-approved
+        // root validation as the original workspace.
+        for(const id of ids)workspaces.getWorkspace(id);
+        const consent={workspaceId,workspaceRoot:workspace.root,port,pairedExtensionId,
+          observeAllNativeAgents:adminObserverScope==="all_native_worktrees",
+          authorizedWorkspaceIds:ids};
+        const started = await managedCoachSidecar.start(consent);
+        try{ctx.coachReviewEvents.saveCoachFeedConfig(consent);}
+        catch(error){await managedCoachSidecar.stop(workspaceId);throw error;}
         const { token, ...sidecar } = started;
         const result =
           "Started coach-feed on 127.0.0.1:" +
@@ -87,6 +95,8 @@ export function registerSidecarTools(
       async ({ workspaceId }) => {
         workspaces.getWorkspace(workspaceId);
         await managedCoachSidecar.stop(workspaceId);
+        const saved=ctx.coachReviewEvents.coachFeedConfig();
+        if(saved?.workspaceId===workspaceId)ctx.coachReviewEvents.clearCoachFeedConfig();
         const result = "Coach feed stopped.";
         return {
           content: [textBlock(result)],

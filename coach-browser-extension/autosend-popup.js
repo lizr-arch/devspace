@@ -45,7 +45,7 @@ for (const [id,type] of [
 ]) {
   findAuto(id).addEventListener("click",async () => {
     try {
-      const result = await chrome.runtime.sendMessage({type});
+      const result = await chrome.runtime.sendMessage({type,workspaceId:findAuto("auto-workspace").value.trim()});
       findAuto("auto-feedback").textContent = !result.ok ? (result.error || "操作失败") :
         type==="COACH_AUTO_PUMP" ?
         (result.state?.blocking || result.state?.lastCheck?.message || "已检查队列") : "操作成功";

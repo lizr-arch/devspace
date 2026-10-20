@@ -1,9 +1,13 @@
 "use strict";
 // The sidecar bearer remains in session storage; only event identities are persisted.
 // Stored "in_flight" is deliberately NOT retried after a worker/browser crash.
-const AUTO_SESSION = "coachAutoTarget";
+const AUTO_SESSION = "coachAutoRoutes";
 const AUTO_LEDGER = "coachAutoLedger";
+const AUTO_REVOKED = "coachAutoRouteRevoked";
 const AUTO_ALARM = "coach-auto-delivery";
+// Incremented synchronously when a grant changes: old async tab lookups
+// cannot resurrect a previous grant after explicit unbind or unpair.
+let autoRouteMutationEpoch=0;
 const AUTO_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const AUTO_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 let autoBusy = false;
@@ -24,7 +28,10 @@ function autoCanonical(url) {
   } catch { return null; }
 }
 async function autoTarget() {
-  return (await chrome.storage.session.get(AUTO_SESSION))[AUTO_SESSION] || null;
+  // A persistent revoke marker dominates any legacy or in-flight route write.
+  // It is cleared only by a fresh explicit conversation bind.
+  if((await chrome.storage.local.get(AUTO_REVOKED))[AUTO_REVOKED]===true)return {};
+  return (await chrome.storage.local.get(AUTO_SESSION))[AUTO_SESSION] || {};
 }
 async function autoLedger() {
   const value = (await chrome.storage.local.get(AUTO_LEDGER))[AUTO_LEDGER];
@@ -95,7 +102,7 @@ function autoInstruction(e) {
   "\n事件 ID："+e.event_id+"\n工作区 ID："+(e.workspace_id||"旧版 Sidecar 未返回；请通过 DevSpace MCP 按任务 ID 查证，若无法唯一匹配则停止") + "\n任务 ID："+e.operation_id;
 }
 async function autoState() {
-  const target=await autoTarget(), ledger=await autoLedger();
+  const routes=await autoTarget(), entries=Object.entries(routes), ledger=await autoLedger();
   if(autoReconcileStored(ledger))await autoSaveLedger(ledger);
   const lastCheck=(await chrome.storage.session.get(AUTO_LAST_CHECK))[AUTO_LAST_CHECK]||null;
   const summary={pending:0,sent:0,needs_attention:0,in_flight:0,receipt_pending:0};
@@ -106,34 +113,61 @@ async function autoState() {
   const recent=Object.entries(ledger).filter(([,x])=>x?.state!=="merged")
     .slice(-10).reverse()
     .map(([key,x])=>({key,state:x.state,at:x.at||"",reason:x.reason||""}));
-  return {enabled:!!target?.enabled, bound:!!target?.url, url:target?.url||"",
+  return {enabled:entries.some(([,route])=>!!route?.enabled), bound:entries.length>0,
+    url:entries.length===1?entries[0][1]?.url||"":entries.length?entries.length+" 个工作区对话已绑定":"",
+    routes:entries.map(([workspaceId,route])=>({workspaceId,url:route?.url||"",enabled:!!route?.enabled,tabReady:Number.isSafeInteger(route?.tabId)})),
     version:autoVersion(), lastCheck,
     blocking:summary.needs_attention>0 ?
-      "有 "+summary.needs_attention+" 条发送结果待人工核实，已暂停队列":""
-    ,tabId:target?.tabId??null,summary,recent};
+      "有 "+summary.needs_attention+" 条发送结果待人工核实；只暂停关联工作区，不重发不确定消息":""
+    ,summary,recent};
 }
-async function autoBind() {
+async function autoBind(workspaceId) {
+  if(typeof workspaceId!=="string"||!AUTO_ID.test(workspaceId))return {ok:false,error:"请输入精确工作区 ID"};
   const tabs=await chrome.tabs.query({active:true,currentWindow:true});
   const tab=tabs?.[0];
   const url=autoCanonical(tab?.url);
   if(!Number.isSafeInteger(tab?.id)||!url) return {ok:false,error:"请先打开一个具体的 ChatGPT Coach 对话"};
-  await chrome.storage.session.set({[AUTO_SESSION]:{url,tabId:tab.id,enabled:false}});
+  const routes=await autoTarget();
+  // A Coach conversation belongs to exactly one explicitly authorized
+  // workspace. Reusing it would mix unrelated projects' review histories.
+  if(Object.entries(routes).some(([id,r])=>id!==workspaceId&&autoCanonical(r?.url)===url))
+    return {ok:false,error:"该 ChatGPT 对话已绑定另一个工作区，请选择独立对话"};
+  autoRouteMutationEpoch++;
+  routes[workspaceId]={url,tabId:tab.id,enabled:false};
+  await chrome.storage.local.set({[AUTO_SESSION]:routes,[AUTO_REVOKED]:false});
   return {ok:true,state:await autoState()};
 }
-async function autoToggle(enabled) {
-  const t=await autoTarget();
-  if(!t?.url || !Number.isSafeInteger(t?.tabId)) return {ok:false,error:"请先绑定对话"};
+async function autoToggle(enabled,requestedWorkspaceId) {
+  const routes=await autoTarget(),workspaceId=requestedWorkspaceId|| (Object.keys(routes).length===1?Object.keys(routes)[0]:null);
+  const t=workspaceId?routes[workspaceId]:null;
+  if(!t?.url || !Number.isSafeInteger(t?.tabId)) return {ok:false,error:"需先绑定唯一工作区对话"};
   if(enabled) {
     const tab=await chrome.tabs.get(t.tabId).catch(()=>null);
     if(autoCanonical(tab?.url)!==t.url) return {ok:false,error:"原对话标签页已关闭或导航"};
   }
-  await chrome.storage.session.set({[AUTO_SESSION]:{...t,enabled:!!enabled}});
+  autoRouteMutationEpoch++;
+  routes[workspaceId]={...t,enabled:!!enabled};await chrome.storage.local.set({[AUTO_SESSION]:routes});
   if(enabled) void autoPump();
   return {ok:true,state:await autoState()};
 }
 async function autoUnbind() {
-  await chrome.storage.session.remove(AUTO_SESSION);
+  autoRouteMutationEpoch++;
+  await chrome.storage.local.set({[AUTO_REVOKED]:true});
+  await chrome.storage.local.remove(AUTO_SESSION);
   return {ok:true,state:await autoState()};
+}
+async function autoResolveRoutes(){
+  const epoch=autoRouteMutationEpoch;
+  const routes=await autoTarget();let changed=false;
+  for(const [workspaceId,target] of Object.entries(routes)){
+    if(!target?.url||!autoCanonical(target.url))continue;
+    const matches=(await chrome.tabs.query({url:target.url+"*"})).filter(t=>autoCanonical(t.url)===target.url);
+    const next={...target,tabId:matches.length===1&&Number.isSafeInteger(matches[0].id)?matches[0].id:null};
+    if(next.tabId!==target.tabId){routes[workspaceId]=next;changed=true;}
+  }
+  if(changed && epoch===autoRouteMutationEpoch &&
+     (await chrome.storage.local.get(AUTO_REVOKED))[AUTO_REVOKED]!==true)
+    await chrome.storage.local.set({[AUTO_SESSION]:routes});
 }
 // Chrome declarative content scripts do not attach to tabs opened before an
 // extension reload. A read-only ping checks readiness BEFORE any submit command.
@@ -210,9 +244,11 @@ async function autoPump() {
   if(autoBusy)return;
   autoBusy=true;
   let code="checking",message="正在检查";
+  const sendEpoch=autoRouteMutationEpoch;
   try {
-    const target=await autoTarget();
-    if(!target?.enabled || !autoCanonical(target.url) || !Number.isSafeInteger(target.tabId)) {
+    await autoResolveRoutes();
+    const routes=await autoTarget();
+    if(!Object.values(routes).some(t=>t?.enabled)) {
       code="not_enabled";message="未绑定或自动发送已暂停";return;
     }
     const pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
@@ -220,10 +256,6 @@ async function autoPump() {
        !AUTO_TOKEN.test(pair.token)) {
       code="not_paired";message="未配对有效的 Sidecar 会话";return;
     }
-    const tab=await chrome.tabs.get(target.tabId).catch(()=>null);
-    if(autoCanonical(tab?.url)!==target.url) {
-      code="wrong_tab";message="已绑定标签页不在原对话";return;
-    } // wrong tab never receives instructions
     const response=await fetch("http://127.0.0.1:"+pair.port+"/events",{
       method:"GET",cache:"no-store",headers:{Authorization:"Bearer "+pair.token}
     });
@@ -257,15 +289,35 @@ async function autoPump() {
     if(events.some(e=>!ledger[autoKey(e)])) {
       code="ledger_full";message="事件账本已达到安全上限";return;
     }
-    // Unresolved unknown delivery stops automatic progression, to avoid duplicates.
-    if(Object.values(ledger).some(x=>x.state==="needs_attention")) {
-      code="needs_attention";message="有发送结果待人工核实；禁止自动重发";return;
-    }
-    const candidate=events.find(e=>ledger[autoKey(e)]?.state==="pending");
+    // An uncertain submission blocks only its owning workspace. Legacy
+    // unknown-scope records block an exactly matching operation/event until
+    // reconciled; they cannot stall independent conversations indefinitely.
+    const uncertain=Object.entries(ledger).filter(([,r])=>r?.state==="needs_attention");
+    const blockedFor=e=>uncertain.some(([k])=>
+      k.startsWith(e.workspace_id+":") ||
+      k==="unknown:"+e.operation_id+":"+e.event_id);
+    const candidate=events.find(e=>typeof e.workspace_id==="string" && AUTO_ID.test(e.workspace_id) &&
+      routes[e.workspace_id]?.enabled && ledger[autoKey(e)]?.state==="pending" &&
+      !blockedFor(e));
     if(!candidate) {
-      code="no_candidate";message="已同步 Sidecar，没有新的待投递事件";return;
+      code=uncertain.length?"needs_attention":"no_candidate";
+      message=uncertain.length?
+        "有发送结果待人工核实；关联工作区已暂停，其它工作区仍可投递":
+        "已同步 Sidecar，没有新的待投递事件";return;
     }
     const key=autoKey(candidate);
+    const target=routes[candidate.workspace_id];
+    // Fail closed on corrupt, manually migrated or legacy duplicate routes,
+    // not just on new binding attempts.
+    if(target?.url && Object.entries(routes).some(([id,r])=>
+      id!==candidate.workspace_id && autoCanonical(r?.url)===autoCanonical(target.url))) {
+      code="route_conflict";message="多个工作区绑定了同一对话，已停止自动投递";return;
+    }
+    if(!target?.enabled || !autoCanonical(target.url) || !Number.isSafeInteger(target.tabId)) {
+      code="route_not_authorized";message="该工作区没有明确授权的 ChatGPT 对话";return;
+    }
+    const tab=await chrome.tabs.get(target.tabId).catch(()=>null);
+    if(autoCanonical(tab?.url)!==target.url) {code="wrong_tab";message="已绑定标签页不在原对话";return;}
     // Readiness/injection is safe to repeat: it never edits or submits a message.
     // On failure retain pending rather than converting "definitely not sent"
     // into an ambiguous needs_attention state.
@@ -278,9 +330,10 @@ async function autoPump() {
     ledger[key]={state:"in_flight",at:new Date().toISOString(),reason:"正在发送"};
     await autoSaveLedger(ledger); // durable BEFORE any DOM action
     // User may have paused or rebound while the network query was in flight.
-    const latest=await autoTarget();
+    const latestRoutes=await autoTarget(),latest=latestRoutes[candidate.workspace_id];
     const latestTab=await chrome.tabs.get(target.tabId).catch(()=>null);
-    if(!latest?.enabled || latest.tabId!==target.tabId || latest.url!==target.url ||
+    if(sendEpoch!==autoRouteMutationEpoch ||
+       !latest?.enabled || latest.tabId!==target.tabId || latest.url!==target.url ||
        autoCanonical(latestTab?.url)!==target.url) {
       ledger[key]={state:"pending",at:new Date().toISOString(),reason:"绑定会话或授权已变化，取消发送"};
       await autoSaveLedger(ledger);
@@ -317,28 +370,33 @@ async function autoPump() {
     autoBusy=false;
   }
 }
-chrome.runtime.onInstalled.addListener(()=>chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5}));
-chrome.runtime.onStartup.addListener(()=>chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5}));
+chrome.runtime.onInstalled.addListener(()=>{chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5});void autoResolveRoutes();});
+chrome.runtime.onStartup.addListener(()=>{chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5});void autoResolveRoutes();});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name===AUTO_ALARM)void autoPump();});
 // Leaving the selected chat revokes the active send grant, even if the user navigates back.
 chrome.tabs.onUpdated.addListener((tabId,change)=>{
   if(!change.url)return;
-  void autoTarget().then(t=>{
-    if(t?.tabId===tabId && autoCanonical(change.url)!==t.url)
-      return chrome.storage.session.set({[AUTO_SESSION]:{...t,enabled:false}});
+  const epoch=autoRouteMutationEpoch;
+  void autoTarget().then(routes=>{
+    let changed=false;for(const [id,t] of Object.entries(routes))if(t?.tabId===tabId&&autoCanonical(change.url)!==t.url){routes[id]={...t,tabId:null,enabled:false};changed=true;}
+    if(changed && epoch===autoRouteMutationEpoch)
+      return chrome.storage.local.set({[AUTO_SESSION]:routes});
   });
 });
 chrome.tabs.onRemoved.addListener(tabId=>{
-  void autoTarget().then(t=>{
-    if(t?.tabId===tabId)return chrome.storage.session.remove(AUTO_SESSION);
+  const epoch=autoRouteMutationEpoch;
+  void autoTarget().then(routes=>{
+    let changed=false;for(const [id,t] of Object.entries(routes))if(t?.tabId===tabId){routes[id]={...t,tabId:null};changed=true;}
+    if(changed && epoch===autoRouteMutationEpoch)
+      return chrome.storage.local.set({[AUTO_SESSION]:routes});
   });
 });
 chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
   const tasks={
     COACH_AUTO_STATUS:()=>autoState().then(state=>({ok:true,state})),
-    COACH_AUTO_BIND:autoBind,
-    COACH_AUTO_ENABLE:()=>autoToggle(true),
-    COACH_AUTO_PAUSE:()=>autoToggle(false),
+    COACH_AUTO_BIND:()=>autoBind(msg.workspaceId),
+    COACH_AUTO_ENABLE:()=>autoToggle(true,msg.workspaceId),
+    COACH_AUTO_PAUSE:()=>autoToggle(false,msg.workspaceId),
     COACH_AUTO_UNBIND:autoUnbind,
     COACH_AUTO_PUMP:async()=>{await autoPump();return {ok:true,state:await autoState()};},
     COACH_AUTO_RESOLVE:()=>autoResolve(msg.key,msg.action)

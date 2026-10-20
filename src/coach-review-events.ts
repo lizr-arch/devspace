@@ -135,6 +135,9 @@ export class CoachReviewEventStore {
       this.db.exec("CREATE TABLE IF NOT EXISTS codex_worker_generation (singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation INTEGER NOT NULL)");
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_worker_review_recommendations (workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,decision TEXT NOT NULL CHECK(decision IN ('APPROVED','REWORK','BLOCKED')),reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(workspace_id,operation_id),FOREIGN KEY(workspace_id,operation_id) REFERENCES coach_agent_runs(workspace_id,operation_id))");
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_feed_config (singleton INTEGER PRIMARY KEY CHECK(singleton=1),workspace_id TEXT NOT NULL,workspace_root TEXT NOT NULL,port INTEGER NOT NULL,paired_extension_id TEXT,observe_all_native_agents INTEGER NOT NULL CHECK(observe_all_native_agents IN (0,1)),updated_at TEXT NOT NULL)");
+      // Explicitly authorized additional workspaces. Never infer access from
+      // all existing workspace sessions or a broad observer permission.
+      this.db.exec("CREATE TABLE IF NOT EXISTS coach_feed_authorized_workspaces (workspace_id TEXT PRIMARY KEY)");
       this.db.exec(
         "CREATE TABLE IF NOT EXISTS coach_agent_model_configs ("+
         "workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL,"+
@@ -485,20 +488,39 @@ export class CoachReviewEventStore {
       .get(workspaceId,operationId) as {decision:"APPROVED"|"REWORK"|"BLOCKED";reason:string}|undefined;
     return row?{...row}:undefined;
   }
-  saveCoachFeedConfig(input:{workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents:boolean}):void {
+  saveCoachFeedConfig(input:{workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents:boolean;authorizedWorkspaceIds?:string[]}):void {
+    const ids=input.authorizedWorkspaceIds??[input.workspaceId];
     if(!ID.test(input.workspaceId)||!input.workspaceRoot||!Number.isSafeInteger(input.port)||input.port<1||input.port>65535||
       (input.pairedExtensionId!==undefined&&!/^[a-p]{32}$/.test(input.pairedExtensionId))||
-      (input.observeAllNativeAgents&&!input.pairedExtensionId))throw new Error("COACH_FEED_CONFIG_INVALID");
-    this.db.prepare("INSERT INTO coach_feed_config(singleton,workspace_id,workspace_root,port,paired_extension_id,observe_all_native_agents,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET workspace_id=excluded.workspace_id,workspace_root=excluded.workspace_root,port=excluded.port,paired_extension_id=excluded.paired_extension_id,observe_all_native_agents=excluded.observe_all_native_agents,updated_at=excluded.updated_at")
-      .run(input.workspaceId,input.workspaceRoot,input.port,input.pairedExtensionId??null,input.observeAllNativeAgents?1:0,new Date().toISOString());
+      (input.observeAllNativeAgents&&!input.pairedExtensionId)||
+      ids.length<1||ids.length>8||new Set(ids).size!==ids.length||
+      !ids.includes(input.workspaceId)||ids.some(id=>!ID.test(id)))
+      throw new Error("COACH_FEED_CONFIG_INVALID");
+    this.db.transaction(()=>{
+      this.db.prepare("INSERT INTO coach_feed_config(singleton,workspace_id,workspace_root,port,paired_extension_id,observe_all_native_agents,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET workspace_id=excluded.workspace_id,workspace_root=excluded.workspace_root,port=excluded.port,paired_extension_id=excluded.paired_extension_id,observe_all_native_agents=excluded.observe_all_native_agents,updated_at=excluded.updated_at")
+        .run(input.workspaceId,input.workspaceRoot,input.port,input.pairedExtensionId??null,input.observeAllNativeAgents?1:0,new Date().toISOString());
+      this.db.prepare("DELETE FROM coach_feed_authorized_workspaces").run();
+      const insert=this.db.prepare("INSERT INTO coach_feed_authorized_workspaces(workspace_id) VALUES(?)");
+      for(const id of ids)insert.run(id);
+    }).immediate();
   }
-  coachFeedConfig():{workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents:boolean}|undefined {
+  coachFeedConfig():{workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents:boolean;authorizedWorkspaceIds:string[]}|undefined {
     const row=this.db.prepare("SELECT workspace_id AS workspaceId,workspace_root AS workspaceRoot,port,paired_extension_id AS pairedExtensionId,observe_all_native_agents AS observeAllNativeAgents FROM coach_feed_config WHERE singleton=1")
       .get() as {workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId:string|null;observeAllNativeAgents:number}|undefined;
-    return row?{workspaceId:row.workspaceId,workspaceRoot:row.workspaceRoot,port:row.port,
-      ...(row.pairedExtensionId?{pairedExtensionId:row.pairedExtensionId}:{}),observeAllNativeAgents:row.observeAllNativeAgents===1}:undefined;
+    if(!row)return undefined;
+    const ids=(this.db.prepare("SELECT workspace_id FROM coach_feed_authorized_workspaces ORDER BY workspace_id")
+      .all() as {workspace_id:string}[]).map(x=>x.workspace_id);
+    return {workspaceId:row.workspaceId,workspaceRoot:row.workspaceRoot,port:row.port,
+      ...(row.pairedExtensionId?{pairedExtensionId:row.pairedExtensionId}:{}),
+      observeAllNativeAgents:row.observeAllNativeAgents===1,
+      authorizedWorkspaceIds:ids.length?ids:[row.workspaceId]};
   }
-  clearCoachFeedConfig():void {this.db.prepare("DELETE FROM coach_feed_config WHERE singleton=1").run();}
+  clearCoachFeedConfig():void {
+    this.db.transaction(()=>{
+      this.db.prepare("DELETE FROM coach_feed_config WHERE singleton=1").run();
+      this.db.prepare("DELETE FROM coach_feed_authorized_workspaces").run();
+    }).immediate();
+  }
   coachFeedWorkspaceIdsForRoot(root:string):string[] {
     const row=this.coachFeedConfig();return row?.workspaceRoot===root?[row.workspaceId]:[];
   }

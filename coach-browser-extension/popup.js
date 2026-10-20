@@ -37,6 +37,11 @@ el("unpair").addEventListener("click",async()=>{
   try{await message({type:"COACH_UNPAIR"});}catch{}
   el("token").value="";await reload();
 });
+el("pair-native").addEventListener("click",async()=>{
+  try{const result=await message({type:"COACH_PAIR_NATIVE"});el("feedback").textContent=result.ok?"配对成功":("无法安全配对："+result.message);}
+  catch{el("feedback").textContent="本机配对主机不可用；可继续手动配对。";}
+  await reload();
+});
 el("refresh").addEventListener("click",async()=>{
   try{render(await message({type:"COACH_REFRESH"}));}
   catch{el("feedback").textContent="刷新失败";}

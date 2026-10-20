@@ -26,7 +26,7 @@ type RpcRequest=
   | {version:1;token:string;op:"recommendation";operationId:string;workspaceId:string}
   | {version:1;token:string;op:"stop";operationId:string;workspaceId:string}
   | {version:1;token:string;op:"queue";input:{workspaceId:string;operationId:string;expectedRevision:number;selection:{model:string;reasoningEffort:string}}};
-type CoachStartInput={workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents?:boolean};
+type CoachStartInput={workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents?:boolean;authorizedWorkspaceIds?:string[]};
 type RpcRequestWithCoach=RpcRequest
   | {version:1;token:string;op:"coach_start";input:CoachStartInput}
   | {version:1;token:string;op:"coach_stop";workspaceId:string}
@@ -110,12 +110,19 @@ export function createCodexWorkerDispatcher(input:{runner:NativeCodexAgentRunner
       case "coach_start": {
         if(!request.input||typeof request.input!=="object")throw new Error("COACH_FEED_CONFIG_INVALID");
         const workspaceRoot=authorizeWorkspace(request.input.workspaceId,request.input.workspaceRoot);
+        const ids=request.input.authorizedWorkspaceIds??[request.input.workspaceId];
+        if(!Array.isArray(ids)||ids.length<1||ids.length>8||new Set(ids).size!==ids.length||
+           !ids.includes(request.input.workspaceId))throw new Error("COACH_FEED_SCOPE_INVALID");
+        // Revalidate every workspace against durable sessions and approved roots.
+        for(const id of ids)authorizeWorkspace(id,input.workspaceStore.getSession(id)?.root??"");
         const config={workspaceId:request.input.workspaceId,workspaceRoot,port:request.input.port,
           ...(request.input.pairedExtensionId?{pairedExtensionId:request.input.pairedExtensionId}:{}),
-          observeAllNativeAgents:request.input.observeAllNativeAgents===true};
+          observeAllNativeAgents:request.input.observeAllNativeAgents===true,
+          authorizedWorkspaceIds:ids};
         const saved=input.events.coachFeedConfig();
         if(saved&&(saved.workspaceId!==config.workspaceId||saved.port!==config.port||saved.workspaceRoot!==config.workspaceRoot||
-          saved.pairedExtensionId!==config.pairedExtensionId||saved.observeAllNativeAgents!==config.observeAllNativeAgents))
+          saved.pairedExtensionId!==config.pairedExtensionId||saved.observeAllNativeAgents!==config.observeAllNativeAgents||
+          JSON.stringify([...saved.authorizedWorkspaceIds].sort())!==JSON.stringify([...config.authorizedWorkspaceIds].sort())))
           await input.coach.stop(saved.workspaceId);
         input.events.saveCoachFeedConfig(config);
         const token=secretAt(join(input.stateDir,COACH_KEY_FILE),true).toString("utf8");
@@ -228,6 +235,11 @@ export async function startCodexWorkerService(config:ServerConfig,deps:{inspectP
       if(!savedWorkspace)throw new Error("COACH_FEED_WORKSPACE_UNAVAILABLE");
       const workspaceRoot=withinAllowedWorkspace(savedWorkspace.root,allowedRoots);
       if(workspaceRoot!==withinAllowedWorkspace(persistedCoach.workspaceRoot,allowedRoots))throw new Error("COACH_FEED_WORKSPACE_IDENTITY_MISMATCH");
+      for(const id of persistedCoach.authorizedWorkspaceIds){
+        const session=workspaceStore.getSession(id);
+        if(!session)throw new Error("COACH_FEED_AUTHORIZED_WORKSPACE_MISSING");
+        withinAllowedWorkspace(session.root,allowedRoots);
+      }
       const pairingToken=secretAt(join(stateDir,COACH_KEY_FILE),false).toString("utf8");
       await coach.start({...persistedCoach,workspaceRoot,pairingToken});coachRecovery.error=undefined;
     }catch(error){coachRecovery.error=coachFailureCode(error);}

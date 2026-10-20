@@ -44,20 +44,34 @@ try{
   await assert.rejects(()=>startCodexWorkerService({stateDir:serviceRoot,allowedRoots:[workspace]} as never,{inspectProcess:inspect}),/PRIOR_OWNER_STILL_ALIVE/);
 
   const wsStore=new SqliteWorkspaceStore(serviceRoot);
-  wsStore.createSession({id:"ws-coach",root:workspace});wsStore.close?.();
+  wsStore.createSession({id:"ws-coach",root:workspace});
+  wsStore.createSession({id:"ws-other",root:workspace});wsStore.close?.();
   const portServer=createServer();await new Promise<void>(resolveListen=>portServer.listen(0,"127.0.0.1",()=>resolveListen()));
   const address=portServer.address();assert.ok(address&&typeof address!=="string");const coachPort=address.port;
   await new Promise<void>(resolveClose=>portServer.close(()=>resolveClose()));
   const controlStore=new CoachReviewEventStore(serviceRoot);
   const apiGenerationOne=new CodexWorkerCoachClient(defaultCodexWorkerSocket(serviceRoot),defaultCodexWorkerKey(serviceRoot),controlStore);
   const extensionId="a".repeat(32);
-  const paired=await apiGenerationOne.start({workspaceId:"ws-coach",workspaceRoot:workspace,port:coachPort,pairedExtensionId:extensionId,observeAllNativeAgents:true});
+  const paired=await apiGenerationOne.start({workspaceId:"ws-coach",workspaceRoot:workspace,
+    port:coachPort,pairedExtensionId:extensionId,observeAllNativeAgents:true,
+    authorizedWorkspaceIds:["ws-coach","ws-other"]});
   assert.match(paired.token,/^[A-Za-z0-9_-]{43}$/);
   const feedUrl=`http://127.0.0.1:${coachPort}`;
   const authorized=await fetch(feedUrl+"/health",{headers:{Authorization:`Bearer ${paired.token}`}});
   assert.equal(authorized.status,200);
   const receiptEvent=controlStore.recordCompleted({workspaceId:"ws-coach",
     operationId:"worker-browser-delivery",evidenceSha256:"a".repeat(64)});
+  const otherEvent=controlStore.recordCompleted({workspaceId:"ws-other",
+    operationId:"other-worktree-review",evidenceSha256:"b".repeat(64)});
+  assert.deepEqual(controlStore.coachFeedConfig()?.authorizedWorkspaceIds,["ws-coach","ws-other"]);
+  const union=await fetch(feedUrl+"/events",{headers:{Authorization:`Bearer ${paired.token}`}});
+  assert.equal((await union.json() as {events:{workspace_id:string}[]}).events.length,2);
+  const selected=await fetch(feedUrl+"/events?workspaceId=ws-other",
+    {headers:{Authorization:`Bearer ${paired.token}`}});
+  const onlyOther=await selected.json() as {events:{workspace_id:string;event_id:number}[]};
+  assert.deepEqual(onlyOther.events.map(x=>[x.workspace_id,x.event_id]),[["ws-other",otherEvent.event_id]]);
+  assert.equal((await fetch(feedUrl+"/events?workspaceId=not-approved",
+    {headers:{Authorization:`Bearer ${paired.token}`}})).status,403);
   const browserReceipt={workspace_id:"ws-coach",operation_id:"worker-browser-delivery",
     event_id:receiptEvent.event_id};
   const receiptResponse=await fetch(feedUrl+"/delivery-receipt",{
@@ -87,6 +101,9 @@ try{
   const recoveryDeadline=Date.now()+8000;let recoveredStatus=await recoveredApi.status("ws-coach");
   while(recoveredStatus?.state!=="running"&&Date.now()<recoveryDeadline){await new Promise(resolveWait=>setTimeout(resolveWait,250));recoveredStatus=await recoveredApi.status("ws-coach");}
   assert.equal(recoveredStatus?.port,coachPort);assert.equal(recoveredStatus?.pairedExtensionId,extensionId);
+  const recoveredUnion=await fetch(feedUrl+"/events",{headers:{Authorization:`Bearer ${paired.token}`}});
+  assert.equal((await recoveredUnion.json() as {events:{workspace_id:string}[]}).events.length,2,
+    "Worker restart must recover only the explicitly granted workspace set");
   assert.equal((await recoveredApi.getDeliveryReceipt("ws-coach",receiptEvent.event_id))?.result,
     "dom_submitted","Worker restart must restore owner-scoped receipts");
   assert.equal((await fetch(feedUrl+"/health",{headers:{Authorization:`Bearer ${paired.token}`}})).status,200,"the same protected token/scope recover after a transient port collision");

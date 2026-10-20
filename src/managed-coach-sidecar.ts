@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, realpathSync, statSync, lstatSync, chmodSync } from "node:fs";
+import { existsSync, realpathSync, statSync, lstatSync, chmodSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { isPathInsideRoot } from "./roots.js";
@@ -8,13 +8,14 @@ import { JobResourceLocks, sharedResourceLocks } from "./job-resource-locks.js";
 import { AgentObserverStore } from "./agent-observer.js";
 
 const SERVICE_NAME = "coach-feed";
+const PAIRING_EXTENSION_ID = "bapcebjlgncogfpgbhllioaichcldkbl";
 const MAX_EVENTS = 50;
 const EXTENSION_ID = /^[a-p]{32}$/;
 
-type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string };
-type EventRow = { event_id: string | number; operation_id: string; event_type: string; created_at: string };
+type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string; authorizedWorkspaceIds?:string[] };
+type EventRow = { event_id: string | number; workspace_id?:string; operation_id: string; event_type: string; created_at: string };
 export type DeliveryReceipt = {event_id:number;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
-type Entry = SidecarInput & { token: Buffer; server: Server; database: Database.Database; receiptDb?:Database.Database; jobId: string; startedAt: string };
+type Entry = SidecarInput & { token: Buffer; server: Server; database: Database.Database; receiptDb?:Database.Database; jobId: string; startedAt: string; handoffPath?:string };
 
 export interface CoachSidecarStatus { workspaceId: string; serviceName: string; port: number; state: "running"|"stopped"; startedAt?: string; pairedExtensionId?: string; reason?:string; }
 export interface CoachSidecarStartResult extends CoachSidecarStatus { token: string; }
@@ -62,11 +63,27 @@ export class ManagedCoachSidecar {
   private readonly services = new Map<string, Entry>();
   private starting?: Promise<CoachSidecarStartResult>;
   private closing = false;
+  private readonly handoffPath?: string;
   constructor(
     private readonly locks: JobResourceLocks = sharedResourceLocks,
     private readonly nativeEventDatabasePath?: string,
     private readonly observer?: AgentObserverStore,
-  ) {}
+  ) { this.handoffPath=nativeEventDatabasePath?join(realpathSync(dirname(nativeEventDatabasePath)),"coach-current-pairing.json"):undefined; }
+
+  private publishHandoff(port:number,token:Buffer):string|undefined {
+    const path=this.handoffPath;if(!path)return undefined;
+    const dir=dirname(path);mkdirSync(dir,{recursive:true,mode:0o700});const ds=lstatSync(dir);
+    if(ds.isSymbolicLink()||!ds.isDirectory()||realpathSync(dir)!==dir||(process.getuid&&ds.uid!==process.getuid())||(process.platform!=="win32"&&(ds.mode&0o077)!==0))throw new Error("COACH_PAIRING_STATE_UNSAFE");
+    if(existsSync(path)){const st=lstatSync(path);if(st.isSymbolicLink()||!st.isFile()||realpathSync(path)!==path||(process.getuid&&st.uid!==process.getuid()))throw new Error("COACH_PAIRING_HANDOFF_UNSAFE");}
+    const temp=path+"."+randomUUID()+".tmp",fd=openSync(temp,"wx",0o600);
+    try{writeSync(fd,JSON.stringify({port,token:token.toString("base64url")}));}finally{closeSync(fd);}
+    try{chmodSync(temp,0o600);renameSync(temp,path);chmodSync(path,0o600);return path;}
+    catch(error){try{unlinkSync(temp);}catch{/* Best-effort cleanup of a failed atomic handoff. */}throw error;}
+  }
+  private revokeHandoff(path:string|undefined):void {
+    if(!path||!existsSync(path))return;const st=lstatSync(path);
+    if(st.isSymbolicLink()||!st.isFile()||realpathSync(path)!==path||(process.getuid&&st.uid!==process.getuid()))throw new Error("COACH_PAIRING_HANDOFF_UNSAFE");unlinkSync(path);
+  }
 
   async start(input: SidecarInput): Promise<CoachSidecarStartResult> {
     if (this.closing) throw new Error("coach-feed manager has been closed");
@@ -77,6 +94,11 @@ export class ManagedCoachSidecar {
     // Elevated cross-worktree observer scope must be explicitly granted at
     // sidecar startup, never implicitly inherited from the existing v0.2 token.
     if (input.observeAllNativeAgents && !input.pairedExtensionId) throw new TypeError("Admin observer requires a paired extension");
+    const scope=input.authorizedWorkspaceIds??[input.workspaceId];
+    if(scope.length<1||scope.length>8||!scope.includes(input.workspaceId)||
+       new Set(scope).size!==scope.length||
+       scope.some(id=>!(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id))))
+      throw new Error("COACH_FEED_SCOPE_INVALID");
     if (this.services.has(input.workspaceId) || this.services.size > 0) throw new Error("coach-feed sidecar is already running");
     if (this.starting) throw new Error("coach-feed start already in progress");
     this.starting = this.startInternal(input);
@@ -128,11 +150,13 @@ export class ManagedCoachSidecar {
         server.once("error", reject);
         server.listen(input.port, "127.0.0.1", () => resolve({ ...input, token, server: server!, database: database!, receiptDb, jobId, startedAt: new Date().toISOString() }));
       });
+      entry.handoffPath=input.pairedExtensionId===PAIRING_EXTENSION_ID?this.publishHandoff(input.port,token):undefined;
       this.services.set(input.workspaceId, entry);
       // An unexpected listener exit must not strand its exclusive claims.
       entry.server.once("close", () => {
         if (this.services.get(input.workspaceId) !== entry) return;
         this.services.delete(input.workspaceId);
+        try { this.revokeHandoff(entry.handoffPath); } catch { /* Keep shutdown best-effort. */ }
         try { entry.database.close(); } catch { /* Already shutting down. */ }
         try { entry.receiptDb?.close(); } catch { /* Already shutting down. */ }
         this.locks.release(entry.jobId);
@@ -215,29 +239,41 @@ export class ManagedCoachSidecar {
         } catch { return send(res,503,{error:"audit unavailable"},cors); }
       }
     }
-    if (req.url !== "/events") return send(res, 404, { error: "not found" }, cors);
+    const feedUrl=req.url?new URL(req.url,"http://127.0.0.1"):null;
+    if(feedUrl?.pathname!=="/events")return send(res,404,{error:"not found"},cors);
+    if([...feedUrl.searchParams.keys()].some(k=>k!=="workspaceId")||
+       feedUrl.searchParams.getAll("workspaceId").length>1)
+      return send(res,400,{error:"invalid feed selector"},cors);
+    // No selector returns only the explicitly authorized union. A caller may
+    // also request one selected workspace for bounded per-workspace recovery.
+    const selected=feedUrl.searchParams.get("workspaceId");
+    const scopes=entry.authorizedWorkspaceIds??[entry.workspaceId];
+    if(selected!==null&&!scopes.includes(selected))
+      return send(res,403,{error:"workspace scope not authorized"},cors);
+    const ids=selected?[selected]:scopes;
     try {
       const native = Boolean(this.nativeEventDatabasePath);
       const pendingQuery = native
-        ? "from coach_review_events e where e.workspace_id = ? " +
-          "and e.event_type = 'READY_FOR_GPT_REVIEW' " +
+        ? "from coach_review_events e where e.workspace_id IN (" +
+          ids.map(()=>"?").join(",") + ") and e.event_type = 'READY_FOR_GPT_REVIEW' " +
           "and not exists (select 1 from coach_review_decisions r where r.event_id=e.event_id)"
         : "from events e where e.event_type = 'READY_FOR_GPT_REVIEW' " +
           "and not exists (select 1 from review_decisions r where r.event_id = e.event_id)";
       const total = entry.database.prepare("select count(*) as count " + pendingQuery)
-        .get(...(native ? [entry.workspaceId] : [])) as { count: number };
+        .get(...(native ? ids : [])) as { count: number };
       const rows = entry.database.prepare(
         "select e.event_id as event_id, " +
+        (native?"e.workspace_id as workspace_id, ":"") +
         "substr(cast(e.operation_id as text),1,128) as operation_id, " +
         "e.event_type, substr(cast(e.created_at as text),1,64) as created_at " +
-        pendingQuery + " order by e.created_at asc limit 50",
-      ).all(...(native ? [entry.workspaceId] : [])) as EventRow[];
-      return send(res, 200, {
-        pending_count: total.count,
-        // A native Sidecar serves only entry.workspaceId; include that verified scope
-        // in each event so external Coach notifications can locate exact evidence.
-        events: rows.slice(0, MAX_EVENTS).map(row=>({...row,workspace_id:entry.workspaceId})),
-      }, cors);
+        pendingQuery + " order by e.created_at asc,e.event_id asc limit 50",
+      ).all(...(native ? ids : [])) as EventRow[];
+      return send(res,200,{
+        pending_count:total.count,
+        events:rows.slice(0,MAX_EVENTS).map(row=>({
+          ...row,workspace_id:native?row.workspace_id:entry.workspaceId
+        })),
+      },cors);
     } catch {
       return send(res, 503, { error: "event store unavailable" }, cors);
     }
@@ -257,18 +293,18 @@ export class ManagedCoachSidecar {
       if(!data || typeof data!=="object" || Array.isArray(data) ||
           Object.keys(data).sort().join(",")!=="event_id,operation_id,workspace_id" ||
           !Number.isSafeInteger(data.event_id) || Number(data.event_id)<=0 ||
-          data.workspace_id!==entry.workspaceId ||
+          !(entry.authorizedWorkspaceIds??[entry.workspaceId]).includes(String(data.workspace_id)) ||
           typeof data.operation_id!=="string" ||
           !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(data.operation_id))
         return send(res,400,{error:"invalid receipt identity"},cors);
       const event=entry.database.prepare("SELECT operation_id FROM coach_review_events WHERE event_id=? AND workspace_id=?")
-        .get(data.event_id,entry.workspaceId) as {operation_id:string}|undefined;
+        .get(data.event_id,data.workspace_id) as {operation_id:string}|undefined;
       if(!event || event.operation_id!==data.operation_id)
         return send(res,404,{error:"event identity not found"},cors);
       const stamp=new Date().toISOString();
       entry.receiptDb!.prepare("INSERT OR IGNORE INTO delivery_receipts VALUES(?,?,?,?,?)")
-        .run(data.event_id,entry.workspaceId,data.operation_id,"dom_submitted",stamp);
-      const row=this.getDeliveryReceipt(entry.workspaceId,Number(data.event_id));
+        .run(data.event_id,data.workspace_id,data.operation_id,"dom_submitted",stamp);
+      const row=this.getDeliveryReceipt(String(data.workspace_id),Number(data.event_id));
       if(!row || row.operation_id!==data.operation_id)
         return send(res,409,{error:"receipt identity conflict"},cors);
       send(res,200,{ok:true,receipt:row},cors);
@@ -278,7 +314,8 @@ export class ManagedCoachSidecar {
   }
 
   getDeliveryReceipt(workspaceId:string,eventId:number):DeliveryReceipt|undefined {
-    const entry=this.services.get(workspaceId);
+    const entry=[...this.services.values()].find(e=>
+      (e.authorizedWorkspaceIds??[e.workspaceId]).includes(workspaceId));
     if(!entry?.receiptDb || !Number.isSafeInteger(eventId) || eventId<=0)return undefined;
     return entry.receiptDb.prepare("SELECT event_id,workspace_id,operation_id,result,recorded_at FROM delivery_receipts WHERE event_id=? AND workspace_id=?")
       .get(eventId,workspaceId) as DeliveryReceipt|undefined;
@@ -300,7 +337,7 @@ export class ManagedCoachSidecar {
       entry.server.closeAllConnections();
       await new Promise<void>((resolve) => entry.server.close(() => resolve()));
     } finally {
-      try { entry.database.close(); entry.receiptDb?.close(); }
+      try { this.revokeHandoff(entry.handoffPath); entry.database.close(); entry.receiptDb?.close(); }
       finally { this.locks.release(entry.jobId); }
     }
   }

@@ -19,6 +19,7 @@ button{padding:8px;cursor:pointer;border:1px solid #b7c2cc;border-radius:6px;bac
 <label for="port">本机端口</label><input id="port" type="number" min="1" max="65535" value="8765">
 <label for="token">配对令牌</label><input id="token" type="password" autocomplete="off" placeholder="粘贴一次性令牌">
 <button id="pair">配对</button><button id="unpair">清除配对</button>
+<button id="pair-native">从本机安全配对</button>
 <p id="status" role="status">读取中…</p>
 <pre id="tasks">—</pre>
 <button id="refresh">刷新</button><button id="open-panel">打开 Agent 观察面板</button><button id="copy">复制审核指令</button>
@@ -26,6 +27,7 @@ button{padding:8px;cursor:pointer;border:1px solid #b7c2cc;border-radius:6px;bac
 <p id="feedback" aria-live="polite"></p>
 <hr><h2 style="font-size:14px">Web GPT Coach 自动通知（可选）</h2>
 <p>默认关闭。先打开想接收审核的具体 ChatGPT 对话，再绑定；只发送到这个标签页和这条对话，不读取聊天历史。</p>
+<label for="auto-workspace">精确工作区 ID</label><input id="auto-workspace" autocomplete="off" placeholder="DevSpace workspaceId">
 <p id="auto-target" style="overflow-wrap:anywhere">未绑定 ChatGPT 对话</p>
 <p id="auto-status">默认关闭</p>
 <p id="auto-diagnostic" role="status">尚未检查投递状态</p>

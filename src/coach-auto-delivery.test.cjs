@@ -19,20 +19,20 @@ test("all delivery extension scripts are valid JavaScript",()=>{
 function workerHarness(overrides={}) {
   const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[],receipts=[];
   let receiptFailure=false;
-  const tab={id:42,url:URL_OK};
+  const tab={id:42,url:URL_OK};let tabs=[tab],startup=[],removed=[];
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
   let contentReady=true,injectionFailure=false,pingProtocol=5;
   const chrome={
     storage:{
       session:{async get(k){return {[k]:session[k]};},async set(v){Object.assign(session,v);},async remove(k){delete session[k];}},
-      local:{async get(k){return {[k]:local[k]};},async set(v){Object.assign(local,v);}}
+      local:{async get(k){return {[k]:local[k]};},async set(v){Object.assign(local,v);},async remove(k){delete local[k];}}
     },
     tabs:{
-      async query(){return [tab];},async get(id){if(id!==42)throw Error("tab_gone");return tab;},
+      async query(){return tabs;},async get(id){const found=tabs.find(t=>t.id===id);if(!found)throw Error("tab_gone");return found;},
       async sendMessage(id,m){
         if(m.type==="COACH_AUTO_PING_V5"){
           if(!contentReady)throw Error("Receiving end does not exist");
-          return {ok:true,protocol:pingProtocol,url:tab.url};
+          return {ok:true,protocol:pingProtocol,url:tabs.find(t=>t.id===id)?.url};
         }
         messages.push({id,m});return typeof delivered==="function"?delivered(id,m):delivered;
       },
@@ -44,7 +44,7 @@ function workerHarness(overrides={}) {
       if(injectionFailure)throw Error("host permission denied");
       contentReady=true;pingProtocol=5;
     }},
-    runtime:{getManifest:()=>({version:"0.3.7"}),onInstalled:{addListener(){}},onStartup:{addListener(){}},
+    runtime:{getManifest:()=>({version:"0.3.9"}),onInstalled:{addListener(){}},onStartup:{addListener(f){startup.push(f);}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
@@ -73,7 +73,7 @@ function workerHarness(overrides={}) {
     setReceiptFailure:x=>{receiptFailure=x;},
     setEvents:x=>{events=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
     setContentReady:x=>{contentReady=x;},setPingProtocol:x=>{pingProtocol=x;},
-    setInjectionFailure:x=>{injectionFailure=x;},
+    setInjectionFailure:x=>{injectionFailure=x;},setTabs:x=>{tabs=x;},startup,
     async poll(){await vm.runInContext("autoPump()",context);}
   };
 }
@@ -82,19 +82,19 @@ test("disabled by default: no ChatGPT tab touched and exact URL required",async(
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.enabled,false);
  await h.poll();assert.equal(h.messages.length,0);
  h.tab.url="https://example.com/c/123456789";
- assert.equal((await h.msg("COACH_AUTO_BIND")).ok,false);
+ assert.equal((await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"})).ok,false);
  h.tab.url="https://chatgpt.com/";
- assert.equal((await h.msg("COACH_AUTO_BIND")).ok,false);
+ assert.equal((await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"})).ok,false);
  h.tab.url=URL_OK;
- assert.equal((await h.msg("COACH_AUTO_BIND")).ok,true);
+ assert.equal((await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"})).ok,true);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.enabled,false);
  assert.equal(h.messages.length,0);
 });
 test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppression",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- await h.msg("COACH_AUTO_BIND");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
  h.setEvents([{...EVENT,event_type:"RUNNING"},{...EVENT,operation_id:"../unsafe"},EVENT]);
- assert.equal((await h.msg("COACH_AUTO_ENABLE")).ok,true);
+ assert.equal((await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"})).ok,true);
  await h.drain();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal(h.messages[0].id,42);
@@ -103,15 +103,16 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  assert.match(h.messages[0].m.instruction,/codex-qa/);
  assert.match(h.messages[0].m.instruction,/coach_webgpt_submit_review/);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
+ assert.equal(JSON.stringify(h.local).includes("A".repeat(43)),false,"browser ledgers must never persist the bearer");
  await h.poll();assert.equal(h.messages.length,1);
- await h.msg("COACH_AUTO_PAUSE");await h.poll();assert.equal(h.messages.length,1);
+ await h.msg("COACH_AUTO_PAUSE",{workspaceId:"ws-qa"});await h.poll();assert.equal(h.messages.length,1);
 });
 test("DOM-submitted receipt is identity-scoped, durable and never requires a second chat send",async()=>{
  const h=workerHarness();
  h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setReceiptFailure(true);
- await h.msg("COACH_AUTO_BIND");
- await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
  const state=(await h.msg("COACH_AUTO_STATUS")).state;
  assert.equal(state.summary.sent,1);
  assert.equal(state.summary.receipt_pending,1,"server outage cannot erase a DOM receipt");
@@ -133,14 +134,14 @@ test("manual send acknowledgement never fabricates an automatic DOM receipt",asy
  h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"pending"}};
  await h.msg("COACH_AUTO_RESOLVE",{key:"ws-qa:codex-qa:12",action:"mark_sent"});
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
  assert.equal(h.messages.length,0);
  assert.equal(h.receipts.length,0);
 });
 test("reloaded extension reinjects script into already-open ChatGPT tab before sending",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setContentReady(false);
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
  assert.equal(h.injections.length,1);
  assert.equal(h.injections[0].target.tabId,42);
@@ -151,7 +152,7 @@ test("reloaded extension reinjects script into already-open ChatGPT tab before s
 test("old content script replies but is rejected by v5 protocol and replaced safely",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setPingProtocol(4); // prior injected V4 script responds to previous version
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
  assert.equal(h.injections.length,1);
  assert.equal(h.messages.length,1);
@@ -161,7 +162,7 @@ test("old content script replies but is rejected by v5 protocol and replaced saf
 test("script injection permission denial never sends and keeps event pending",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setContentReady(false);h.setInjectionFailure(true);
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
  assert.equal(h.injections.length,2);
  assert.equal(h.messages.length,0);
@@ -176,7 +177,7 @@ test("legacy unknown and scoped records coalesce without replaying uncertain del
    "unknown:codex-qa:12":{state:"pending",at:"old"},
    "ws-qa:codex-qa:12":{state:"needs_attention",reason:"找不到唯一的 ChatGPT 编辑器"},
  };
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
  const s=(await h.msg("COACH_AUTO_STATUS")).state;
  assert.equal(s.summary.pending,0);assert.equal(s.summary.needs_attention,1);
  assert.equal(s.recent.length,1);
@@ -190,7 +191,7 @@ test("opening extension popup reconciles scoped and unknown keys even when queue
    "ws-qa:codex-qa:12":{state:"needs_attention",reason:"旧版脚本的编辑器失败"}
  };
  const state=(await h.msg("COACH_AUTO_STATUS")).state;
- assert.equal(state.version,"0.3.7");
+ assert.equal(state.version,"0.3.9");
  assert.equal(state.summary.needs_attention,1);
  assert.equal(state.summary.pending,0);
  assert.match(state.blocking,/人工核实/);
@@ -211,7 +212,7 @@ test("ambiguous workspace matches preserve original ledger identities on offline
 test("manual Check reports blocker instead of generic success even with a working Sidecar",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"needs_attention"}};
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
  const res=await h.msg("COACH_AUTO_PUMP");
  assert.equal(res.ok,true);
  assert.equal(res.state.lastCheck.code,"needs_attention");
@@ -221,22 +222,45 @@ test("manual Check reports blocker instead of generic success even with a workin
 test("confirmed legacy sent state suppresses scoped duplicate send",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.local.coachAutoLedger={"unknown:codex-qa:12":{state:"sent",reason:"DOM 已提交"}};
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
  assert.equal(h.messages.length,0);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
  assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"sent");
 });
-test("legacy event identity mismatch never causes cross-task merging",async()=>{
+test("legacy unknown outcome for a different task cannot stall unrelated workspaces",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.local.coachAutoLedger={"unknown:other-task:12":{state:"needs_attention"}};
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
- assert.equal(h.messages.length,0);
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
+ assert.equal(h.messages.length,1);
  assert.equal(h.local.coachAutoLedger["unknown:other-task:12"].state,"needs_attention");
+ assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"sent");
+});
+test("uncertain chat A submission cannot stall authorized independent chat B",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.local.coachAutoLedger={"ws-qa:uncertain-task:30":{state:"needs_attention",reason:"DOM status unknown"}};
+ h.setEvents([]);
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
+ const second={id:77,url:URL_OK.replace("12345678","87654321")};
+ h.setTabs([second]);
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-other"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-other"});
+ h.setEvents([
+   {...EVENT,event_id:31,workspace_id:"ws-qa",operation_id:"still-blocked"},
+   {...EVENT,event_id:32,workspace_id:"ws-other",operation_id:"safe-independent"}
+ ]);
+ await h.drain();await h.poll();
+ assert.equal(h.messages.length,1);
+ assert.equal(h.messages[0].id,77);
+ assert.match(h.messages[0].m.instruction,/safe-independent/);
+ assert.equal(h.local.coachAutoLedger["ws-qa:still-blocked:31"].state,"pending");
+ assert.equal(h.local.coachAutoLedger["ws-qa:uncertain-task:30"].state,"needs_attention");
+ assert.equal(h.local.coachAutoLedger["ws-other:safe-independent:32"].state,"sent");
 });
 test("incomplete Sidecar event page never silently delivers a truncated queue",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- h.setPendingCount(51);await h.msg("COACH_AUTO_BIND");
- await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ h.setPendingCount(51);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
  assert.equal(h.messages.length,0);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,0);
 });
@@ -248,7 +272,7 @@ test("user may mark manually sent pending event without an automatic duplicate",
  assert.equal(marked.ok,true);
  assert.equal(marked.state.summary.sent,1);
  assert.equal(marked.state.summary.pending,0);
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
  assert.equal(h.messages.length,0);
  assert.match(h.local.coachAutoLedger["ws-qa:codex-qa:12"].reason,/手动发送/);
@@ -260,31 +284,104 @@ test("pending manual mark never permits a retry without a failed send",async()=>
  assert.equal(r.ok,false);
  assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"pending");
 });
-test("old Sidecar lacking workspace_id still notifies, explicitly marking uncertainty",async()=>{
+test("old Sidecar lacking workspace_id is rejected without routing",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setEvents([{event_id:13,operation_id:"legacy-task",event_type:"READY_FOR_GPT_REVIEW"}]);
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
- assert.equal(h.messages.length,1);
- assert.match(h.messages[0].m.instruction,/旧版 Sidecar 未返回/);
- assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
+ assert.equal(h.messages.length,0);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,0);
 });
-test("new Sidecar scopes events to its own workspace for exact evidence lookup",()=>{
+test("event for another workspace never reaches the explicitly bound chat",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
+ h.setEvents([{...EVENT,workspace_id:"ws-other"}]);await h.drain();await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.equal(h.local.coachAutoLedger["ws-other:codex-qa:12"].state,"pending");
+});
+test("two different workspaces cannot bind the same ChatGPT conversation",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ assert.equal((await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"})).ok,true);
+ const conflict=await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-other"});
+ assert.equal(conflict.ok,false);
+ assert.match(conflict.error,/另一个工作区/);
+ assert.deepEqual(Object.keys(h.local.coachAutoRoutes),["ws-qa"]);
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
+ h.setEvents([{...EVENT,workspace_id:"ws-other"}]);await h.drain();await h.poll();
+ assert.equal(h.messages.length,0);
+});
+test("persisted duplicate workspace-to-conversation mapping refuses both sends",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
+ h.local.coachAutoRoutes["ws-other"]={url:URL_OK,tabId:42,enabled:true};
+ h.setEvents([EVENT]);await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.lastCheck.code,"route_conflict");
+ assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"pending");
+});
+test("explicit unbind blocks stale async route restoration until a fresh bind",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
+ const legacy={...h.local.coachAutoRoutes["ws-qa"]};
+ await h.msg("COACH_AUTO_UNBIND");
+ assert.equal(h.local.coachAutoRouteRevoked,true);
+ // Simulates an old onRemoved/onStartup callback completing after unbind.
+ h.local.coachAutoRoutes={"ws-qa":legacy};
+ h.setEvents([EVENT]);await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.bound,false);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.enabled,false);
+ assert.equal((await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"})).ok,true);
+ assert.equal(h.local.coachAutoRouteRevoked,false);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.enabled,false,
+    "a newly authorized route must still require explicit enable");
+});
+test("unidentified work stays pending while authorized workspace events still route exactly",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
+ const second={id:77,url:URL_OK.replace("12345678","87654321")};
+ h.setTabs([second]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-other"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-other"});
+ const state=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(state.bound,true);assert.equal(state.enabled,true);assert.equal(state.routes.length,2);
+ h.setEvents([{event_id:20,operation_id:"unidentified",event_type:"READY_FOR_GPT_REVIEW"},
+   {...EVENT,event_id:21,workspace_id:"ws-other",operation_id:"authorized-task"}]);
+ await h.drain();await h.poll();
+ assert.equal(h.local.coachAutoLedger["unknown:unidentified:20"].state,"pending");
+ assert.equal(h.messages.length,1);assert.equal(h.messages[0].id,77);
+ assert.match(h.messages[0].m.instruction,/authorized-task/);
+});
+test("ambiguous exact URL matches after restart fail closed",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
+ await h.drain();h.setTabs([{id:42,url:URL_OK},{id:43,url:URL_OK}]);
+ for(const start of h.startup)start();await h.drain();h.setEvents([EVENT]);await h.poll();
+ assert.equal(h.messages.length,0);
+ assert.equal(h.local.coachAutoRoutes["ws-qa"].tabId,null);
+});
+test("Sidecar restricts combined events to explicitly approved workspace IDs",()=>{
  const code=readFileSync(join(__dirname,"managed-coach-sidecar.ts"),"utf8");
- assert.match(code,/workspace_id:entry\.workspaceId/);
- assert.match(code,/e\.workspace_id = \?/);
+ assert.match(code,/authorizedWorkspaceIds/);
+ assert.match(code,/e\.workspace_id IN/);
+ assert.match(code,/workspace_id:native\?row\.workspace_id:entry\.workspaceId/);
+ assert.match(code,/scopes\.includes\(selected\)/);
 });
 test("navigation to different conversation stops delivery without opening tabs",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- await h.msg("COACH_AUTO_BIND");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
  h.tab.url=URL_OK.replace("12345678","87654321");
- assert.equal((await h.msg("COACH_AUTO_ENABLE")).ok,false);
+ assert.equal((await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"})).ok,false);
  assert.equal(h.messages.length,0);
 });
 test("unknown DOM outcome becomes needs_attention and is never blindly replayed",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setDelivery({ok:false,reason:"draft"});
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.needs_attention,1);
@@ -292,7 +389,7 @@ test("unknown DOM outcome becomes needs_attention and is never blindly replayed"
 test("confirmed no-input preflight failure remains pending without blocking later retry",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setDelivery({ok:false,notSubmitted:true,reason:"找不到唯一的 ChatGPT 编辑器"});
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");await h.drain();await h.poll();
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
  let s=(await h.msg("COACH_AUTO_STATUS")).state;
  assert.equal(s.summary.pending,1);assert.equal(s.summary.needs_attention,0);
  h.setDelivery({ok:true,submitted:true});
@@ -303,14 +400,14 @@ test("confirmed no-input preflight failure remains pending without blocking late
 test("worker recovery preserves in-flight ambiguity and blocks duplicate delivery",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.local.coachAutoLedger={"ws-qa:codex-qa:12":{state:"in_flight",at:"earlier"}};
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
  assert.equal(h.messages.length,0);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.needs_attention,1);
 });
 test("leaving the bound conversation explicitly pauses, returning does not auto-resume",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- h.setEvents([]);await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();
  h.tab.url="https://chatgpt.com/c/abcdefabcdefabcd";
  h.tabUpdates[0](42,{url:h.tab.url});
@@ -319,14 +416,15 @@ test("leaving the bound conversation explicitly pauses, returning does not auto-
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.enabled,false);
  assert.equal(h.messages.length,0);
  h.tabRemovals[0](42);await h.drain();
- assert.equal((await h.msg("COACH_AUTO_STATUS")).state.bound,false);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.bound,true);
+ assert.equal(h.local.coachAutoRoutes["ws-qa"].enabled,false);
 });
-test("a pairing reset revokes the grant in the original worker",()=>{
+test("only explicit unpair removes persistent route consent",()=>{
  const original=readFileSync(join(root,"worker.js"),"utf8");
- assert.match(original,/session.remove\("coachAutoTarget"\)/);
+ assert.match(original,/local.remove\(\[NATIVE_CONSENT,"coachAutoRoutes"\]\)/);
 });
 test("unpairing sidecar removes ability to send new events",async()=>{
- const h=workerHarness();await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ const h=workerHarness();await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();assert.equal(h.messages.length,0);
 });
 function domHarness(options={}) {
@@ -507,18 +605,28 @@ test("event to content-script DOM submission: simulated extension end-to-end",as
  const page=domHarness(),h=workerHarness();
  h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setDelivery((_id,m)=>page.deliver(m.url,m.instruction));
- await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
-test("Chrome restart drops per-session target authorization",async()=>{
+test("Chrome restart retains explicit workspace route consent",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- h.setEvents([]);await h.msg("COACH_AUTO_BIND");await h.msg("COACH_AUTO_ENABLE");
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();delete h.session.coachAutoTarget;
  h.setEvents([EVENT]);await h.poll();
- assert.equal(h.messages.length,0);
- assert.equal((await h.msg("COACH_AUTO_STATUS")).state.enabled,false);
+ assert.equal(h.messages.length,1);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.enabled,true);
+});
+test("closed chat preserves enabled workspace route and poll rebinds one recreated exact tab",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
+ await h.drain();h.tabRemovals.forEach(fn=>fn(42));await h.drain();
+ assert.equal(h.local.coachAutoRoutes["ws-qa"].enabled,true);
+ assert.equal(h.local.coachAutoRoutes["ws-qa"].url,URL_OK);
+ assert.equal(h.local.coachAutoRoutes["ws-qa"].tabId,null);
+ h.setTabs([{id:77,url:URL_OK}]);h.setEvents([EVENT]);await h.poll();
+ assert.equal(h.messages.length,1);assert.equal(h.messages[0].id,77);
 });
 test("content script only confirms composer DOM submission, not completed AI review",async()=>{
  const good=domHarness();const result=await good.deliver();

@@ -43,3 +43,5 @@ try {
  await new Promise(resolve=>setTimeout(resolve,80));
  rmSync(root,{recursive:true,force:true});
 }
+// Exercise the actual API restart, not just the in-memory Sidecar unit.
+await import("./coach-sidecar-api-recovery.test.js");

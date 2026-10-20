@@ -3,8 +3,11 @@
 const KEY = "coachPairing";
 const STATUS = "coachStatus";
 const ALARM = "coach-poll";
+const NATIVE_CONSENT = "coachNativePairingConsent";
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const validPort = p => Number.isInteger(p) && p >= 1 && p <= 65535;
+let nativePairingPromise;
+let nativePairingGeneration=0;
 
 async function badge(text, color) {
   await chrome.action.setBadgeText({ text });
@@ -37,8 +40,9 @@ async function feedCheck() {
         !Array.isArray(body.events) || body.events.length > 50) throw new Error("invalid_feed");
     const events = body.events.filter(e => Number.isSafeInteger(e.event_id) &&
       e.event_id > 0 && typeof e.operation_id === "string" &&
-      e.operation_id.length <= 128 && e.event_type === "READY_FOR_GPT_REVIEW"
-    ).map(e => ({ event_id:e.event_id,operation_id:e.operation_id }));
+      e.operation_id.length <= 128 && e.event_type === "READY_FOR_GPT_REVIEW" &&
+      typeof e.workspace_id==="string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(e.workspace_id)
+    ).map(e => ({ event_id:e.event_id,operation_id:e.operation_id,workspace_id:e.workspace_id }));
     const status = { paired:true, online:true, pending:body.pending_count, events,
       port:pair.port, checkedAt:new Date().toISOString(), message:"connected" };
     await saveStatus(status); return status;
@@ -100,7 +104,7 @@ async function audit(workspaceId,operationId) {
     return {ok:true,snapshot:a};
   } catch { return {ok:false,error:"offline"}; }
 }
-async function pairNow(port,token) {
+async function pairNow(port,token,generation=nativePairingGeneration) {
   if (!validPort(port) || typeof token !== "string" || !TOKEN.test(token)) {
     return { ok:false, message:"invalid_pairing_parameters" };
   }
@@ -115,27 +119,61 @@ async function pairNow(port,token) {
   } catch {
     return {ok:false,message:"bridge_unreachable"};
   }
-  // A different Sidecar pairing never inherits permission to post into a chat.
-  await chrome.storage.session.remove("coachAutoTarget");
+  if(generation!==nativePairingGeneration)return {ok:false,message:"pairing_cancelled"};
+  // Pairing only authenticates the feed. Workspace routes remain separately consented.
   await chrome.storage.session.set({[KEY]:{port,token}});
   const status=await feedCheck();
   return {ok:status.online,message:status.message};
 }
+async function requestNativePairing(explicit=false) {
+  if(nativePairingPromise)return nativePairingPromise;
+  const generation=nativePairingGeneration;
+  nativePairingPromise=(async()=>{
+    try {
+      if(chrome.runtime.id!=="bapcebjlgncogfpgbhllioaichcldkbl")return {ok:false,message:"native_pairing_unavailable"};
+      const host=chrome.runtime.connectNative("com.devspace.coach_pairing");
+      const result=await new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>reject(new Error("native_host_unavailable")),5000);
+        host.onMessage.addListener(value=>{clearTimeout(timer);resolve(value);});
+        host.onDisconnect.addListener(()=>{clearTimeout(timer);reject(new Error("native_host_unavailable"));});
+        host.postMessage({type:"get_pairing",extensionId:chrome.runtime.id});
+      });
+      if(!result?.ok || !validPort(result.port) || !TOKEN.test(result.token))return {ok:false,message:"native_pairing_unavailable"};
+      if(generation!==nativePairingGeneration)return {ok:false,message:"pairing_cancelled"};
+      const paired=await pairNow(result.port,result.token,generation);
+      if(generation!==nativePairingGeneration)return {ok:false,message:"pairing_cancelled"};
+      if(paired.ok)await chrome.storage.local.set({[NATIVE_CONSENT]:true});
+      return paired;
+    }catch{return {ok:false,message:"native_host_unavailable_use_manual_pairing"};}
+  })();
+  try{return await nativePairingPromise;}
+  finally{nativePairingPromise=undefined;}
+}
+async function recoverNativePairing() {
+  const consent=(await chrome.storage.local.get(NATIVE_CONSENT))[NATIVE_CONSENT]===true;
+  const status=await feedCheck();
+  if(consent&&!status.online)await requestNativePairing(false);
+}
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(ALARM,{periodInMinutes:1});
-  void feedCheck();
+  void recoverNativePairing();
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(ALARM,{periodInMinutes:1});
-  void feedCheck();
+  void recoverNativePairing();
 });
 chrome.alarms.onAlarm.addListener(alarm => {
-  if(alarm.name === ALARM) void feedCheck();
+  if(alarm.name === ALARM) void recoverNativePairing();
 });
 chrome.runtime.onMessage.addListener((message,_sender,sendResponse) => {
   if (!message || typeof message.type !== "string") return false;
   if(message.type === "COACH_PAIR") {
-    void pairNow(message.port,message.token).then(sendResponse).catch(()=>sendResponse({ok:false,message:"internal_error"}));
+    const generation=nativePairingGeneration;
+    void pairNow(message.port,message.token,generation).then(sendResponse).catch(()=>sendResponse({ok:false,message:"internal_error"}));
+    return true;
+  }
+  if(message.type === "COACH_PAIR_NATIVE") {
+    void requestNativePairing(true).then(sendResponse);
     return true;
   }
   if(message.type === "COACH_REFRESH") {
@@ -151,7 +189,20 @@ chrome.runtime.onMessage.addListener((message,_sender,sendResponse) => {
     return true;
   }
   if(message.type === "COACH_UNPAIR") {
-    void chrome.storage.session.remove(KEY).then(() => chrome.storage.session.remove("coachAutoTarget")).then(feedCheck).then(() => sendResponse({ok:true}));
+    nativePairingGeneration++;
+    // Immediately invalidate in-flight asynchronous route restoration before
+    // asynchronously revoking the bearer and persistent grants.
+    if(typeof autoRouteMutationEpoch==="number")autoRouteMutationEpoch++;
+    void (async()=>{
+      try {
+        await chrome.storage.local.set({coachAutoRouteRevoked:true});
+        await chrome.storage.session.remove(KEY);
+        await chrome.storage.session.remove("coachAutoTarget");
+        await chrome.storage.local.remove([NATIVE_CONSENT,"coachAutoRoutes"]);
+        await feedCheck();
+        return {ok:true};
+      }catch{return {ok:false,message:"unpair_incomplete"};}
+    })().then(sendResponse);
     return true;
   }
   return false;
