@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "scripts": {
     "test": "node --import tsx ../src/coach-webgpt-loop.test.ts",
+    "test:catalog": "node --import tsx ../src/coach-tool-catalog.test.ts",
     "test:realtime": "node --import tsx ../src/coach-realtime.integration.test.ts",
     "test:sidecar": "node --import tsx ../src/managed-coach-sidecar.test.ts",
     "test:codex": "node --import tsx ../src/codex-agent-runner.test.ts",
