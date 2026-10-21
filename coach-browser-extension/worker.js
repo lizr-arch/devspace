@@ -198,6 +198,7 @@ chrome.runtime.onMessage.addListener((message,_sender,sendResponse) => {
         await chrome.storage.local.set({coachAutoRouteRevoked:true});
         await chrome.storage.session.remove(KEY);
         await chrome.storage.session.remove("coachAutoTarget");
+        await chrome.storage.session.remove("coachAutoPendingBinds");
         await chrome.storage.local.remove([NATIVE_CONSENT,"coachAutoRoutes"]);
         await feedCheck();
         return {ok:true};

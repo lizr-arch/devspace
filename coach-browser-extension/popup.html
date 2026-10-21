@@ -27,15 +27,20 @@ button{padding:8px;cursor:pointer;border:1px solid #b7c2cc;border-radius:6px;bac
 <p id="feedback" aria-live="polite"></p>
 <hr><h2 style="font-size:14px">Web GPT Coach 自动通知（可选）</h2>
 <p>默认关闭。先打开想接收审核的具体 ChatGPT 对话，再绑定；只发送到这个标签页和这条对话，不读取聊天历史。</p>
+<button id="auto-one-click" style="width:100%;background:#285e97;color:white;font-weight:600">一键启用当前 Web GPT Coach</button>
+<button id="auto-cancel-pending">取消当前对话的待确认绑定</button>
+<p id="auto-one-click-status" role="status">首次点击后，由当前 Web GPT 对话确认自己管理的工作区；不猜测工作区归属。</p>
+<details><summary>高级：手动绑定工作区</summary>
 <label for="auto-workspace">精确工作区 ID</label><input id="auto-workspace" autocomplete="off" placeholder="DevSpace workspaceId">
 <p id="auto-target" style="overflow-wrap:anywhere">未绑定 ChatGPT 对话</p>
 <p id="auto-status">默认关闭</p>
+<ul id="auto-routes" style="font-size:11px;padding-left:16px;overflow-wrap:anywhere"></ul>
 <p id="auto-diagnostic" role="status">尚未检查投递状态</p>
 <button id="auto-bind">绑定当前 ChatGPT 对话</button>
 <button id="auto-enable">启用自动发送</button>
 <button id="auto-pause">暂停</button>
 <button id="auto-unbind">解除绑定</button>
-<button id="auto-check">现在检查一次</button>
+<button id="auto-check">现在检查一次</button></details>
 <p id="auto-count"></p><p id="auto-feedback" aria-live="polite"></p>
 <ul id="auto-list" style="padding-left:16px;overflow-wrap:anywhere;font-size:11px;max-height:140px;overflow:auto"></ul>
 <p>发送结果只表示网页输入框已提交，不表示 Web GPT 已审核。出现“不确定”时停止自动发送并要求人工核查。</p>
