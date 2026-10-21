@@ -1,4 +1,5 @@
 import { safeReportOutcome } from "./coach-result-contract.js";
+import { COACH_DELIVERY_SQL, completionDeliveryType } from "./coach-review-events.js";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync, lstatSync, chmodSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -276,9 +277,11 @@ export class ManagedCoachSidecar {
     const ids=selected?[selected]:scopes;
     try {
       const native = Boolean(this.nativeEventDatabasePath);
+      const hasEvidence=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_review_evidence'").get());
       const pendingQuery = native
-        ? "from coach_review_events e where e.workspace_id IN (" +
+        ? "from coach_review_events e "+(hasEvidence?"LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id ":"")+"where e.workspace_id IN (" +
           ids.map(()=>"?").join(",") + ") and e.event_type = 'READY_FOR_GPT_REVIEW' " +
+          (hasEvidence?"AND "+COACH_DELIVERY_SQL+" ":"")+
           "and not exists (select 1 from coach_review_decisions r where r.event_id=e.event_id)"
         : "from events e where e.event_type = 'READY_FOR_GPT_REVIEW' " +
           "and not exists (select 1 from review_decisions r where r.event_id = e.event_id)";
@@ -294,14 +297,18 @@ export class ManagedCoachSidecar {
       return send(res,200,{
         pending_count:total.count,
         events:rows.slice(0,MAX_EVENTS).map(row=>{
-          const evidence=native && entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_review_evidence'").get()?entry.database.prepare("SELECT packet_json,evidence_sha256 FROM coach_review_evidence WHERE event_id=?").get(row.event_id) as {packet_json:string;evidence_sha256:string}|undefined:undefined;
+          const evidence=hasEvidence?entry.database.prepare("SELECT packet_json,evidence_sha256 FROM coach_review_evidence WHERE event_id=?").get(row.event_id) as {packet_json:string;evidence_sha256:string}|undefined:undefined;
           let report;
+          let event_type: string="READY_FOR_GPT_REVIEW";
           if(evidence){
             const {evidenceSha256,...packet}=JSON.parse(evidence.packet_json);
             if(evidenceSha256!==evidence.evidence_sha256 || createHash("sha256").update(JSON.stringify(packet)).digest("hex")!==evidence.evidence_sha256)throw new Error("COACH_EVIDENCE_INTEGRITY_FAILURE");
             report=safeReportOutcome(packet.report);
+            const delivery=completionDeliveryType(packet);
+            if(!delivery)throw new Error("COACH_DELIVERY_REPORT_INVALID");
+            event_type=delivery;
           }
-          return {...row,workspace_id:native?row.workspace_id:entry.workspaceId,...(report?{report}:{})};
+          return {...row,event_type,workspace_id:native?row.workspace_id:entry.workspaceId,...(report?{report}:{})};
         }),
       },cors);
     } catch {

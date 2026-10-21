@@ -87,12 +87,23 @@ function autoReconcileStored(ledger) {
   return autoReconcileLegacy(ledger,events);
 }
 function autoValid(e) {
-  return e && e.event_type === "READY_FOR_GPT_REVIEW" &&
+  // Defend against an older Sidecar forwarding every completion as a review.
+  const report=e?.report;
+  const valid=report?.schema==="DEVSPACE_CODEX_REPORT_CHECK_V1" && report.valid===true &&
+    report.code==="REPORT_VALID_UNVERIFIED_CLAIMS" && report.testsIndependentlyVerified===false &&
+    typeof report.reportSha256==="string" && /^[a-f0-9]{64}$/.test(report.reportSha256);
+  const ready=report===undefined || (valid && report.status==="READY_FOR_REVIEW");
+  const conflict=valid && report.status==="PLAN_CONFLICT";
+  return e && ((e.event_type === "READY_FOR_GPT_REVIEW" && ready) || (e.event_type === "PLAN_CONFLICT" && conflict)) &&
     Number.isSafeInteger(e.event_id) && e.event_id > 0 &&
     (e.workspace_id===undefined || (typeof e.workspace_id === "string" && AUTO_ID.test(e.workspace_id))) &&
     typeof e.operation_id === "string" && AUTO_ID.test(e.operation_id);
 }
 function autoInstruction(e) {
+  if(e.event_type==="PLAN_CONFLICT")return "DevSpace Codex 报告 PLAN_CONFLICT，需要 Web GPT 修订已批准的任务。"+
+    "请先查询 coach_realtime_status，并通过 DevSpace MCP 读取本操作不可变证据及绑定 TASK/报告，核对具体反证、影响与建议修订。"+
+    "这是计划冲突反馈；请明确处理契约修订，不要提交正式 APPROVED / REWORK 审核裁决，也不要自动重启或继续任务。"+
+    "\n事件 ID："+e.event_id+"\n工作区 ID："+e.workspace_id+"\n任务 ID："+e.operation_id;
   return "请以 Web GPT Coach 身份独立审核一项本地 Codex CLI 已完成任务。"+
   "通过 DevSpace MCP 读取真实源码、Git 差异、不可变完成证据和测试结果，不要重复运行该 Codex 任务；"+
   "验证之后仅作 APPROVED / REWORK / BLOCKED 裁决，并在 REWORK 时下发具体修复任务。"+

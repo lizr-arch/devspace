@@ -125,6 +125,30 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  await h.poll();assert.equal(h.messages.length,1);
  await h.msg("COACH_AUTO_PAUSE",{workspaceId:"ws-qa"});await h.poll();assert.equal(h.messages.length,1);
 });
+test("progress and invalid reports never send; conflict reaches only its bound owner as revision feedback",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ const report=status=>({schema:"DEVSPACE_CODEX_REPORT_CHECK_V1",valid:true,status,code:"REPORT_VALID_UNVERIFIED_CLAIMS",reportSha256:"a".repeat(64),testsIndependentlyVerified:false});
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ h.setEvents([
+   {...EVENT,event_id:1,report:report("IN_PROGRESS")},
+   {...EVENT,event_id:2,report:{...report("READY_FOR_REVIEW"),valid:false}},
+   {...EVENT,event_id:3,report:null},
+   {...EVENT,event_id:4,report:report("BLOCKED")},
+   {...EVENT,event_id:5,report:{}},
+   {...EVENT,event_id:6,event_type:"PLAN_CONFLICT",report:report("READY_FOR_REVIEW")},
+   {...EVENT,event_id:7,event_type:"PLAN_CONFLICT",workspace_id:"other-owner",report:report("PLAN_CONFLICT")},
+   {...EVENT,event_id:8,event_type:"PLAN_CONFLICT",report:report("PLAN_CONFLICT")}
+ ]);
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
+ assert.equal(h.messages.length,1);assert.equal(h.messages[0].id,42);
+ const notice=h.messages[0].m.instruction;
+ assert.match(notice,/PLAN_CONFLICT/);assert.match(notice,/修订/);assert.match(notice,/不要提交正式/);
+ assert.doesNotMatch(notice,/coach_webgpt_submit_review|codex_agent_submit_review/);
+ assert.equal(Object.keys(h.local.coachAutoLedger).length,2,"only conflict identities may enter delivery ledger");
+ await h.poll();assert.equal(h.messages.length,1);
+ h.setEvents([{...EVENT,event_id:9,report:report("READY_FOR_REVIEW")}]);
+ await h.poll();assert.equal(h.messages.length,2);assert.match(h.messages[1].m.instruction,/coach_webgpt_submit_review/);
+});
 test("DOM-submitted receipt is identity-scoped, durable and never requires a second chat send",async()=>{
  const h=workerHarness();
  h.session.coachPairing={port:8765,token:"A".repeat(43)};

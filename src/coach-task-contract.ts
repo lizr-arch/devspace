@@ -108,6 +108,20 @@ function load(root:string,workspaceId:string,ref:TaskReference) {
 }
 function manifestPath(ref:TaskReference){return `.devspace/coach/tasks/${ref.taskId}/frozen-v${ref.version}.json`;}
 function manifest(root:string,ref:TaskReference){return {schema:"DEVSPACE_TASK_FREEZE_V1",workspaceId:ref.workspaceId,taskId:ref.taskId,taskPath:ref.taskPath,version:ref.version,sha256:ref.sha256,workspaceRoot:realpathSync(root)};}
+/** Server reads the entire confined document; callers need not precompute its digest. */
+export function freezeTaskFile(root:string,workspaceId:string,input:{taskId?:string;taskPath?:string;version?:number;expectedSha256?:string}):TaskReference {
+  const taskId=input.taskId??/^\.devspace\/coach\/tasks\/([A-Za-z0-9_-]+)\/TASK\.md$/.exec(input.taskPath??"")?.[1];
+  if(!taskId||!safeTaskId.test(taskId))taskFailure("TASK_ID_INVALID","taskId","Supply a safe taskId or its exact relative TASK.md path.");
+  const taskPath=`.devspace/coach/tasks/${taskId}/TASK.md`;
+  if(input.taskPath!==undefined&&input.taskPath!==taskPath)taskFailure("TASK_PATH_MISMATCH","taskPath","Path must match the selected taskId exactly.");
+  let bytes:Buffer;try{bytes=readConfined(root,taskPath);}catch(e){if(e instanceof TaskGateError)throw e;taskFailure("TASK_FILE_MISSING","TASK.md","Task is absent or unreadable.");}
+  const meta=parseTask(bytes),digest=sha256(bytes);
+  if(meta.taskId!==taskId)taskFailure("TASK_ID_MISMATCH","task_id","Document ID differs from selected task.");
+  if(input.version!==undefined&&input.version!==meta.version)taskFailure("TASK_STALE_VERSION","version","Requested version differs from document version.");
+  if(input.expectedSha256!==undefined&&input.expectedSha256!==digest)taskFailure("TASK_EXPECTED_HASH_MISMATCH","expectedSha256","Document bytes differ from the optional expected SHA-256; no manifest was created.");
+  // freezeTask rechecks these same bytes before creating the immutable manifest.
+  return freezeTask(root,workspaceId,{workspaceId,taskId,taskPath,version:meta.version,sha256:digest});
+}
 /** Explicit Web GPT operation; never called by a developer runner. Version files are create-only. */
 export function freezeTask(root:string,workspaceId:string,ref:TaskReference):TaskReference {
   load(root,workspaceId,ref);
@@ -138,13 +152,15 @@ export function taskBootstrap(task:TaskReference,operationId:string,stageId:stri
 }
 
 /** Detect mutation of any other task authority or operation, including Git-ignored controls. */
-export function taskControlSnapshot(root:string,ownReport:string):string {
+export function taskControlSnapshot(root:string,ownReport:string,proofs:ReadonlyArray<{path:string;sha256:string}>=[]):string {
   const records:Array<[string,string]>=[];let count=0;
   const walk=(path:string)=>{
     if(++count>2000)taskFailure("TASK_CONTROL_LIMIT","tasks","Too many task control entries for safe snapshot.");
     const abs=confinedFile(root,path),st=lstatSync(abs);
     if(st.isDirectory()){for(const name of readdirSync(abs).sort())walk(path+"/"+name);return;}
     if(path===ownReport)return;
+    const proof=proofs.find(p=>p.path===path);
+    if(proof){if(sha256(readConfined(root,path,4*1024*1024))!==proof.sha256)taskFailure("TASK_PROOF_CHANGED","evidence","Proof changed after report validation.");return;}
     records.push([path,sha256(readConfined(root,path,4*1024*1024))]);
   };
   walk(".devspace/coach/tasks");return sha256(JSON.stringify(records));

@@ -17,8 +17,8 @@ import {validateCodexSelection, type CodexSelection, type CodexModel, type Codex
 import { analyzeAgentEfficiency, type AuditTrace } from "./agent-efficiency-audit.js";
 import { codexChildEnvironment } from "./codex-proxy-environment.js";
 
-import { verifyTask, prepareTaskResults, taskControlSnapshot, reportPath, taskBootstrap, taskFailure, type TaskReference } from "./coach-task-contract.js";
-import { checkReport, type ReportOutcome } from "./coach-result-contract.js";
+import { verifyTask, prepareTaskResults, taskControlSnapshot, reportPath, taskBootstrap, taskFailure, readConfined, type TaskReference } from "./coach-task-contract.js";
+import { checkReport, operationProofs, type OperationProof, type ReportOutcome } from "./coach-result-contract.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 // Codex currently emits time-ordered UUIDv7 thread IDs; keep valid RFC versions.
@@ -121,6 +121,7 @@ export interface EvidencePacket {
   task?: TaskReference;
   stageId?: string;
   report?: ReportOutcome;
+  operationProofs?: ReadonlyArray<OperationProof>;
   operationId: string;
   workspaceId: string;
   threadId: string;
@@ -306,14 +307,16 @@ export function captureCodexSourceDiff(
   root: string,
   beforeFiles?: Record<string, SnapshotFile>,
   afterFiles?: Record<string, SnapshotFile>,
-  allowedReportPath?: string,
+  proofs: ReadonlyArray<OperationProof> = [],
 ): string {
   const workspace = directory(root);
   const runGit = (...args: string[]) => execFileSync("/usr/bin/git", args, {
     cwd: workspace, timeout: 5000, maxBuffer: MAX_SNAPSHOT_BYTES * 2,
     encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
   }) as string;
-  const denied = (path:string) => path!==allowedReportPath &&
+  const proofPaths=new Set(proofs.map(p=>p.path));
+  for(const proof of proofs)if(hash(readConfined(workspace,proof.path,4*1024*1024))!==proof.sha256)throw new Error("CODEX_PROOF_CHANGED_AFTER_VALIDATION");
+  const denied = (path:string) =>
     /(^|\/)(?:\.devspace|\.env(?:\..*)?|[^/]*(?:secret|token|password|credential|apikey|private)[^/]*)(?:$|\/)/i.test(path);
   const safeText=(path:string)=>{
     if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
@@ -366,7 +369,7 @@ export function captureCodexSourceDiff(
       }
     }
     const changedPaths = [...new Set([...paths, ...Object.keys(baseline), ...Object.keys(finalFiles)])]
-      .filter(path=>path!==allowedReportPath)
+      .filter(path=>!proofPaths.has(path))
       .filter((path) => baseline[path]?.sha256 !== finalFiles[path]?.sha256 ||
         baseline[path]?.state !== finalFiles[path]?.state);
     for (const path of changedPaths) if (denied(path)) throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
@@ -434,7 +437,7 @@ export function captureCodexSourceDiff(
     walk(workspace);
     if(beforeFiles && afterFiles){
       const changed=[...new Set([...Object.keys(beforeFiles),...Object.keys(afterFiles)])]
-        .filter(path=>path!==allowedReportPath)
+        .filter(path=>!proofPaths.has(path))
         .filter((path)=>beforeFiles[path]?.sha256!==afterFiles[path]?.sha256 ||
           beforeFiles[path]?.state!==afterFiles[path]?.state);
       for(const path of changed)if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
@@ -843,11 +846,13 @@ export class NativeCodexAgentRunner {
       if(success) {
         r.status.executionCompleted=true;
         r.status.evidenceState="PENDING";
-        if(controls!==undefined && controls!==taskControlSnapshot(input.workspaceRoot,reportPath(input.task!,input.operationId)))throw new Error("CODEX_TASK_CONTROL_MUTATED");
-        const sourceDiff = captureCodexSourceDiff(input.workspaceRoot,before.changedFiles??{},after.changedFiles??{},input.internalReview?undefined:reportPath(input.task!,input.operationId));
+        const proofs=report?operationProofs(input.workspaceRoot,input.task!,input.operationId,report):[];
+        if(controls!==undefined && controls!==taskControlSnapshot(input.workspaceRoot,reportPath(input.task!,input.operationId),proofs))throw new Error("CODEX_TASK_CONTROL_MUTATED");
+        const sourceDiff = captureCodexSourceDiff(input.workspaceRoot,before.changedFiles??{},after.changedFiles??{},proofs);
         const evidenceBase={
           ...(input.task?{task:input.task,stageId:input.stageId??"development"}:{}),
           ...(report?{report}:{}),
+          ...(proofs.length?{operationProofs:proofs}:{}),
           operationId:input.operationId,workspaceId:input.workspaceId,
           threadId:threadId!,exitCode:code,eventTypes:types,
           inputFingerprint:before.sha,finalFingerprint:after.sha,

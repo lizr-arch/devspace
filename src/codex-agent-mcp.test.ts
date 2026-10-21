@@ -68,6 +68,15 @@ try {
   model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write"} as const;
  const frozen=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",task:input.task}});
  assert.equal(frozen.isError??false,false,JSON.stringify(frozen));
+ for(const selector of [{taskId:input.task.taskId},{taskPath:input.task.taskPath},{taskId:input.task.taskId,version:1,expectedSha256:input.task.sha256}]){
+  const automatic=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",...selector}});
+  assert.equal(automatic.isError??false,false,JSON.stringify(automatic));
+  assert.deepEqual((automatic.structuredContent as any).task,input.task);
+ }
+ const wrongHash=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",taskId:input.task.taskId,expectedSha256:"0".repeat(64)}});
+ assert.equal(wrongHash.isError,true);assert.equal((wrongHash.structuredContent as any).error.diagnostics[0].code,"TASK_EXPECTED_HASH_MISMATCH");
+ const ambiguous=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",task:input.task,taskId:input.task.taskId}});
+ assert.equal(ambiguous.isError,true);assert.equal((ambiguous.structuredContent as any).error.diagnostics[0].code,"TASK_FREEZE_INPUT_CONFLICT");
  const initial=await client.callTool({name:"codex_agent_start",arguments:input});
  assert.equal(initial.isError ?? false,false,JSON.stringify(initial));
  assert.equal(JSON.stringify(initial).includes(input.prompt),false,"prompt must not echo");

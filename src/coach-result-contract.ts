@@ -1,5 +1,7 @@
 /** Agent claims are validated and frozen in native evidence, never trusted test proofs. */
 import * as z from "zod/v4";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { readConfined, reportPath, sha256, verifyTask, type TaskReference } from "./coach-task-contract.js";
 const text=z.string().trim().min(1).max(8000);
 const strings=z.array(text).max(200);
@@ -12,6 +14,26 @@ export const codexReportSchema=z.object({
 }).strict();
 export type CodexReport=z.infer<typeof codexReportSchema>;
 export interface ReportOutcome {schema:"DEVSPACE_CODEX_REPORT_CHECK_V1";valid:boolean;status?:CodexReport["status"];code:string;reportSha256?:string;testsIndependentlyVerified:false}
+export interface OperationProof {path:string;sha256:string}
+/** Only exact, hashed test records in this operation's own directory get an exception.
+ * Raw report/log content never enters the native source diff. Unlisted files still fail. */
+export function operationProofs(root:string,task:TaskReference,operationId:string,outcome:ReportOutcome):OperationProof[] {
+  const own=reportPath(task,operationId);
+  if(!existsSync(join(root,own)))return [];
+  const bytes=readConfined(root,own),proofs=[{path:own,sha256:sha256(bytes)}];
+  if(!outcome.valid)return proofs;
+  if(proofs[0].sha256!==outcome.reportSha256)throw new Error("CODEX_REPORT_CHANGED_AFTER_VALIDATION");
+  const report=codexReportSchema.parse(JSON.parse(bytes.toString("utf8")));
+  const prefix=own.slice(0,-5)+"/";
+  for(const test of report.test_results){
+    if(!test.evidence_path.startsWith(prefix))continue;
+    const tail=test.evidence_path.slice(prefix.length);
+    if(/(^|\/)(?:\.devspace|\.env(?:\..*)?|[^/]*(?:secret|token|password|credential|apikey|private)[^/]*)(?:$|\/)/i.test(tail))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
+    if(sha256(readConfined(root,test.evidence_path,4*1024*1024))!==test.evidence_sha256)throw new Error("CODEX_PROOF_CHANGED_AFTER_VALIDATION");
+    if(!proofs.some(p=>p.path===test.evidence_path))proofs.push({path:test.evidence_path,sha256:test.evidence_sha256});
+  }
+  return proofs;
+}
 export function checkReport(root:string,task:TaskReference,operationId:string,stageId:string):ReportOutcome {
   const fail=(code:string):ReportOutcome=>({schema:"DEVSPACE_CODEX_REPORT_CHECK_V1",valid:false,code,testsIndependentlyVerified:false});
   try{verifyTask(root,task.workspaceId,task);}catch{return fail("REPORT_TASK_CHANGED");}

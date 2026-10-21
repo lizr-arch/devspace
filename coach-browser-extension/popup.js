@@ -10,10 +10,10 @@ function message(payload){return new Promise((resolve,reject)=>{
 function render(value){
   latest=value||latest;
   el("status").textContent=latest.online ?
-    "已连接 · 待审核 "+latest.pending+" 项" :
+    "已连接 · 待处理 "+latest.pending+" 项" :
     (latest.paired ? "已配对但服务不可用" : "尚未配对");
   el("tasks").textContent=latest.events.length ?
-    latest.events.map(e=>"#"+e.event_id+" · "+e.operation_id).join("\n") : "无待审核事件";
+    latest.events.map(e=>"#"+e.event_id+" · "+(e.event_type==="PLAN_CONFLICT"?"计划冲突 · ":"")+e.operation_id).join("\n") : "无待处理事件";
   el("copy").disabled=!latest.online || !latest.events.length;
 }
 async function reload(){
@@ -47,8 +47,11 @@ el("refresh").addEventListener("click",async()=>{
   catch{el("feedback").textContent="刷新失败";}
 });
 el("copy").addEventListener("click",async()=>{
-  const ids=latest.events.map(e=>e.operation_id).join(", ");
-  const instruction="请使用 DevSpace MCP 审查已完成待审核事件，读取真实源码、Git 差异、测试证据并作出裁决；不要重复运行已完成的 Agent。任务 ID："+ids;
+  const reviews=latest.events.filter(e=>e.event_type!=="PLAN_CONFLICT").map(e=>e.operation_id).join(", ");
+  const conflicts=latest.events.filter(e=>e.event_type==="PLAN_CONFLICT").map(e=>e.operation_id).join(", ");
+  const instruction="请先查询 DevSpace MCP coach_realtime_status 并读取对应不可变证据，不要重复运行已完成的 Agent。"+
+    (reviews?"独立审核以下任务的真实源码、Git 差异与测试证据并写回有证据的裁决："+reviews+"。":"")+
+    (conflicts?"以下任务报告 PLAN_CONFLICT，请核对反证并明确修订契约，不要提交正式审核裁决或自动继续："+conflicts+"。":"");
   try{await navigator.clipboard.writeText(instruction);el("feedback").textContent="已复制，请自行发送到 ChatGPT。";}
   catch{el("feedback").textContent="复制失败，请手动记录事件 ID。";}
 });

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSyn
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fixtureDocument, fixtureTask } from "./coach-contract-fixture.js";
-import { parseTask, verifyTask, freezeTask, TaskGateError, sha256, reportPath, prepareTaskResults, type TaskReference } from "./coach-task-contract.js";
+import { parseTask, verifyTask, freezeTask, freezeTaskFile, TaskGateError, sha256, reportPath, prepareTaskResults, type TaskReference } from "./coach-task-contract.js";
 import { checkReport } from "./coach-result-contract.js";
 import { NativeCodexAgentRunner } from "./codex-agent-runner.js";
 import { CoachReviewEventStore } from "./coach-review-events.js";
@@ -34,6 +34,16 @@ try{
  rejects(()=>parseTask(Buffer.from(fixtureDocument.replace("## CONTEXT","G-02: Another uncovered requirement.\n## CONTEXT"))),"TASK_GOAL_UNCOVERED");
  rejects(()=>parseTask(Buffer.from("x".repeat(128*1024+1))),"TASK_TOO_LARGE");
  const task=fixtureTask(root,"ws-one");verifyTask(root,"ws-one",task);verifyTask(root,"ws-one",{sha256:task.sha256,version:task.version,taskPath:task.taskPath,taskId:task.taskId,workspaceId:task.workspaceId});checks+=2;
+ const automaticRoot=join(root,"server-freeze");mkdirSync(join(automaticRoot,".devspace/coach/tasks/fixture-task"),{recursive:true});
+ writeFileSync(join(automaticRoot,task.taskPath),fixtureDocument);
+ rejects(()=>freezeTaskFile(automaticRoot,"ws-auto",{taskId:task.taskId,expectedSha256:"0".repeat(64)}),"TASK_EXPECTED_HASH_MISMATCH","expectedSha256");
+ assert.throws(()=>readFileSync(join(automaticRoot,".devspace/coach/tasks/fixture-task/frozen-v1.json")),/ENOENT/);checks++;
+ rejects(()=>freezeTaskFile(automaticRoot,"ws-auto",{taskId:task.taskId,version:2}),"TASK_STALE_VERSION","version");
+ rejects(()=>freezeTaskFile(automaticRoot,"ws-auto",{taskPath:"../TASK.md"}),"TASK_ID_INVALID");
+ rejects(()=>freezeTaskFile(automaticRoot,"ws-auto",{taskId:task.taskId,taskPath:".devspace/coach/tasks/other/TASK.md"}),"TASK_PATH_MISMATCH");
+ const automatic=freezeTaskFile(automaticRoot,"ws-auto",{taskId:task.taskId});
+ assert.deepEqual(automatic,{...task,workspaceId:"ws-auto"});verifyTask(automaticRoot,"ws-auto",automatic);checks+=2;
+ assert.deepEqual(freezeTaskFile(automaticRoot,"ws-auto",{taskPath:task.taskPath,expectedSha256:task.sha256}),automatic);checks++;
  rejects(()=>verifyTask(root,"ws-one"),"TASK_REFERENCE_REQUIRED");
  rejects(()=>verifyTask(root,"ws-two",task),"TASK_WORKSPACE_MISMATCH");
  rejects(()=>verifyTask(root,"ws-one",{...task,taskPath:"../TASK.md"}),"TASK_PATH_MISMATCH");

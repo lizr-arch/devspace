@@ -160,6 +160,7 @@ async function gates(){
   assert.equal(verifiedMap.state,"COMPLETED",JSON.stringify(verifiedMap));
   assert.equal(mapRun.runner.getEvidence("nested-bulk-map-evidence")?.sourceDiff,"",
     "unchanged pre-existing bulk files are covered by fingerprints, not misreported as this run's diff");
+  assert.equal(mapRun.runner.getEvidence("nested-bulk-map-evidence")?.operationProofs?.length,1);
 
   // A dirty workspace's unrelated pre-run files must not enter a successful
   // run's diff or make an unchanged sensitive file fail evidence capture.

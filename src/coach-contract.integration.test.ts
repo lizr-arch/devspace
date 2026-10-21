@@ -40,7 +40,9 @@ async function scenario(mode:string){
   assert.equal(initial.exitCode,0);checks++;
   if(mode==="control-edit"){assert.equal(initial.state,"FAILED");assert.equal(initial.reason,"CODEX_TASK_CONTROL_MUTATED");assert.equal(events.getEvidence("ws","initial"),undefined);checks+=3;return;}
   assert.equal(initial.state,"COMPLETED");assert.ok(initial.eventId);checks+=2;
-  assert.equal(events.listPending("ws").events[0].report?.code,initial.report?.code);checks++;
+  const deliverable=initial.report?.valid&&["READY_FOR_REVIEW","PLAN_CONFLICT"].includes(initial.report.status!);
+  assert.equal(events.listPending("ws").pending_count,deliverable?1:0);
+  if(deliverable)assert.equal(events.listPending("ws").events[0].report?.code,initial.report?.code);checks++;
   // Exercise the production bearer-authorized feed handler without opening a socket.
   const db=new Database(events.path,{readonly:true});
   try{
@@ -49,7 +51,8 @@ async function scenario(mode:string){
     (sidecar as any).handle({workspaceId:"ws",authorizedWorkspaceIds:["ws"],port:12345,token,database:db},
       {headers:{host:"127.0.0.1:12345",authorization:"Bearer "+token.toString("base64url")},method:"GET",url:"/events"},
       {setHeader:()=>{},writeHead:(code:number)=>{httpStatus=code;},end:(text:string)=>{body=text;}});
-    assert.equal(httpStatus,200);assert.equal(JSON.parse(body).events[0].report.code,initial.report?.code);
+    assert.equal(httpStatus,200);assert.equal(JSON.parse(body).pending_count,deliverable?1:0);
+    if(deliverable){assert.equal(JSON.parse(body).events[0].report.code,initial.report?.code);assert.equal(JSON.parse(body).events[0].event_type,mode==="conflict"?"PLAN_CONFLICT":"READY_FOR_GPT_REVIEW");}
     assert.doesNotMatch(body,/Fixture execution completed|fixture check/);checks+=3;
   }finally{db.close();}
   if(mode==="repair"||mode==="missing"){

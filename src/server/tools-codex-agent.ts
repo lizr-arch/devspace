@@ -1,4 +1,4 @@
-import { taskReferenceSchema, verifyTask, freezeTask } from "../coach-task-contract.js";
+import { taskReferenceSchema, verifyTask, freezeTask, freezeTaskFile, taskFailure, safeTaskId } from "../coach-task-contract.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { LsofWorktreeProcessProbe } from "../workspace-process-probe.js";
@@ -15,12 +15,13 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
   const {config,workspaces,coachReviewEvents,getNativeCodexRunner}=ctx;
   if(!config.readOnly) {
     registerAppTool(server,"codex_task_freeze",{
-      title:"Freeze approved TASK version",description:"Web GPT explicitly freezes a complete TASK and workspace-bound version. Revision requires a new version; never edits TASK.md.",
-      inputSchema:{workspaceId:id,task:taskReferenceSchema},outputSchema:resultOutputSchema({task:z.unknown().optional(),error:optionalError}),
+      title:"Freeze approved TASK version",description:"Freeze by taskId or exact relative taskPath. Server reads and validates full TASK bytes and computes SHA-256; optional expectedSha256 guards changes. Returns complete workspace-bound task reference. Legacy full task references remain supported.",
+      inputSchema:{workspaceId:id,task:taskReferenceSchema.optional(),taskId:z.string().regex(safeTaskId).optional(),taskPath:z.string().optional(),version:z.number().int().positive().optional(),expectedSha256:z.string().regex(/^[a-f0-9]{64}$/).optional()},outputSchema:resultOutputSchema({task:z.unknown().optional(),error:optionalError}),
       _meta:{},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
-    },async({workspaceId,task})=>{
+    },async({workspaceId,task,...selection})=>{
       const workspace=workspaces.getWorkspace(workspaceId);
-      const frozen=freezeTask(workspace.root,workspaceId,task);
+      if(task&&Object.values(selection).some(v=>v!==undefined))taskFailure("TASK_FREEZE_INPUT_CONFLICT","task","Use a legacy task reference or taskId/taskPath selection, not both.");
+      const frozen=task?freezeTask(workspace.root,workspaceId,task):freezeTaskFile(workspace.root,workspaceId,selection);
       return {content:[textBlock("TASK frozen; use this reference for development.")],structuredContent:{result:"frozen",task:frozen}};
     });
     registerAppTool(server,"codex_agent_start",{
