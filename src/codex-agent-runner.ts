@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { spawn as nativeSpawn, execFileSync, type ChildProcess } from "node:child_process";
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -16,6 +16,9 @@ import { AgentObserverStore, normalizeCodexNativeEvent } from "./agent-observer.
 import {validateCodexSelection, type CodexSelection, type CodexModel, type CodexEffort} from "./coach-model-policy.js";
 import { analyzeAgentEfficiency, type AuditTrace } from "./agent-efficiency-audit.js";
 import { codexChildEnvironment } from "./codex-proxy-environment.js";
+
+import { verifyTask, prepareTaskResults, taskControlSnapshot, reportPath, taskBootstrap, taskFailure, type TaskReference } from "./coach-task-contract.js";
+import { checkReport, type ReportOutcome } from "./coach-result-contract.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 // Codex currently emits time-ordered UUIDv7 thread IDs; keep valid RFC versions.
@@ -69,6 +72,8 @@ export interface RunnerInput {
   workspaceRoot: string;
   operationId: string;
   prompt: string;
+  task?: TaskReference;
+  stageId?: string;
   model: CodexModel;
   reasoningEffort: CodexEffort;
   sessionId?: string;
@@ -107,9 +112,15 @@ export interface RunnerStatus {
   activeSelection?:CodexSelection;
   nextSelection?:CodexSelection;
   configRevision?:number;
+  report?: ReportOutcome;
+  task?: TaskReference;
+  stageId?: string;
   reason?: string;
 }
 export interface EvidencePacket {
+  task?: TaskReference;
+  stageId?: string;
+  report?: ReportOutcome;
   operationId: string;
   workspaceId: string;
   threadId: string;
@@ -168,7 +179,10 @@ function assertId(value: unknown, field: string): asserts value is string {
 function validate(input: RunnerInput): void {
   assertId(input.workspaceId, "workspace_id");
   assertId(input.operationId, "operation_id");
-  if (typeof input.prompt !== "string" || !input.prompt.trim() || input.prompt.length > 10000)
+  if(input.stageId!==undefined)assertId(input.stageId,"stage_id");
+  if(input.internalReview!==undefined && input.internalReview!==true)taskFailure("TASK_REVIEWER_MODE_INVALID","internalReview","Only the exact internal read-only reviewer mode is supported.");
+  if(input.internalReview && input.sandbox!=="read-only")taskFailure("TASK_REVIEWER_NOT_READ_ONLY","sandbox","Internal reviewers must use read-only sandbox.");
+  if (typeof input.prompt !== "string" || (input.internalReview && !input.prompt.trim()) || input.prompt.length > 10000)
     throw new TypeError("CODEX_INVALID_PROMPT");
   validateCodexSelection(input);
   if (!["workspace-write", "read-only"].includes(input.sandbox))
@@ -201,7 +215,9 @@ function executable(path: string, expected: string, testOnly: boolean): string {
   return path;
 }
 function operationIdentity(input: RunnerInput): string {
-  return hash(JSON.stringify({ ...input, prompt: hash(input.prompt) }));
+  const value={ ...input, prompt: hash(input.prompt) };
+  // Preserve historical durable identities; new task references are canonical regardless of RPC key order.
+  return hash(input.task?JSON.stringify(value,(_key,v)=>v && typeof v==="object" && !Array.isArray(v)?Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b))):v):JSON.stringify(value));
 }
 function stableStringify(value: unknown): string {
   return JSON.stringify(value);
@@ -290,13 +306,14 @@ export function captureCodexSourceDiff(
   root: string,
   beforeFiles?: Record<string, SnapshotFile>,
   afterFiles?: Record<string, SnapshotFile>,
+  allowedReportPath?: string,
 ): string {
   const workspace = directory(root);
   const runGit = (...args: string[]) => execFileSync("/usr/bin/git", args, {
     cwd: workspace, timeout: 5000, maxBuffer: MAX_SNAPSHOT_BYTES * 2,
     encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
   }) as string;
-  const denied = (path:string) =>
+  const denied = (path:string) => path!==allowedReportPath &&
     /(^|\/)(?:\.devspace|\.env(?:\..*)?|[^/]*(?:secret|token|password|credential|apikey|private)[^/]*)(?:$|\/)/i.test(path);
   const safeText=(path:string)=>{
     if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
@@ -349,6 +366,7 @@ export function captureCodexSourceDiff(
       }
     }
     const changedPaths = [...new Set([...paths, ...Object.keys(baseline), ...Object.keys(finalFiles)])]
+      .filter(path=>path!==allowedReportPath)
       .filter((path) => baseline[path]?.sha256 !== finalFiles[path]?.sha256 ||
         baseline[path]?.state !== finalFiles[path]?.state);
     for (const path of changedPaths) if (denied(path)) throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
@@ -416,6 +434,7 @@ export function captureCodexSourceDiff(
     walk(workspace);
     if(beforeFiles && afterFiles){
       const changed=[...new Set([...Object.keys(beforeFiles),...Object.keys(afterFiles)])]
+        .filter(path=>path!==allowedReportPath)
         .filter((path)=>beforeFiles[path]?.sha256!==afterFiles[path]?.sha256 ||
           beforeFiles[path]?.state!==afterFiles[path]?.state);
       for(const path of changed)if(denied(path))throw new Error("CODEX_EVIDENCE_SENSITIVE_PATH");
@@ -473,7 +492,7 @@ export class NativeCodexAgentRunner {
   run(input: RunnerInput): Promise<RunnerStatus> {
     validate(input);
     const root = directory(input.workspaceRoot);
-    const canonical = { ...input, workspaceRoot:root };
+    const canonical = { ...input, ...(input.task?{task:{...input.task}}:{}), workspaceRoot:root };
     const old = this.records.get(input.operationId);
     if (old) {
       if (operationIdentity(old.input) !== operationIdentity(canonical))
@@ -488,12 +507,13 @@ export class NativeCodexAgentRunner {
       // Return its observed state; never relaunch an operation from disk.
       return Promise.resolve(this.status(input.operationId,input.workspaceId));
     }
+    if(!input.internalReview || input.task)verifyTask(root,input.workspaceId,input.task);
     if(this.options.events.hasInterruptedRun(input.workspaceId))
       throw new Error("CODEX_WORKSPACE_QUARANTINED_UNRESOLVED_AGENT");
     const record: RecordEntry = {
       input: canonical,
       status: { operationId: input.operationId, workspaceId:input.workspaceId,
-        state:"RUNNING", startedAt:new Date().toISOString() },
+        state:"RUNNING", ...(canonical.task?{task:canonical.task,stageId:canonical.stageId??"development"}:{}), startedAt:new Date().toISOString() },
     };
     this.records.set(input.operationId,record);
     record.promise = this.execute(record);
@@ -544,11 +564,13 @@ export class NativeCodexAgentRunner {
       const durable=this.options.events.getAgentRun(workspaceId,operationId);
       if(durable){
         const config=this.options.events.getRunConfig(workspaceId,operationId);
-        let evidence:{exitCode?:unknown;evidenceSha256?:unknown}|undefined;
+        let evidence:{exitCode?:unknown;evidenceSha256?:unknown;report?:ReportOutcome;task?:TaskReference;stageId?:string}|undefined;
         if(durable.state==="COMPLETED")try{evidence=this.options.events.getEvidence(workspaceId,operationId) as typeof evidence;}catch{/* Corrupt proof remains unavailable. */}
         const durableEvidence=typeof evidence?.evidenceSha256==="string"?evidence.evidenceSha256:undefined;
         const review=durable.state==="COMPLETED"?reviewedState(workspaceId,durableEvidence):undefined;
         return {operationId,workspaceId,state:durable.state,progressState:"FINISHED",
+        ...(evidence?.report?{report:evidence.report,reviewState:evidence.report.valid && evidence.report.status==="READY_FOR_REVIEW"?"READY_FOR_GPT_REVIEW" as const:"REVIEW_BLOCKED" as const}:{}),
+        ...(evidence?.task?{task:evidence.task,stageId:evidence.stageId}:{}),
         ...(review?{reviewState:review}:{}),
         ...(config?{activeSelection:config.active,nextSelection:config.next,configRevision:config.revision}:{}),
         startedAt:durable.startedAt,...(durable.finishedAt?{finishedAt:durable.finishedAt}:{}),
@@ -625,6 +647,7 @@ export class NativeCodexAgentRunner {
     const types:string[]=[];
     const auditTrace: AuditTrace[]=[];
     let beforeSha:string|undefined, afterSha:string|undefined;
+    let controls:string|undefined;
     // Incremental hashes avoid buffering several megabytes of tool output.
     const stdoutDigest=createHash("sha256");
     const stderrDigest=createHash("sha256");
@@ -734,6 +757,12 @@ export class NativeCodexAgentRunner {
         : await captureCodexFingerprint(input.workspaceRoot);
       if(input.expectedFingerprint && before.sha!==input.expectedFingerprint)
         throw new Error("CODEX_REWORK_STALE_WORKTREE");
+      if(!input.internalReview || input.task)verifyTask(input.workspaceRoot,input.workspaceId,input.task);
+      if(!input.internalReview){
+        prepareTaskResults(input.workspaceRoot,input.task!);
+        if(existsSync(join(input.workspaceRoot,reportPath(input.task!,input.operationId))))throw new Error("CODEX_REPORT_ALREADY_EXISTS");
+        controls=taskControlSnapshot(input.workspaceRoot,reportPath(input.task!,input.operationId));
+      }
       if(r.stop) throw new Error("CODEX_CANCELLED_BEFORE_SPAWN");
       const marker=createGuardianMarker();
       const spawnArgs = this.options.spawn
@@ -761,7 +790,7 @@ export class NativeCodexAgentRunner {
       }
       // The runner sends only the authorized prompt via stdin, never in process argv.
       child.stdin?.on("error",()=>{failed=true;r.status.failureStage="runtime";});
-      child.stdin?.end(input.prompt);
+      child.stdin?.end(input.internalReview?input.prompt:taskBootstrap(input.task!,input.operationId,input.stageId??"development",input.prompt));
       // Transport liveness, NOT a claim of model progress or successful actions.
       if(this.options.observer)heartbeatTimer=setInterval(()=>{
         if(r.status.state==="RUNNING") {
@@ -801,6 +830,10 @@ export class NativeCodexAgentRunner {
       exitCode=code;
       if(!oversize && remaining.trim())parseLine(remaining);
       if(input.sessionId && threadId!==input.sessionId)failed=true;
+      const report=input.internalReview?undefined:checkReport(input.workspaceRoot,input.task!,input.operationId,input.stageId??"development");
+      r.status.report=report;
+      r.status.task=input.task;r.status.stageId=input.stageId??"development";
+      r.status.exitCode=code;
       const after=this.options.fingerprint
         ? await this.options.fingerprint(input.workspaceRoot)
         : await captureCodexFingerprint(input.workspaceRoot);
@@ -810,8 +843,11 @@ export class NativeCodexAgentRunner {
       if(success) {
         r.status.executionCompleted=true;
         r.status.evidenceState="PENDING";
-        const sourceDiff = captureCodexSourceDiff(input.workspaceRoot,before.changedFiles??{},after.changedFiles??{});
+        if(controls!==undefined && controls!==taskControlSnapshot(input.workspaceRoot,reportPath(input.task!,input.operationId)))throw new Error("CODEX_TASK_CONTROL_MUTATED");
+        const sourceDiff = captureCodexSourceDiff(input.workspaceRoot,before.changedFiles??{},after.changedFiles??{},input.internalReview?undefined:reportPath(input.task!,input.operationId));
         const evidenceBase={
+          ...(input.task?{task:input.task,stageId:input.stageId??"development"}:{}),
+          ...(report?{report}:{}),
           operationId:input.operationId,workspaceId:input.workspaceId,
           threadId:threadId!,exitCode:code,eventTypes:types,
           inputFingerprint:before.sha,finalFingerprint:after.sha,
@@ -837,7 +873,10 @@ export class NativeCodexAgentRunner {
         r.status.evidenceSha256=evidenceSha256;
         r.status.eventId=recorded.event_id;
         r.status.evidenceState="VERIFIED";
-        if(!input.internalReview)r.status.reviewState="READY_FOR_GPT_REVIEW";
+        if(!input.internalReview){
+          r.status.reviewState=report?.valid && report.status==="READY_FOR_REVIEW"?"READY_FOR_GPT_REVIEW":"REVIEW_BLOCKED";
+          if(!report?.valid)r.status.reason="CODEX_REPORT_PROTOCOL_ERROR";
+        }
         else if(!r.reviewRecommendation)r.status.reviewState="REVIEW_BLOCKED";
         r.status.state="COMPLETED";
       } else {

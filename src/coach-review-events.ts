@@ -1,3 +1,4 @@
+import { safeReportOutcome, type ReportOutcome } from "./coach-result-contract.js";
 /** Native DevSpace coach event store; no project-local experiment DB. */
 import { chmodSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -24,6 +25,7 @@ export interface CoachEvent {
   operation_id: string;
   event_type: "READY_FOR_GPT_REVIEW";
   created_at: string;
+  report?:ReportOutcome;
 }
 export type AgentRunState = "RUNNING"|"COMPLETED"|"FAILED"|"STOPPED"|"INTERRUPTED"|"CLEARED";
 export interface GuardianRecord { marker:string; pid:number; pgid:number; uid:number; lstart:string; }
@@ -44,8 +46,8 @@ export interface ReviewReceipt {
 export class CoachReviewEventStore {
   readonly path: string;
   private readonly db: Database.Database;
-  private readonly completionListeners=new Set<(event:{workspaceId:string;operationId:string;eventId:number})=>void>();
-  onCompleted(listener:(event:{workspaceId:string;operationId:string;eventId:number})=>void):()=>void {
+  private readonly completionListeners=new Set<(event:{workspaceId:string;operationId:string;eventId:number;report?:ReportOutcome})=>void>();
+  onCompleted(listener:(event:{workspaceId:string;operationId:string;eventId:number;report?:ReportOutcome})=>void):()=>void {
     this.completionListeners.add(listener);
     return ()=>this.completionListeners.delete(listener);
   }
@@ -278,7 +280,7 @@ export class CoachReviewEventStore {
     // Only publish AFTER SQLite commits evidence and event atomically.
     // A listener is advisory; it must not overturn verified runner success.
     for(const listener of this.completionListeners) {
-      try {listener({workspaceId:input.workspaceId,operationId:input.operationId,eventId:completedEvent.event_id});}
+      try {listener({workspaceId:input.workspaceId,operationId:input.operationId,eventId:completedEvent.event_id,...(safeReportOutcome(data.report)?{report:safeReportOutcome(data.report)}:{})});}
       catch { /* Poll fallback recovers the missed notification. */ }
     }
     return completedEvent;
@@ -350,7 +352,7 @@ export class CoachReviewEventStore {
     const count = this.db.prepare("SELECT count(*) AS n "+pending).get(workspaceId) as {n:number};
     const events = this.db.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,e.event_type,e.created_at "+
       pending+" ORDER BY e.event_id LIMIT ?").all(workspaceId,limit) as CoachEvent[];
-    return {pending_count:count.n,events};
+    return {pending_count:count.n,events:events.map(e=>{const packet=this.getEvidence(e.workspace_id,e.operation_id) as {report?:unknown}|undefined;const report=safeReportOutcome(packet?.report);return {...e,...(report?{report}:{})};})};
   }
   hasInterruptedRun(workspaceId:string):boolean {
     if(!ID.test(workspaceId))throw new TypeError("COACH_AGENT_RUN_INVALID");

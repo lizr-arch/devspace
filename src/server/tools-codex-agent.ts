@@ -1,3 +1,4 @@
+import { taskReferenceSchema, verifyTask, freezeTask } from "../coach-task-contract.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { LsofWorktreeProcessProbe } from "../workspace-process-probe.js";
@@ -13,12 +14,22 @@ const optionalError=z.unknown().optional();
 export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void {
   const {config,workspaces,coachReviewEvents,getNativeCodexRunner}=ctx;
   if(!config.readOnly) {
+    registerAppTool(server,"codex_task_freeze",{
+      title:"Freeze approved TASK version",description:"Web GPT explicitly freezes a complete TASK and workspace-bound version. Revision requires a new version; never edits TASK.md.",
+      inputSchema:{workspaceId:id,task:taskReferenceSchema},outputSchema:resultOutputSchema({task:z.unknown().optional(),error:optionalError}),
+      _meta:{},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+    },async({workspaceId,task})=>{
+      const workspace=workspaces.getWorkspace(workspaceId);
+      const frozen=freezeTask(workspace.root,workspaceId,task);
+      return {content:[textBlock("TASK frozen; use this reference for development.")],structuredContent:{result:"frozen",task:frozen}};
+    });
     registerAppTool(server,"codex_agent_start",{
       title:"Start native Codex Agent",
-      description:"Start approved local Codex CLI and return immediately. Status/evidence are queried separately. A successful turn is not proof tests passed.",
+      description:"Requires a frozen task reference; prompt is supplemental guidance only. Start approved local Codex CLI and return immediately. Status/evidence are queried separately. A successful turn is not proof tests passed.",
       inputSchema:{
         workspaceId:id,operationId:operation,
-        prompt:z.string().min(1).max(10000),
+        prompt:z.string().max(10000).default(""),
+        task:taskReferenceSchema.optional(),stageId:id.optional(),
         model:z.enum(CODEX_MODELS),
         reasoningEffort:z.enum(CODEX_EFFORTS),
         sandbox:z.enum(["read-only","workspace-write"]),
@@ -30,6 +41,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
       annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
     },async(input)=>{
       const workspace=workspaces.getWorkspace(input.workspaceId);
+      verifyTask(workspace.root,input.workspaceId,input.task);
       const runner=getNativeCodexRunner();
       const status=await runner.start({
         ...input,workspaceRoot:workspace.root,
@@ -107,7 +119,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
         const {state,startedAt,finishedAt,elapsedMs,lastNativeEventAt,
           nativeEventCount,timeSinceNativeEventMs,progressState,
           activeSelection,nextSelection,configRevision,
-          errorEventCount,lastErrorCategory,failureStage,executionCompleted,evidenceState,reviewState}=raw;
+          errorEventCount,lastErrorCategory,failureStage,executionCompleted,evidenceState,reviewState,report}=raw;
         status={state,startedAt,...(finishedAt?{finishedAt}:{}),
           ...(elapsedMs!==undefined?{elapsedMs}:{}),
           ...(lastNativeEventAt?{lastNativeEventAt}:{}),
@@ -120,6 +132,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
           ...(executionCompleted!==undefined?{executionCompleted}:{}),
           ...(evidenceState?{evidenceState}:{}),
           ...(reviewState?{reviewState}:{}),
+          ...(report?{report}:{}),
           ...(activeSelection?{activeSelection}:{}),
           ...(nextSelection?{nextSelection}:{}),
           ...(configRevision!==undefined?{configRevision}:{})};

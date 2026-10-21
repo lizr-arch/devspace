@@ -39,3 +39,8 @@
 ## 发行和验证
 
 `src/coach-realtime.integration.test.ts` 使用真正子进程、SQLite 和 Native Runner 事件检验三回合（初次 REWORK→修复 APPROVED→下一阶段 APPROVED）、重启无重复、Reviewer 结构化 JSON 白名单、真实测试失败拒绝 APPROVED、任务清单 SHA 篡改拒绝自动执行。还需编译、原有 Coach 专项回归、实际服务部署和重启后工具目录验证。技术 PASS 不可替代真正的模型推理、地图水网和审美验收。
+
+
+## Mandatory TASK handoff (DEVSPACE-COACH-CONTRACT-001)
+
+For every new native developer operation, Web GPT must write and explicitly freeze the full versioned TASK, then pass the workspace-bound task reference to start/rework and every registered stage. Freeform stage prompts are supplemental only. Follow the [complete task/result operating instructions](DEVSPACE_COACH_CONTRACT_001.md), including structured task-gate errors, IN_PROGRESS continuation limits, PLAN_CONFLICT revision and the unchanged independent signed APPROVED gate. Existing historical jobs are not replayed or silently migrated. The globally installed Coach skill is not modified by repository development; use these repository instructions with it until installation is separately authorized.

@@ -1,3 +1,4 @@
+import { fixtureTask } from "./coach-contract-fixture.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -18,6 +19,7 @@ import type { ServerContext } from "./server/server-types.js";
 const root=mkdtempSync(join(tmpdir(),"coach-b2-adversarial-"));
 const workspace=join(root,"project");
 mkdirSync(join(workspace,".devspace"),{recursive:true});
+const task=fixtureTask(workspace,"allowed");
 const source=join(workspace,"main.ts");
 writeFileSync(source,"export const value = 1;\n");
 const state=join(root,"state");
@@ -83,7 +85,7 @@ try {
  assert.equal((await submit(t1,"REWORK")).isError??false,false);
  const resumed=await client.callTool({name:"codex_agent_start_rework",arguments:{
    workspaceId:"allowed",parentOperationId:"first-needs-rework",
-   operationId:"rework-child-1",prompt:"Fix the defective code",
+   operationId:"rework-child-1",task,prompt:"Fix the defective code",
    reasoningEffort:"none",sandbox:"workspace-write"
  }});
  assert.equal(resumed.isError??false,false,JSON.stringify(resumed));
@@ -91,7 +93,7 @@ try {
  assert.equal(startedReworks[0].parentOperationId,"first-needs-rework");
  assert.equal(startedReworks[0].sessionId,"11111111-1111-4111-8111-111111111111");
  const rejectUnreviewed=await client.callTool({name:"codex_agent_start_rework",arguments:{
-   workspaceId:"allowed",parentOperationId:"nonexistent",operationId:"badchild",
+   workspaceId:"allowed",parentOperationId:"nonexistent",operationId:"badchild",task,
    prompt:"unauthorized rework",reasoningEffort:"none",sandbox:"workspace-write"
  }});
  assert.equal(rejectUnreviewed.isError,true);

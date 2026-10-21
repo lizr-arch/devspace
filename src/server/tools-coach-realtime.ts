@@ -1,3 +1,4 @@
+import { taskReferenceSchema } from "../coach-task-contract.js";
 import type {McpServer} from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import {registerAppTool,textBlock} from "./server-helpers.js";
@@ -7,7 +8,7 @@ import {CODEX_MODELS,CODEX_EFFORTS} from "../coach-model-policy.js";
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 const stage=z.object({
- prompt:z.string().min(1).max(8000),
+ prompt:z.string().max(8000).default(""),task:taskReferenceSchema.optional(),stageId:id.optional(),
  testTaskId:id,
  model:z.enum(CODEX_MODELS),
  reasoningEffort:z.enum(CODEX_EFFORTS),
@@ -35,7 +36,7 @@ export function registerCoachRealtimeTools(server:McpServer,ctx:ServerContext):v
   description:"Opt-in autonomous real-time Coach: independent local Codex review after signed completion, approved deterministic test before APPROVED, at most five revisions, optional later stages. Requires an already running native Agent and workspace-approved test tasks. This starts no unrelated model.",
   inputSchema:{planId:id,workspaceId:id,initialOperationId:id,
    reviewerModel:z.enum(CODEX_MODELS),reviewerEffort:z.enum(CODEX_EFFORTS),
-   maxReworks:z.number().int().min(0).max(5),
+   maxReworks:z.number().int().min(0).max(5),maxContinuations:z.number().int().min(0).max(3).optional(),
    stages:z.array(stage).min(1).max(8)},
   outputSchema:resultOutputSchema({plan:z.unknown()}),
   _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
@@ -43,7 +44,7 @@ export function registerCoachRealtimeTools(server:McpServer,ctx:ServerContext):v
   const ws=ctx.workspaces.getWorkspace(spec.workspaceId);
   if(!ws.approvedTasks || !checkManifestIntegrity(ws.root,ws.approvedTasks))
     throw new Error("COACH_REALTIME_TASK_MANIFEST_NOT_APPROVED");
-  const plan=ctx.coachRealtime.register(spec);
+  const plan=await ctx.coachRealtime.register(spec);
   return {content:[textBlock("Enrolled explicitly approved realtime Coach plan "+plan.planId)],
    structuredContent:{result:"registered",plan:{planId:plan.planId,phase:plan.phase,
     currentOperationId:plan.currentOperationId}}};
@@ -53,7 +54,7 @@ export function registerCoachRealtimeTools(server:McpServer,ctx:ServerContext):v
    description:"Enroll a preapproved staged Codex plan. Web GPT, NOT the local reviewer, owns every signed verdict. Only a bounded, tested, exact-event decision may dispatch rework or another stage. Default off.",
    inputSchema:{planId:id,workspaceId:id,initialOperationId:id,
      reviewerModel:z.enum(CODEX_MODELS),reviewerEffort:z.enum(CODEX_EFFORTS),
-     maxReworks:z.number().int().min(0).max(5),
+     maxReworks:z.number().int().min(0).max(5),maxContinuations:z.number().int().min(0).max(3).optional(),
      stages:z.array(stage).min(1).max(8)},
    outputSchema:resultOutputSchema({plan:z.unknown(),error:z.unknown().optional()}),
    _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
@@ -61,7 +62,7 @@ export function registerCoachRealtimeTools(server:McpServer,ctx:ServerContext):v
    const ws=ctx.workspaces.getWorkspace(spec.workspaceId);
    if(!ws.approvedTasks || !checkManifestIntegrity(ws.root,ws.approvedTasks))
      throw new Error("COACH_WEBGPT_TASK_MANIFEST_NOT_APPROVED");
-   const plan=ctx.coachRealtime.register({...spec,reviewerMode:"webgpt"});
+   const plan=await ctx.coachRealtime.register({...spec,reviewerMode:"webgpt"});
    return {content:[textBlock("Enrolled Web GPT review plan "+plan.planId)],
      structuredContent:{result:"registered",plan:{planId:plan.planId,phase:plan.phase,
        currentOperationId:plan.currentOperationId}}};

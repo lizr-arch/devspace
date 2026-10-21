@@ -1,3 +1,4 @@
+import { verifyTask } from "./coach-task-contract.js";
 import { createHash } from "node:crypto";
 import { JobResourceLocks, sharedResourceLocks } from "./job-resource-locks.js";
 import { captureCodexFingerprint } from "./codex-agent-runner.js";
@@ -58,7 +59,9 @@ export class CoachReviewGate {
       const packet = this.packet(input.workspaceId, input.eventId);
       if (packet.operationId !== input.operationId || packet.evidenceSha256 !== input.evidenceSha256) throw new Error("COACH_REVIEW_EVIDENCE_MISMATCH");
       if ((await this.fingerprint(input.workspaceRoot)).sha !== packet.finalFingerprint) throw new Error("COACH_REVIEW_STALE_EVIDENCE");
+      if(packet.task)verifyTask(input.workspaceRoot,input.workspaceId,packet.task);
       if (input.decision === "APPROVED") {
+        if(packet.task && (!packet.report?.valid || packet.report.status!=="READY_FOR_REVIEW"))throw new Error("COACH_REVIEW_REPORT_NOT_READY");
         const proof=this.options.events.getVerifiedTest(input.eventId);
         if (!proof || proof.workspace_id !== input.workspaceId ||
             proof.tested_fingerprint !== packet.finalFingerprint)

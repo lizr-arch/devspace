@@ -9,6 +9,8 @@ function config(readOnly:boolean):ServerConfig{
 const regular=config(false);
 const names=exposedToolNames(regular,toolNamesFor(regular));
 assert.equal(names.filter(n=>n==="codex_agent_observe").length,1);
+assert.equal(names.filter(n=>n==="codex_task_freeze").length,1);
+assert.equal(requiredCapabilityForTool("codex_task_freeze"),"runner.execute");
 assert.equal(names.filter(n=>n==="codex_agent_update_config").length,1);
 for(const tool of ["coach_realtime_status","coach_realtime_register","coach_realtime_pause","coach_realtime_resume","coach_webgpt_claim_browser_route"])
  assert.equal(names.filter(n=>n===tool).length,1);
@@ -27,5 +29,6 @@ assert.ok(!ro.includes("coach_realtime_resume"));
 assert.ok(!ro.includes("coach_webgpt_claim_browser_route"));
 assert.ok(!ro.includes("codex_agent_update_config"));
 assert.ok(!ro.includes("codex_agent_start"));
-assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310$/);
+assert.ok(!ro.includes("codex_task_freeze"));
+assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");

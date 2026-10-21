@@ -1,3 +1,4 @@
+import { safeReportOutcome } from "./coach-result-contract.js";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync, lstatSync, chmodSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -292,9 +293,16 @@ export class ManagedCoachSidecar {
       ).all(...(native ? ids : [])) as EventRow[];
       return send(res,200,{
         pending_count:total.count,
-        events:rows.slice(0,MAX_EVENTS).map(row=>({
-          ...row,workspace_id:native?row.workspace_id:entry.workspaceId
-        })),
+        events:rows.slice(0,MAX_EVENTS).map(row=>{
+          const evidence=native && entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_review_evidence'").get()?entry.database.prepare("SELECT packet_json,evidence_sha256 FROM coach_review_evidence WHERE event_id=?").get(row.event_id) as {packet_json:string;evidence_sha256:string}|undefined:undefined;
+          let report;
+          if(evidence){
+            const {evidenceSha256,...packet}=JSON.parse(evidence.packet_json);
+            if(evidenceSha256!==evidence.evidence_sha256 || createHash("sha256").update(JSON.stringify(packet)).digest("hex")!==evidence.evidence_sha256)throw new Error("COACH_EVIDENCE_INTEGRITY_FAILURE");
+            report=safeReportOutcome(packet.report);
+          }
+          return {...row,workspace_id:native?row.workspace_id:entry.workspaceId,...(report?{report}:{})};
+        }),
       },cors);
     } catch {
       return send(res, 503, { error: "event store unavailable" }, cors);
