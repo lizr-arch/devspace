@@ -103,8 +103,13 @@ async function run() {
     const url = `http://127.0.0.1:${address.port}`;
     const gemini = await listTools(url, token.access_token, "mcp");
     const regular = await listTools(url, token.access_token, "ChatGPT");
-    assert.equal(gemini.length, regular.length);
-    assert.ok(gemini.length >= 73, `expected full catalog, got ${gemini.length}`);
+    assert.ok(gemini.length > 0 && gemini.length <= 50,
+      `Gemini should receive a bounded toolset; got ${gemini.length}`);
+    assert.ok(regular.length >= 73 && gemini.length < regular.length,
+      `ChatGPT must keep the full catalog even when both sessions share a bearer token (Gemini ${gemini.length}, ChatGPT ${regular.length})`);
+    assert.ok(gemini.some(tool => tool.name === "open_workspace"));
+    assert.ok(!gemini.some(tool => tool.name === "codex_agent_start"),
+      "Gemini subset must not expose unrestricted Codex dispatch");
     for (const tool of gemini) {
       const encoded = JSON.stringify(tool);
       assert.ok(!encoded.includes("$schema"), `${tool.name} retained $schema`);
@@ -113,7 +118,7 @@ async function run() {
       assert.ok(!("_meta" in tool), `${tool.name} retained _meta`);
     }
     assert.ok(regular.some((tool) => "outputSchema" in tool));
-    console.log(`Gemini full catalog passed (${gemini.length} tools; regular catalog unchanged)`);
+    console.log(`Gemini bounded catalog passed (${gemini.length} tools; ChatGPT full ${regular.length})`);
   } finally {
     await new Promise<void>((resolve) => listener.close(() => resolve()));
     oauth.close();

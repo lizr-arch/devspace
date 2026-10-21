@@ -470,12 +470,16 @@ export function setupExpressRoutes(params: {
     if (bearerFingerprint && credentialExpiry !== undefined && credentialExpiry <= Date.now()) {
       geminiCredentials.delete(bearerFingerprint);
     }
-    const geminiCompat =
-      (requestSessionId !== undefined && geminiSessions.get(requestSessionId) === true) ||
-      (rpcMethod === "tools/list" &&
-        bearerFingerprint !== undefined &&
-        credentialExpiry !== undefined &&
-        credentialExpiry > Date.now());
+    // A concrete MCP session identifies its own client. Never let a Gemini
+    // bearer-token fallback rewrite another (e.g. ChatGPT) session which happens
+    // to reuse the same OAuth access token. Only stateless requests can rely
+    // on the time-bounded token fingerprint.
+    const geminiCompat = requestSessionId !== undefined
+      ? geminiSessions.get(requestSessionId) === true
+      : (rpcMethod === "tools/list" &&
+          bearerFingerprint !== undefined &&
+          credentialExpiry !== undefined &&
+          credentialExpiry > Date.now());
 
     let responseBytes = 0;
     const origWrite = res.write.bind(res);

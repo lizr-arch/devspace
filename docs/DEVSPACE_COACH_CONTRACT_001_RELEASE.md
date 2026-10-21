@@ -33,3 +33,13 @@ Status: **CANDIDATE READY, PRODUCTION NOT DEPLOYED**. This file is an operationa
 - **BLOCKED / DO_NOT_DEPLOY** while dirty main is owner-unreconciled, service upgrade path unsafe, tool remains unavailable, or real E2E has not run.
 
 This document is a release checklist. Keep production running unchanged until all preconditions are satisfied.
+
+## 2026-10-21 consolidated integration update
+
+- An **exact preservation checkpoint** of the production working tree's 12 tracked modifications plus 4 relevant new source/doc files is committed only on isolated `devspace/integration/devspace-devspace-8022c89e` @ `5d5b8506608b0bcfd31ba8e15ec2b2b652382af9`. Both working trees' tracked diff SHA-256 matched: `57736ceffe2f9da2c3a80bc4bfdf8dd09679adb6122bf77da3fdec9395115f13`. This is a preservation checkpoint, **not owner approval** or a passing product release.
+- The snapshot was merged into this integration branch conflict-free at `94be121a73ecf6163a367d3cf4a7d1ccd1fdb60f`. The current production main checkout has **not** been committed or altered.
+- Isolated `npm ci` with pinned lockfile (via explicitly approved DevSpace task) exited 0, installed 370 packages. The temporary task manifest must not be committed.
+- Combined **`npm run typecheck` 0; `npm run build` 0; `npm run test:coach:contract` 0; `npm run test:coach:0310` 0 (59/59); `npm run test:coach:0310:sidecar` 0 (real localhost listener)**.
+- An actual Gemini integration regression was caught: the old test expected full Gemini catalog and shared bearer tokens could incorrectly classify ChatGPT stateful sessions. The fix prioritizes explicit session identity over stateless token fingerprint. The updated integration test using the **same bearer token** now confirms Gemini bounded catalog **39 tools**, regular ChatGPT **84 tools**. `npm run test:gemini-tools` exited 0. Stateless clients sharing the same bearer still require distinct credentials to avoid ambiguity.
+- Build and all targeted tests passing in this isolated candidate do **not** mean the production server has been upgraded. Verify dirty main owner reconciliation, session/plan quiescence, service reload/rollback and live one-click claim before marking APPROVED.
+
