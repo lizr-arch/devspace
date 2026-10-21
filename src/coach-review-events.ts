@@ -1,3 +1,4 @@
+import { safeReportOutcome, type ReportOutcome } from "./coach-result-contract.js";
 /** Native DevSpace coach event store; no project-local experiment DB. */
 import { chmodSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -9,6 +10,24 @@ import { validateCodexSelection, type CodexSelection } from "./coach-model-polic
 const FILE = "coach-review-events.sqlite";
 const SHA = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+export type CoachDeliveryType="READY_FOR_GPT_REVIEW"|"PLAN_CONFLICT";
+/** The immutable completion journal retains its historical schema and IDs.
+ * Project the delivery queue from frozen reports, before counting/pagination. */
+export const COACH_DELIVERY_SQL="(p.event_id IS NULL OR " +
+  "(json_type(p.packet_json,'$.task') IS NULL AND json_type(p.packet_json,'$.report') IS NULL) OR " +
+  "(json_type(p.packet_json,'$.report.valid')='true' AND " +
+  "json_extract(p.packet_json,'$.report.schema')='DEVSPACE_CODEX_REPORT_CHECK_V1' AND " +
+  "json_extract(p.packet_json,'$.report.code')='REPORT_VALID_UNVERIFIED_CLAIMS' AND " +
+  "json_type(p.packet_json,'$.report.testsIndependentlyVerified')='false' AND " +
+  "length(json_extract(p.packet_json,'$.report.reportSha256'))=64 AND " +
+  "json_extract(p.packet_json,'$.report.reportSha256') NOT GLOB '*[^0-9a-f]*' AND " +
+  "json_extract(p.packet_json,'$.report.status') IN ('READY_FOR_REVIEW','PLAN_CONFLICT')))";
+export function completionDeliveryType(packet?:{task?:unknown;report?:unknown}):CoachDeliveryType|undefined {
+  if(packet?.task===undefined&&packet?.report===undefined)return "READY_FOR_GPT_REVIEW";
+  const report=safeReportOutcome(packet?.report);
+  if(!report?.valid||!report.reportSha256||report.code!=="REPORT_VALID_UNVERIFIED_CLAIMS")return undefined;
+  return report.status==="READY_FOR_REVIEW"?"READY_FOR_GPT_REVIEW":report.status==="PLAN_CONFLICT"?"PLAN_CONFLICT":undefined;
+}
 type Decision = "APPROVED" | "REWORK" | "BLOCKED";
 /** Queued selection is applied only when a new explicitly reviewed turn starts.
  * Changes to a running process never mutate its CLI argv or restart the process.
@@ -22,8 +41,9 @@ export interface CoachEvent {
   event_id: number;
   workspace_id: string;
   operation_id: string;
-  event_type: "READY_FOR_GPT_REVIEW";
+  event_type: CoachDeliveryType;
   created_at: string;
+  report?:ReportOutcome;
 }
 export type AgentRunState = "RUNNING"|"COMPLETED"|"FAILED"|"STOPPED"|"INTERRUPTED"|"CLEARED";
 export interface GuardianRecord { marker:string; pid:number; pgid:number; uid:number; lstart:string; }
@@ -44,8 +64,8 @@ export interface ReviewReceipt {
 export class CoachReviewEventStore {
   readonly path: string;
   private readonly db: Database.Database;
-  private readonly completionListeners=new Set<(event:{workspaceId:string;operationId:string;eventId:number})=>void>();
-  onCompleted(listener:(event:{workspaceId:string;operationId:string;eventId:number})=>void):()=>void {
+  private readonly completionListeners=new Set<(event:{workspaceId:string;operationId:string;eventId:number;report?:ReportOutcome})=>void>();
+  onCompleted(listener:(event:{workspaceId:string;operationId:string;eventId:number;report?:ReportOutcome})=>void):()=>void {
     this.completionListeners.add(listener);
     return ()=>this.completionListeners.delete(listener);
   }
@@ -278,7 +298,7 @@ export class CoachReviewEventStore {
     // Only publish AFTER SQLite commits evidence and event atomically.
     // A listener is advisory; it must not overturn verified runner success.
     for(const listener of this.completionListeners) {
-      try {listener({workspaceId:input.workspaceId,operationId:input.operationId,eventId:completedEvent.event_id});}
+      try {listener({workspaceId:input.workspaceId,operationId:input.operationId,eventId:completedEvent.event_id,...(safeReportOutcome(data.report)?{report:safeReportOutcome(data.report)}:{})});}
       catch { /* Poll fallback recovers the missed notification. */ }
     }
     return completedEvent;
@@ -346,11 +366,17 @@ export class CoachReviewEventStore {
     if (!ID.test(workspaceId) || !Number.isInteger(limit) || limit < 1 || limit > 50)
       throw new TypeError("COACH_QUERY_INVALID_INPUT");
     const pending = "FROM coach_review_events e LEFT JOIN coach_review_decisions d " +
-      "ON d.event_id=e.event_id WHERE e.workspace_id=? AND d.event_id IS NULL";
+      "ON d.event_id=e.event_id LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id " +
+      "WHERE e.workspace_id=? AND d.event_id IS NULL AND "+COACH_DELIVERY_SQL;
     const count = this.db.prepare("SELECT count(*) AS n "+pending).get(workspaceId) as {n:number};
     const events = this.db.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,e.event_type,e.created_at "+
       pending+" ORDER BY e.event_id LIMIT ?").all(workspaceId,limit) as CoachEvent[];
-    return {pending_count:count.n,events};
+    return {pending_count:count.n,events:events.map(e=>{
+      const packet=this.getEvidence(e.workspace_id,e.operation_id) as {task?:unknown;report?:unknown}|undefined;
+      const event_type=completionDeliveryType(packet),report=safeReportOutcome(packet?.report);
+      if(!event_type)throw new Error("COACH_DELIVERY_REPORT_INVALID");
+      return {...e,event_type,...(report?{report}:{})};
+    })};
   }
   hasInterruptedRun(workspaceId:string):boolean {
     if(!ID.test(workspaceId))throw new TypeError("COACH_AGENT_RUN_INVALID");

@@ -12,6 +12,7 @@ const AUTO_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const AUTO_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 let autoBusy = false;
 const AUTO_LAST_CHECK = "coachAutoLastCheck";
+const AUTO_BIND_PENDING = "coachAutoPendingBinds";
 const autoVersion = () => chrome.runtime.getManifest?.()?.version || "unknown";
 async function autoRecordCheck(code,message) {
   await chrome.storage.session.set({[AUTO_LAST_CHECK]:{
@@ -86,12 +87,23 @@ function autoReconcileStored(ledger) {
   return autoReconcileLegacy(ledger,events);
 }
 function autoValid(e) {
-  return e && e.event_type === "READY_FOR_GPT_REVIEW" &&
+  // Defend against an older Sidecar forwarding every completion as a review.
+  const report=e?.report;
+  const valid=report?.schema==="DEVSPACE_CODEX_REPORT_CHECK_V1" && report.valid===true &&
+    report.code==="REPORT_VALID_UNVERIFIED_CLAIMS" && report.testsIndependentlyVerified===false &&
+    typeof report.reportSha256==="string" && /^[a-f0-9]{64}$/.test(report.reportSha256);
+  const ready=report===undefined || (valid && report.status==="READY_FOR_REVIEW");
+  const conflict=valid && report.status==="PLAN_CONFLICT";
+  return e && ((e.event_type === "READY_FOR_GPT_REVIEW" && ready) || (e.event_type === "PLAN_CONFLICT" && conflict)) &&
     Number.isSafeInteger(e.event_id) && e.event_id > 0 &&
     (e.workspace_id===undefined || (typeof e.workspace_id === "string" && AUTO_ID.test(e.workspace_id))) &&
     typeof e.operation_id === "string" && AUTO_ID.test(e.operation_id);
 }
 function autoInstruction(e) {
+  if(e.event_type==="PLAN_CONFLICT")return "DevSpace Codex 报告 PLAN_CONFLICT，需要 Web GPT 修订已批准的任务。"+
+    "请先查询 coach_realtime_status，并通过 DevSpace MCP 读取本操作不可变证据及绑定 TASK/报告，核对具体反证、影响与建议修订。"+
+    "这是计划冲突反馈；请明确处理契约修订，不要提交正式 APPROVED / REWORK 审核裁决，也不要自动重启或继续任务。"+
+    "\n事件 ID："+e.event_id+"\n工作区 ID："+e.workspace_id+"\n任务 ID："+e.operation_id;
   return "请以 Web GPT Coach 身份独立审核一项本地 Codex CLI 已完成任务。"+
   "通过 DevSpace MCP 读取真实源码、Git 差异、不可变完成证据和测试结果，不要重复运行该 Codex 任务；"+
   "验证之后仅作 APPROVED / REWORK / BLOCKED 裁决，并在 REWORK 时下发具体修复任务。"+
@@ -116,7 +128,8 @@ async function autoState() {
   return {enabled:entries.some(([,route])=>!!route?.enabled), bound:entries.length>0,
     url:entries.length===1?entries[0][1]?.url||"":entries.length?entries.length+" 个工作区对话已绑定":"",
     routes:entries.map(([workspaceId,route])=>({workspaceId,url:route?.url||"",enabled:!!route?.enabled,tabReady:Number.isSafeInteger(route?.tabId)})),
-    version:autoVersion(), lastCheck,
+    version:autoVersion(),lastCheck,
+    pendingBinding:Object.values((await chrome.storage.session.get(AUTO_BIND_PENDING))[AUTO_BIND_PENDING]||{}),
     blocking:summary.needs_attention>0 ?
       "有 "+summary.needs_attention+" 条发送结果待人工核实；只暂停关联工作区，不重发不确定消息":""
     ,summary,recent};
@@ -132,6 +145,7 @@ async function autoBind(workspaceId) {
   // workspace. Reusing it would mix unrelated projects' review histories.
   if(Object.entries(routes).some(([id,r])=>id!==workspaceId&&autoCanonical(r?.url)===url))
     return {ok:false,error:"该 ChatGPT 对话已绑定另一个工作区，请选择独立对话"};
+  await autoCancelPendingByUrl(url);
   autoRouteMutationEpoch++;
   routes[workspaceId]={url,tabId:tab.id,enabled:false};
   await chrome.storage.local.set({[AUTO_SESSION]:routes,[AUTO_REVOKED]:false});
@@ -150,10 +164,144 @@ async function autoToggle(enabled,requestedWorkspaceId) {
   if(enabled) void autoPump();
   return {ok:true,state:await autoState()};
 }
-async function autoUnbind() {
+// Exactly one user click starts a challenge; the extension cannot infer a
+// DevSpace workspace from the ChatGPT tab. Web GPT must claim it over MCP.
+async function autoOneClick() {
+  const tabs=await chrome.tabs.query({active:true,currentWindow:true});
+  const tab=tabs?.[0],url=autoCanonical(tab?.url);
+  if(!Number.isSafeInteger(tab?.id)||!url)return {ok:false,error:"请在具体的 ChatGPT 对话中点击一键启用"};
+  const existing=await autoTarget();
+  if(Object.values(existing).some(route=>autoCanonical(route?.url)===url))
+    return {ok:false,error:"此对话已经绑定工作区，请查看现有状态，不要重复绑定"};
+  const pendingMap=(await chrome.storage.session.get(AUTO_BIND_PENDING))[AUTO_BIND_PENDING]||{};
+  if(Object.values(pendingMap).some(p=>p?.url===url))
+    return {ok:false,error:"此对话已有绑定请求等待确认，不得重复发送"};
+  if(Object.keys(pendingMap).length>=8)
+    return {ok:false,error:"已有八条绑定请求在等待确认，请稍后再试"};
+  let pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
+  if(!pair||!Number.isInteger(pair.port)||!AUTO_TOKEN.test(pair.token)) {
+    const paired=await requestNativePairing(true);
+    if(!paired.ok)return {ok:false,error:"本机安全配对失败："+paired.message};
+    pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
+  }
+  if(!pair||!AUTO_TOKEN.test(pair.token))return {ok:false,error:"没有有效的 Sidecar 配对"};
+  const bytes=crypto.getRandomValues(new Uint8Array(16));
+  const nonce=[...bytes].map(n=>n.toString(16).padStart(2,"0")).join("");
+  const response=await fetch("http://127.0.0.1:"+pair.port+"/bind/start",{
+    method:"POST",cache:"no-store",
+    headers:{Authorization:"Bearer "+pair.token,"Content-Type":"application/json"},
+    body:JSON.stringify({nonce,url})
+  }).catch(()=>null);
+  if(!response?.ok)return {ok:false,error:"Sidecar 尚不支持一键绑定或无法连接"};
+  pendingMap[nonce]={nonce,url,tabId:tab.id,createdAt:Date.now(),port:pair.port};
+  // A fresh explicit click authorizes this challenge even after prior unbind.
   autoRouteMutationEpoch++;
-  await chrome.storage.local.set({[AUTO_REVOKED]:true});
-  await chrome.storage.local.remove(AUTO_SESSION);
+  await chrome.storage.local.set({[AUTO_REVOKED]:false});
+  await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
+  // Fresh isolated-world binding handler. Old audit content scripts cannot
+  // answer this protocol. No chat history is inspected.
+  try {
+    await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:false},files:["chatgpt-binding.js"]});
+    const prompt="DevSpace Coach 一键绑定请求（由当前对话中的用户点击扩展发起）。"+
+      "请使用 DevSpaceMac MCP，先确定你正在管理的精确 workspaceId，"+
+      "然后调用 coach_webgpt_claim_browser_route 工具：nonce="+nonce+
+      "；url="+url+"。仅当此对话确实已经授权该工作区时才执行，不要猜测、不要使用其他对话的工作区。"+
+      "工具返回 claimed=true 后告知用户绑定确认；无需复制任何密钥。";
+    const delivered=await chrome.tabs.sendMessage(tab.id,{
+      type:"COACH_BIND_REQUEST_V1",url,instruction:prompt
+    });
+    if(delivered?.ok!==true||delivered.submitted!==true) {
+      if(delivered?.notSubmitted===true){
+        delete pendingMap[nonce];
+        await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
+      }
+      return {ok:false,error:"绑定请求未确认提交；请先检查目标对话，不会自动重发"};
+    }
+    return {ok:true,message:"已向当前对话发送绑定请求，等待 Web GPT 独立确认",pending:true};
+  } catch {
+    return {ok:false,error:"绑定消息投递结果不确定；请检查对话，禁止自动重试"};
+  }
+}
+async function autoBindPoll() {
+  const pendingMap=(await chrome.storage.session.get(AUTO_BIND_PENDING))[AUTO_BIND_PENDING]||{};
+  const requests=Object.entries(pendingMap);
+  if(!requests.length)return {ok:true,state:"idle"};
+  const pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
+  if(!pair||!AUTO_TOKEN.test(pair.token))
+    return {ok:false,error:"等待绑定期间本机配对已失效"};
+  const epoch=autoRouteMutationEpoch;
+  const routes=await autoTarget();
+  let changedRoutes=false,changedPending=false,claimedCount=0;
+  for(const [nonce,pending] of requests) {
+    if(Date.now()-pending.createdAt>600_000){
+      delete pendingMap[nonce];changedPending=true;continue;
+    }
+    if(pair.port!==pending.port)continue;
+    const resp=await fetch("http://127.0.0.1:"+pair.port+
+      "/bind/status?nonce="+nonce,{
+      method:"GET",cache:"no-store",headers:{Authorization:"Bearer "+pair.token}
+    }).catch(()=>null);
+    if(!resp?.ok)continue;
+    const data=await resp.json().catch(()=>null);
+    if(data?.state!=="claimed")continue;
+    if(!AUTO_ID.test(data.workspaceId)||data.url!==pending.url)continue;
+    const tab=await chrome.tabs.get(pending.tabId).catch(()=>null);
+    if(autoCanonical(tab?.url)!==pending.url)continue;
+    if(Object.entries(routes).some(([id,r])=>
+      id!==data.workspaceId&&autoCanonical(r?.url)===pending.url))continue;
+    if(routes[data.workspaceId]&&routes[data.workspaceId].url!==pending.url)continue;
+    routes[data.workspaceId]={url:pending.url,tabId:pending.tabId,enabled:true};
+    delete pendingMap[nonce];changedRoutes=true;changedPending=true;claimedCount++;
+  }
+  if(epoch!==autoRouteMutationEpoch ||
+     (await chrome.storage.local.get(AUTO_REVOKED))[AUTO_REVOKED]===true)
+    return {ok:false,error:"绑定授权已被修改或撤销，拒绝使用过期确认"};
+  if(changedRoutes){
+    autoRouteMutationEpoch++;
+    await chrome.storage.local.set({[AUTO_SESSION]:routes,[AUTO_REVOKED]:false});
+  }
+  if(changedPending)await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
+  return {ok:true,state:claimedCount?"bound":"pending",claimedCount};
+}
+async function autoCancelPendingByUrl(url) {
+  const requests=(await chrome.storage.session.get(AUTO_BIND_PENDING))[AUTO_BIND_PENDING]||{};
+  let changed=false;
+  for(const [nonce,req] of Object.entries(requests)) {
+    if(req?.url===url){delete requests[nonce];changed=true;}
+  }
+  if(changed)await chrome.storage.session.set({[AUTO_BIND_PENDING]:requests});
+  return changed;
+}
+async function autoCancelPendingForCurrentTab() {
+  const tabs=await chrome.tabs.query({active:true,currentWindow:true});
+  const url=autoCanonical(tabs?.[0]?.url);
+  if(!url)return {ok:false,error:"请先打开需要取消请求的 ChatGPT 对话"};
+  autoRouteMutationEpoch++;
+  const cancelled=await autoCancelPendingByUrl(url);
+  return {ok:true,cancelled,state:await autoState()};
+}
+// Serializes writes to the challenge map across simultaneous popup clicks and
+// background polls; different ChatGPT tabs still progress independently.
+let autoBindingQueue=Promise.resolve();
+function autoWithBindLock(fn){
+  const turn=autoBindingQueue.then(fn);
+  autoBindingQueue=turn.catch(()=>{});
+  return turn;
+}
+async function autoUnbind(requestedWorkspaceId) {
+  const routes=await autoTarget();
+  const workspaceId=requestedWorkspaceId||
+    (Object.keys(routes).length===1?Object.keys(routes)[0]:null);
+  if(!workspaceId||!routes[workspaceId])
+    return {ok:false,error:"请指定要解除的工作区；不会清除其他工作区的绑定"};
+  autoRouteMutationEpoch++;
+  delete routes[workspaceId];
+  if(Object.keys(routes).length) {
+    await chrome.storage.local.set({[AUTO_SESSION]:routes,[AUTO_REVOKED]:false});
+  } else {
+    await chrome.storage.local.set({[AUTO_REVOKED]:true});
+    await chrome.storage.local.remove(AUTO_SESSION);
+  }
   return {ok:true,state:await autoState()};
 }
 async function autoResolveRoutes(){
@@ -162,7 +310,11 @@ async function autoResolveRoutes(){
   for(const [workspaceId,target] of Object.entries(routes)){
     if(!target?.url||!autoCanonical(target.url))continue;
     const matches=(await chrome.tabs.query({url:target.url+"*"})).filter(t=>autoCanonical(t.url)===target.url);
-    const next={...target,tabId:matches.length===1&&Number.isSafeInteger(matches[0].id)?matches[0].id:null};
+    // Preserve the explicitly selected tab even if a second tab opens the same
+    // conversation. Never choose arbitrarily when the original tab is gone.
+    const pinned=matches.find(t=>t.id===target.tabId);
+    const selected=pinned||(matches.length===1?matches[0]:null);
+    const next={...target,tabId:selected&&Number.isSafeInteger(selected.id)?selected.id:null};
     if(next.tabId!==target.tabId){routes[workspaceId]=next;changed=true;}
   }
   if(changed && epoch===autoRouteMutationEpoch &&
@@ -247,6 +399,7 @@ async function autoPump() {
   const sendEpoch=autoRouteMutationEpoch;
   try {
     await autoResolveRoutes();
+    await autoWithBindLock(autoBindPoll);
     const routes=await autoTarget();
     if(!Object.values(routes).some(t=>t?.enabled)) {
       code="not_enabled";message="未绑定或自动发送已暂停";return;
@@ -394,10 +547,13 @@ chrome.tabs.onRemoved.addListener(tabId=>{
 chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
   const tasks={
     COACH_AUTO_STATUS:()=>autoState().then(state=>({ok:true,state})),
-    COACH_AUTO_BIND:()=>autoBind(msg.workspaceId),
+    COACH_AUTO_BIND:()=>autoWithBindLock(()=>autoBind(msg.workspaceId)),
+    COACH_AUTO_BIND_CANCEL:()=>autoWithBindLock(autoCancelPendingForCurrentTab),
+    COACH_AUTO_ONE_CLICK:()=>autoWithBindLock(autoOneClick),
+    COACH_AUTO_BIND_CHECK:()=>autoWithBindLock(autoBindPoll),
     COACH_AUTO_ENABLE:()=>autoToggle(true,msg.workspaceId),
     COACH_AUTO_PAUSE:()=>autoToggle(false,msg.workspaceId),
-    COACH_AUTO_UNBIND:autoUnbind,
+    COACH_AUTO_UNBIND:()=>autoUnbind(msg.workspaceId),
     COACH_AUTO_PUMP:async()=>{await autoPump();return {ok:true,state:await autoState()};},
     COACH_AUTO_RESOLVE:()=>autoResolve(msg.key,msg.action)
   };

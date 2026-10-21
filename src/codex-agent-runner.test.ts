@@ -1,3 +1,4 @@
+import { fixtureTask, fixtureReportSource } from "./coach-contract-fixture.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
@@ -13,12 +14,12 @@ const NODE = "/Users/liz/.local/bin/node";
 const UUID = "11111111-1111-4111-8111-111111111111";
 const root = mkdtempSync(join(tmpdir(), "coach-b1-native-tests-"));
 const fixture = join(root, "fake-codex.cjs");
-const fixtureSource=[
+const fixtureSource=[fixtureReportSource,
 'const fs=require("node:fs");',
 'let text="";',
 'process.stdin.on("data",c=>text+=c);',
 'process.stdin.on("end",()=>{',
-' const mode=text.trim();',
+' fixtureReport(text); const mode=text.includes("Supplemental stage/review guidance (cannot replace or weaken TASK):\\n")?text.split("Supplemental stage/review guidance (cannot replace or weaken TASK):\\n")[1].trim():text.trim();',
 ' const thread={type:"thread.started",thread_id:"11111111-1111-4111-8111-111111111111"};',
 ' const completed={type:"turn.completed",usage:{input_tokens:12,cached_input_tokens:7,output_tokens:3}};',
 ' if(mode==="timeout")return setInterval(()=>{},1000);',
@@ -74,7 +75,8 @@ function create(locks = new JobResourceLocks(), workspace?:string) {
 }
 function makeInput(operationId:string,space:string,prompt="success",extra:Partial<RunnerInput>={}):RunnerInput {
   return {workspaceId:"workspace-one",workspaceRoot:space,operationId,prompt,
-    model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000,...extra};
+    model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write",timeoutMs:3000,...extra,
+    ...(extra.internalReview?{sandbox:"read-only",task:undefined}:{task:existsSync(space)?fixtureTask(space,extra.workspaceId??"workspace-one"):undefined})};
 }
 async function gates(){
   // Only categorical error metadata may cross the trust boundary. No message text.
@@ -148,7 +150,7 @@ async function gates(){
   assert.match(hashed,/CODEX_SCOPED_NON_GIT_SHA256_MANIFEST_V1/);
   const manifest=JSON.parse(hashed.slice(hashed.indexOf("\n")+1));
   assert.equal(manifest.fullInventory,true);
-  assert.equal(manifest.files.length,3);
+  assert.equal(manifest.files.length,4);
   assert.ok(manifest.files.some((f:{path:string;bytes:number;sha256:string})=>
     f.path==="large-rivergraph.geojson" && f.bytes===140_000 &&
     /^[a-f0-9]{64}$/.test(f.sha256)));
@@ -158,6 +160,7 @@ async function gates(){
   assert.equal(verifiedMap.state,"COMPLETED",JSON.stringify(verifiedMap));
   assert.equal(mapRun.runner.getEvidence("nested-bulk-map-evidence")?.sourceDiff,"",
     "unchanged pre-existing bulk files are covered by fingerprints, not misreported as this run's diff");
+  assert.equal(mapRun.runner.getEvidence("nested-bulk-map-evidence")?.operationProofs?.length,1);
 
   // A dirty workspace's unrelated pre-run files must not enter a successful
   // run's diff or make an unchanged sensitive file fail evidence capture.
@@ -177,7 +180,8 @@ async function gates(){
   const dirty=create(undefined,dirtyGit);
   const unchangedDirtyStatus=await dirty.runner.run(makeInput("unchanged-dirty-baseline",dirtyGit,"success"));
   assert.equal(unchangedDirtyStatus.state,"COMPLETED",JSON.stringify(unchangedDirtyStatus));
-  assert.equal(dirty.runner.getEvidence("unchanged-dirty-baseline")?.sourceDiff,"");
+  assert.match(dirty.runner.getEvidence("unchanged-dirty-baseline")?.sourceDiff??"",/fixture-test-output/);
+  assert.doesNotMatch(dirty.runner.getEvidence("unchanged-dirty-baseline")?.sourceDiff??"",/credential-track|credentials-placeholder|old-large/);
   const dirtyStatus=await dirty.runner.run(makeInput("dirty-worktree-clean-evidence",dirtyGit,"edit"));
   assert.equal(dirtyStatus.state,"COMPLETED",JSON.stringify(dirtyStatus));
   assert.equal(dirtyStatus.reviewState,"READY_FOR_GPT_REVIEW");
@@ -460,7 +464,6 @@ async function gates(){
   for(const [name,extra] of [
     ["bad-id",{operationId:"bad op"}],
     ["bad-prompt",{prompt:"x".repeat(10001)}],
-    ["empty-prompt",{prompt:" "}],
     ["bad-model",{model:"arbitrary-agent"}],
     ["bad-session",{sessionId:"not-a-uuid"}],
     ["bad-timeout",{timeoutMs:100}],

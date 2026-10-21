@@ -1,3 +1,4 @@
+import { TaskGateError, verifyTask, taskFailure } from "./coach-task-contract.js";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { basename, join, resolve } from "node:path";
@@ -97,6 +98,10 @@ export function createCodexWorkerDispatcher(input:{runner:NativeCodexAgentRunner
       case "start": {
         if(!request.input||typeof request.input!=="object")throw new Error("CODEX_WORKER_INPUT_INVALID");
         const workspaceRoot=authorizeWorkspace(request.input.workspaceId,request.input.workspaceRoot);
+        if(request.input.internalReview!==undefined && request.input.internalReview!==true)taskFailure("TASK_REVIEWER_MODE_INVALID","internalReview","Reviewer mode must be the exact internal boolean.");
+        if(request.input.internalReview && request.input.sandbox!=="read-only")taskFailure("TASK_REVIEWER_NOT_READ_ONLY","sandbox","Internal reviewers require read-only sandbox.");
+        if(!input.events.getAgentRun(request.input.workspaceId,request.input.operationId) && (!request.input.internalReview || request.input.task))
+          verifyTask(workspaceRoot,request.input.workspaceId,request.input.task);
         return input.runner.start({...request.input,workspaceRoot});
       }
       case "status": authorizeWorkspace(request.workspaceId,input.workspaceStore.getSession(request.workspaceId)?.root??"");return input.runner.status(request.operationId,request.workspaceId);
@@ -266,7 +271,7 @@ export async function startCodexWorkerService(config:ServerConfig,deps:{inspectP
             const request=JSON.parse(data.subarray(0,newline).toString("utf8")) as RpcRequestWithCoach & {token?:unknown};
             if(request.version!==1||!sameSecret(token,request.token))throw new Error("CODEX_WORKER_UNAUTHORIZED");
             const result=await dispatch(request);send(socket,{ok:true,result});
-          }catch(error){send(socket,{ok:false,error:errorCode(error)});}
+          }catch(error){send(socket,{ok:false,error:errorCode(error),...(error instanceof TaskGateError?{taskGate:error.diagnostic}:{})});}
         })();
       });
       socket.once("close",()=>{connections=Math.max(0,connections-1);});
@@ -328,8 +333,11 @@ export class CodexWorkerClient implements CodexAgentControl {
       socket.on("data",chunk=>{result=Buffer.concat([result,Buffer.from(chunk)]);if(result.length>MAX_MESSAGE)done(new Error("CODEX_WORKER_RESPONSE_TOO_LARGE"));});
       socket.once("end",()=>{
         try{
-          const envelope=JSON.parse(result.toString("utf8")) as {ok:boolean;result?:T;error?:string};
-          if(!envelope.ok)done(new Error(envelope.error&&/^[A-Z][A-Z0-9_]+$/.test(envelope.error)?envelope.error:"CODEX_WORKER_CALL_FAILED"));
+          const envelope=JSON.parse(result.toString("utf8")) as {ok:boolean;result?:T;error?:string;taskGate?:TaskGateError["diagnostic"]};
+          if(!envelope.ok){
+            if(envelope.taskGate){const d=envelope.taskGate.diagnostics[0];done(new TaskGateError(d.code,d.keyword,d.reason));}
+            else done(new Error(envelope.error&&/^[A-Z][A-Z0-9_]+$/.test(envelope.error)?envelope.error:"CODEX_WORKER_CALL_FAILED"));
+          }
           else done(undefined,envelope.result);
         }catch{done(new Error("CODEX_WORKER_RESPONSE_INVALID"));}
       });

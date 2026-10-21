@@ -7,11 +7,12 @@ const vm=require("node:vm");
 const root=join(__dirname,"../coach-browser-extension");
 const code=readFileSync(join(root,"auto-worker.js"),"utf8");
 const content=readFileSync(join(root,"chatgpt-delivery.js"),"utf8");
+const bindingContent=readFileSync(join(root,"chatgpt-binding.js"),"utf8");
 const URL_OK="https://chatgpt.com/c/12345678-abcd-1234-abcd-123456789abc";
 const EVENT={event_id:12,workspace_id:"ws-qa",operation_id:"codex-qa",event_type:"READY_FOR_GPT_REVIEW"};
 const tick=()=>new Promise(r=>setImmediate(r));
 test("all delivery extension scripts are valid JavaScript",()=>{
- for(const file of ["worker.js","auto-worker.js","chatgpt-delivery.js","popup.js","autosend-popup.js"]){
+ for(const file of ["worker.js","auto-worker.js","chatgpt-delivery.js","chatgpt-binding.js","popup.js","autosend-popup.js"]){
    assert.doesNotThrow(()=>new vm.Script(readFileSync(join(root,file),"utf8"),{filename:file}));
  }
 });
@@ -20,6 +21,8 @@ function workerHarness(overrides={}) {
   const session={},local={},listeners=[],alarms=[],messages=[],tabUpdates=[],tabRemovals=[],injections=[],receipts=[];
   let receiptFailure=false;
   const tab={id:42,url:URL_OK};let tabs=[tab],startup=[],removed=[];
+  let challenge=null,nonceCounter=0;
+  const challenges=new Map();
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
   let contentReady=true,injectionFailure=false,pingProtocol=5;
   const chrome={
@@ -44,13 +47,25 @@ function workerHarness(overrides={}) {
       if(injectionFailure)throw Error("host permission denied");
       contentReady=true;pingProtocol=5;
     }},
-    runtime:{getManifest:()=>({version:"0.3.9"}),onInstalled:{addListener(){}},onStartup:{addListener(f){startup.push(f);}},
+    runtime:{getManifest:()=>({version:"0.3.10"}),onInstalled:{addListener(){}},onStartup:{addListener(f){startup.push(f);}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
   const fetch=async(url,options)=>{
-    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events|delivery-receipt)$/);
+    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events|delivery-receipt|bind\/start|bind\/status\?nonce=[a-f0-9]{32})$/);
     assert.match(options.headers.Authorization,/^Bearer A{43}$/);
+    if(url.endsWith("/bind/start")) {
+      challenge=JSON.parse(options.body);
+      challenges.set(challenge.nonce,{...challenge,workspaceId:null});
+      return {ok:true,json:async()=>({ok:true,expiresSeconds:600})};
+    }
+    if(url.includes("/bind/status?")) {
+      const nonce=new URL(url).searchParams.get("nonce");
+      const c=challenges.get(nonce);
+      return {ok:true,json:async()=>c?.workspaceId?
+        {ok:true,state:"claimed",workspaceId:c.workspaceId,url:c.url}:
+        {ok:true,state:"pending"}};
+    }
     if(url.endsWith("/delivery-receipt")){
       const identity=JSON.parse(options.body);
       receipts.push(identity);
@@ -61,10 +76,11 @@ function workerHarness(overrides={}) {
     return {ok:true,json:async()=>({pending_count:pendingCount??events.length,events})};
   };
   const context=vm.createContext({chrome,fetch,URL,Date,Number,Object,Array,
-    String,RegExp,Error,Math,Promise,console});
+    String,RegExp,Error,Math,Promise,console,
+    crypto:{getRandomValues(a){const seed=++nonceCounter;for(let i=0;i<a.length;i++)a[i]=(i+seed)%256;return a;}}});
   vm.runInContext(code,context);
   async function msg(type,extra={}) {
-    const fn=listeners.find(f=>f({type},null,()=>{})===true);
+    const fn=listeners[0];
     assert.ok(fn, "listener not installed");
     return new Promise(resolve=>fn({type,...extra},null,resolve));
   }
@@ -74,6 +90,8 @@ function workerHarness(overrides={}) {
     setEvents:x=>{events=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
     setContentReady:x=>{contentReady=x;},setPingProtocol:x=>{pingProtocol=x;},
     setInjectionFailure:x=>{injectionFailure=x;},setTabs:x=>{tabs=x;},startup,
+    claimWorkspace:(x,nonce=challenge?.nonce)=>{challenges.get(nonce).workspaceId=x;},
+    getChallenge:()=>challenge,getChallenges:()=>[...challenges.values()],
     async poll(){await vm.runInContext("autoPump()",context);}
   };
 }
@@ -106,6 +124,30 @@ test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppre
  assert.equal(JSON.stringify(h.local).includes("A".repeat(43)),false,"browser ledgers must never persist the bearer");
  await h.poll();assert.equal(h.messages.length,1);
  await h.msg("COACH_AUTO_PAUSE",{workspaceId:"ws-qa"});await h.poll();assert.equal(h.messages.length,1);
+});
+test("progress and invalid reports never send; conflict reaches only its bound owner as revision feedback",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ const report=status=>({schema:"DEVSPACE_CODEX_REPORT_CHECK_V1",valid:true,status,code:"REPORT_VALID_UNVERIFIED_CLAIMS",reportSha256:"a".repeat(64),testsIndependentlyVerified:false});
+ await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ h.setEvents([
+   {...EVENT,event_id:1,report:report("IN_PROGRESS")},
+   {...EVENT,event_id:2,report:{...report("READY_FOR_REVIEW"),valid:false}},
+   {...EVENT,event_id:3,report:null},
+   {...EVENT,event_id:4,report:report("BLOCKED")},
+   {...EVENT,event_id:5,report:{}},
+   {...EVENT,event_id:6,event_type:"PLAN_CONFLICT",report:report("READY_FOR_REVIEW")},
+   {...EVENT,event_id:7,event_type:"PLAN_CONFLICT",workspace_id:"other-owner",report:report("PLAN_CONFLICT")},
+   {...EVENT,event_id:8,event_type:"PLAN_CONFLICT",report:report("PLAN_CONFLICT")}
+ ]);
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();await h.poll();
+ assert.equal(h.messages.length,1);assert.equal(h.messages[0].id,42);
+ const notice=h.messages[0].m.instruction;
+ assert.match(notice,/PLAN_CONFLICT/);assert.match(notice,/修订/);assert.match(notice,/不要提交正式/);
+ assert.doesNotMatch(notice,/coach_webgpt_submit_review|codex_agent_submit_review/);
+ assert.equal(Object.keys(h.local.coachAutoLedger).length,2,"only conflict identities may enter delivery ledger");
+ await h.poll();assert.equal(h.messages.length,1);
+ h.setEvents([{...EVENT,event_id:9,report:report("READY_FOR_REVIEW")}]);
+ await h.poll();assert.equal(h.messages.length,2);assert.match(h.messages[1].m.instruction,/coach_webgpt_submit_review/);
 });
 test("DOM-submitted receipt is identity-scoped, durable and never requires a second chat send",async()=>{
  const h=workerHarness();
@@ -191,7 +233,7 @@ test("opening extension popup reconciles scoped and unknown keys even when queue
    "ws-qa:codex-qa:12":{state:"needs_attention",reason:"旧版脚本的编辑器失败"}
  };
  const state=(await h.msg("COACH_AUTO_STATUS")).state;
- assert.equal(state.version,"0.3.9");
+ assert.equal(state.version,"0.3.10");
  assert.equal(state.summary.needs_attention,1);
  assert.equal(state.summary.pending,0);
  assert.match(state.blocking,/人工核实/);
@@ -356,10 +398,10 @@ test("unidentified work stays pending while authorized workspace events still ro
  assert.equal(h.messages.length,1);assert.equal(h.messages[0].id,77);
  assert.match(h.messages[0].m.instruction,/authorized-task/);
 });
-test("ambiguous exact URL matches after restart fail closed",async()=>{
+test("when original tab is lost, two matching replacements fail closed",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
- await h.drain();h.setTabs([{id:42,url:URL_OK},{id:43,url:URL_OK}]);
+ await h.drain();h.setTabs([{id:77,url:URL_OK},{id:78,url:URL_OK}]);
  for(const start of h.startup)start();await h.drain();h.setEvents([EVENT]);await h.poll();
  assert.equal(h.messages.length,0);
  assert.equal(h.local.coachAutoRoutes["ws-qa"].tabId,null);
@@ -485,11 +527,11 @@ function domHarness(options={}) {
  const context=vm.createContext({document,window,chrome,location,URL,
    getComputedStyle:()=>({display:"block",visibility:"visible"}),
    setTimeout:(fn)=>fn(),Promise,Error,String,Array,Number});
- vm.runInContext(content,context);
+ vm.runInContext(options.bindingScript?bindingContent:content,context);
  return {editor,button,location,handlers,context,
    getClicks:()=>clicks,getButtonChecks:()=>buttonChecks,
    ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V5"},null,resolve)),
-   reinject:()=>vm.runInContext(content,context),
+   reinject:()=>vm.runInContext(options.bindingScript?bindingContent:content,context),
    deliver:(url=URL_OK,instruction="请以 Web GPT Coach 身份独立审核测试事件")=>
      new Promise(resolve=>handlers[handlers.length-1](
        {type:"COACH_AUTO_DELIVER_V5",url,instruction},null,resolve))};
@@ -627,6 +669,138 @@ test("closed chat preserves enabled workspace route and poll rebinds one recreat
  assert.equal(h.local.coachAutoRoutes["ws-qa"].tabId,null);
  h.setTabs([{id:77,url:URL_OK}]);h.setEvents([EVENT]);await h.poll();
  assert.equal(h.messages.length,1);assert.equal(h.messages[0].id,77);
+});
+
+test("one-click binding content script is isolated and never accepts an audit notification",async()=>{
+ const page=domHarness({bindingScript:true});
+ const prompt="DevSpace Coach 一键绑定请求（由当前对话中的用户点击扩展发起）。nonce=0123456789abcdef0123456789abcdef";
+ const correct=await new Promise(resolve=>page.handlers[0]({
+   type:"COACH_BIND_REQUEST_V1",url:URL_OK,instruction:prompt
+ },null,resolve));
+ assert.equal(correct.submitted,true);assert.equal(page.getClicks(),1);
+ const rejected=page.handlers[0]({
+   type:"COACH_AUTO_DELIVER_V5",url:URL_OK,
+   instruction:"请以 Web GPT Coach 身份独立审核"
+ },null,()=>{throw Error("binding handler must not respond to audit");});
+ assert.equal(rejected,false);assert.equal(page.getClicks(),1);
+ const draft=domHarness({bindingScript:true,draft:"用户草稿"});
+ const blocked=await new Promise(resolve=>draft.handlers[0]({
+   type:"COACH_BIND_REQUEST_V1",url:URL_OK,instruction:prompt
+ },null,resolve));
+ assert.equal(blocked.notSubmitted,true);assert.equal(draft.getClicks(),0);
+});
+test("one click requests an MCP challenge, then exact claimed workspace is enabled without a second click",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ const clicked=await h.msg("COACH_AUTO_ONE_CLICK");
+ assert.equal(clicked.ok,true);
+ assert.equal(h.messages.length,1);
+ assert.equal(h.messages[0].m.type,"COACH_BIND_REQUEST_V1");
+ const challenge=h.getChallenge();
+ assert.equal(challenge.url,URL_OK);
+ assert.match(challenge.nonce,/^[a-f0-9]{32}$/);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.routes.length,0,
+   "sending a bind prompt must not grant any workspace");
+ assert.equal((await h.msg("COACH_AUTO_ONE_CLICK")).ok,false,
+   "in-flight first binding cannot produce a second chat prompt");
+ h.claimWorkspace("ws-qa");
+ await h.msg("COACH_AUTO_BIND_CHECK");
+ const state=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(state.routes.length,1);
+ assert.equal(state.routes[0].workspaceId,"ws-qa");
+ assert.equal(state.routes[0].enabled,true);
+ assert.equal(state.routes[0].tabReady,true);
+ assert.equal(state.pendingBinding.length,0);
+ h.setEvents([EVENT]);await h.poll();
+ assert.equal(h.messages.length,2);
+ assert.equal(h.messages[1].id,42);
+ assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"sent");
+ assert.equal(JSON.stringify(h.local).includes("A".repeat(43)),false);
+});
+test("three one-click binding requests coexist and finish independently",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ const tabs=[h.tab,{id:77,url:URL_OK.replace("12345678","87654321")},
+   {id:88,url:URL_OK.replace("12345678","abcdefgh")}];
+ for(let i=0;i<3;i++){
+   h.setTabs([tabs[i],...tabs.filter((_,j)=>i!==j)]);
+   assert.equal((await h.msg("COACH_AUTO_ONE_CLICK")).ok,true);
+ }
+ assert.equal(h.getChallenges().length,3);
+ const pending=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(pending.routes.length,0);
+ assert.equal(pending.pendingBinding.length,3);
+ h.getChallenges().forEach((c,i)=>h.claimWorkspace("ws-"+i,c.nonce));
+ await h.msg("COACH_AUTO_BIND_CHECK");
+ const bound=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(bound.routes.length,3);
+ assert.equal(bound.pendingBinding.length,0);
+ assert.ok(bound.routes.every(r=>r.enabled));
+ h.setTabs(tabs);
+ h.setEvents(tabs.map((_,i)=>({...EVENT,event_id:50+i,
+   workspace_id:"ws-"+i,operation_id:"task-"+i})));
+ for(let i=0;i<3;i++)await h.poll();
+ assert.deepEqual(h.messages.slice(3).map(x=>x.id),[42,77,88]);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,3);
+});
+test("cancelled one-click challenge cannot later resurrect a route",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ assert.equal((await h.msg("COACH_AUTO_ONE_CLICK")).ok,true);
+ const nonce=h.getChallenge().nonce;
+ const cancel=await h.msg("COACH_AUTO_BIND_CANCEL");
+ assert.equal(cancel.ok,true);assert.equal(cancel.cancelled,true);
+ h.claimWorkspace("ws-qa",nonce);
+ await h.msg("COACH_AUTO_BIND_CHECK");
+ const result=(await h.msg("COACH_AUTO_STATUS")).state;
+ assert.equal(result.pendingBinding.length,0);
+ assert.equal(result.routes.length,0);
+});
+test("cancel one pending tab without disturbing two other concurrent first-click bindings",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ const tabs=[h.tab,{id:77,url:URL_OK.replace("12345678","87654321")},
+   {id:88,url:URL_OK.replace("12345678","abcdefgh")}];
+ for(let i=0;i<3;i++){
+   h.setTabs([tabs[i],...tabs.filter((_,j)=>i!==j)]);
+   assert.equal((await h.msg("COACH_AUTO_ONE_CLICK")).ok,true);
+ }
+ h.setTabs([tabs[1],tabs[0],tabs[2]]);
+ assert.equal((await h.msg("COACH_AUTO_BIND_CANCEL")).cancelled,true);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.pendingBinding.length,2);
+ const cs=h.getChallenges();
+ h.claimWorkspace("ws-0",cs[0].nonce);
+ h.claimWorkspace("ws-2",cs[2].nonce);
+ await h.msg("COACH_AUTO_BIND_CHECK");
+ const routes=(await h.msg("COACH_AUTO_STATUS")).state.routes;
+ assert.deepEqual(routes.map(r=>r.workspaceId).sort(),["ws-0","ws-2"]);
+});
+test("duplicate ChatGPT tabs preserve explicitly selected original tab instead of losing authorization",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
+ h.setTabs([h.tab,{id:77,url:URL_OK}]);
+ h.setEvents([EVENT]);await h.poll();
+ assert.equal(h.local.coachAutoRoutes["ws-qa"].tabId,42);
+ assert.equal(h.messages.length,1);assert.equal(h.messages[0].id,42);
+});
+test("three independent background ChatGPT tabs route only their own workspace events",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ const tabs=[h.tab,{id:77,url:URL_OK.replace("12345678","87654321")},
+   {id:88,url:URL_OK.replace("12345678","abcdefgh")}];
+ for(let i=0;i<3;i++){
+   h.setTabs([tabs[i],...tabs.filter((_,j)=>i!==j)]);
+   assert.equal((await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-"+i})).ok,true);
+   assert.equal((await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-"+i})).ok,true);
+ }
+ h.setTabs(tabs);await h.drain();
+ h.setEvents(tabs.map((_,i)=>({...EVENT,event_id:i+50,
+   workspace_id:"ws-"+i,operation_id:"task-"+i})));
+ for(let i=0;i<3;i++)await h.poll();
+ assert.equal(h.messages.length,3);
+ assert.deepEqual(h.messages.map(m=>m.id),[42,77,88]);
+ assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,3);
 });
 test("content script only confirms composer DOM submission, not completed AI review",async()=>{
  const good=domHarness();const result=await good.deliver();

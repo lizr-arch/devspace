@@ -1,3 +1,5 @@
+import { verifyTask, taskFailure, type TaskReference } from "./coach-task-contract.js";
+import type { ReportOutcome } from "./coach-result-contract.js";
 /** COACH-REALTIME-001: opt-in event-driven, crash-conservative local reviewer.
  * No web-GPT background presence is assumed. No silent model fallback.
  * An AI verdict is never sufficient for APPROVED: independently preapproved
@@ -19,9 +21,12 @@ import type { WorkspaceRegistry } from "./workspaces.js";
 
 const ID=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const sha=/^[a-f0-9]{64}$/;
+function sameTask(a:TaskReference|undefined,b:TaskReference|undefined){return !!a && !!b && a.workspaceId===b.workspaceId && a.taskId===b.taskId && a.taskPath===b.taskPath && a.version===b.version && a.sha256===b.sha256;}
 type Phase="ACTIVE"|"AWAITING_WEBGPT"|"REVIEWING"|"DISPATCHING"|"DONE"|"BLOCKED"|"PAUSED";
 export interface CoachRealtimeStage {
   prompt:string;
+  task?:TaskReference;
+  stageId?:string;
   testTaskId:string;
   model:CodexModel;
   reasoningEffort:CodexEffort;
@@ -35,6 +40,7 @@ export interface CoachRealtimeSpec {
   reviewerModel:CodexModel;
   reviewerEffort:CodexEffort;
   maxReworks:number;
+  maxContinuations?:number;
   /** Original local reviewer remains default. */
   reviewerMode?:"local"|"webgpt";
   stages:CoachRealtimeStage[];
@@ -86,6 +92,7 @@ export class CoachRealtimeEngine {
       "plan_id TEXT NOT NULL,event_id INTEGER NOT NULL,operation_id TEXT NOT NULL,"+
       "decision TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,"+
       "PRIMARY KEY(plan_id,event_id));");
+    this.db.exec("CREATE TABLE IF NOT EXISTS realtime_continuations(plan_id TEXT NOT NULL,stage_idx INTEGER NOT NULL,parent_operation TEXT NOT NULL,child_operation TEXT NOT NULL,PRIMARY KEY(plan_id,parent_operation));");
     this.gate=d.gate??new CoachReviewGate({events:d.events,tasks:d.tasks});
     this.unsub=d.events.onCompleted(event=> {
       // The runner emits completion before it releases its resource lock.
@@ -111,14 +118,15 @@ export class CoachRealtimeEngine {
     if(spec.reviewerMode!==undefined && !["local","webgpt"].includes(spec.reviewerMode))
       throw new TypeError("COACH_REALTIME_INVALID_REVIEWER_MODE");
     validateCodexSelection({model:spec.reviewerModel,reasoningEffort:spec.reviewerEffort});
+    if(spec.maxContinuations!==undefined && (!Number.isInteger(spec.maxContinuations)||spec.maxContinuations<0||spec.maxContinuations>3))throw new Error("COACH_INVALID_CONTINUATION_LIMIT");
     for(const stage of spec.stages) {
       validateCodexSelection(stage);
       if(!ID.test(stage.testTaskId)||!["workspace-write","read-only"].includes(stage.sandbox)||
-        typeof stage.prompt!=="string"||stage.prompt.length<1||stage.prompt.length>8000)
+        typeof stage.prompt!=="string"||stage.prompt.length>8000)
         throw new TypeError("COACH_REALTIME_INVALID_STAGE");
     }
   }
-  register(spec:CoachRealtimeSpec):CoachRealtimePlan {
+  async register(spec:CoachRealtimeSpec):Promise<CoachRealtimePlan> {
     this.assertSpec(spec);
     const ws=this.d.workspaces.getWorkspace(spec.workspaceId);
     // An unattended Web GPT plan can mutate files without a human click.
@@ -136,6 +144,10 @@ export class CoachRealtimeEngine {
         throw new Error("COACH_REALTIME_PLAN_ID_CONFLICT");
       return existing;
     }
+    for(const stage of spec.stages)verifyTask(root,spec.workspaceId,stage.task);
+    const initialStatus=await this.d.runner().status(spec.initialOperationId,spec.workspaceId);
+    if(!sameTask(initialStatus.task,spec.stages[0].task)||initialStatus.stageId!==(spec.stages[0].stageId??"development"))
+      taskFailure("TASK_INITIAL_BINDING_MISMATCH","initialOperationId","Initial operation must use the first stage frozen TASK and stage ID.");
     const first=this.d.events.getAgentRun(spec.workspaceId,spec.initialOperationId);
     if(!first||!["RUNNING","COMPLETED"].includes(first.state))
       throw new Error("COACH_REALTIME_INITIAL_OPERATION_NOT_ACTIVE_OR_VERIFIED");
@@ -314,6 +326,22 @@ export class CoachRealtimeEngine {
     if(!packet||packet.evidenceSha256===undefined || packet.operationId!==p.currentOperationId ||
        packet.workspaceId!==p.workspaceId|| packet.threadId!==run.threadId)
       {this.transition(p,"BLOCKED","immutable_evidence_invalid");return;}
+    const stage=p.spec.stages[p.stageIndex];
+    // Historical completed reviews remain readable; no new legacy-prompt child may run.
+    if(stage.task){
+      verifyTask(p.workspaceRoot,p.workspaceId,stage.task);
+      if(!sameTask(packet.task as TaskReference|undefined,stage.task)||packet.stageId!==(stage.stageId??"development"))
+        taskFailure("TASK_STAGE_BINDING_MISMATCH","task","Completion differs from registered authority.");
+      const report=packet.report as ReportOutcome|undefined;
+      if(!report?.valid || report.status==="IN_PROGRESS"){
+        if(this.d.events.getReview(p.workspaceId,p.currentOperationId)){this.transition(p,"BLOCKED","non_ready_report_already_reviewed");return;}
+        await this.continueDevelopment(p,packet,report?.valid?"continue_remaining_work":"repair_result_report");return;
+      }
+      if(report.status==="PLAN_CONFLICT"||report.status==="BLOCKED"){
+        this.transition(p,"BLOCKED",report.status==="PLAN_CONFLICT"?"PLAN_CONFLICT_requires_Web_GPT_revision":"developer_report_BLOCKED");return;
+      }
+      if(report.status!=="READY_FOR_REVIEW"){this.transition(p,"BLOCKED","report_not_ready");return;}
+    }
     const externalReview=this.d.events.getReview(p.workspaceId,p.currentOperationId);
     if(p.spec.reviewerMode!=="webgpt" && externalReview){
       this.transition(p,"BLOCKED","review_already_decided_outside_realtime");
@@ -392,13 +420,33 @@ export class CoachRealtimeEngine {
     // Commit dispatch intention FIRST, so a crash cannot accidentally replay
     // an expensive or potentially mutating Codex run.
     this.transition(this.get(planId)!,"DISPATCHING",null,nextOp,newStage,newCount);
-    const input:RunnerInput={workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,
+    verifyTask(p.workspaceRoot,p.workspaceId,next.task);
+    const input:RunnerInput={task:next.task,stageId:next.stageId,workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,
       operationId:nextOp,prompt,model:selection.model,reasoningEffort:selection.reasoningEffort,
       sandbox:next.sandbox,timeoutMs:3600000,
       sessionId:String(packet.threadId),parentOperationId:p.currentOperationId,
       expectedFingerprint:String(packet.finalFingerprint)};
     await this.d.runner().start(input);
     this.transition(this.get(planId)!,"ACTIVE",null);
+  }
+  private async continueDevelopment(p:CoachRealtimePlan,packet:Record<string,unknown>,reason:string):Promise<void>{
+    const count=(this.db.prepare("SELECT count(*) n FROM realtime_continuations WHERE plan_id=? AND stage_idx=?").get(p.planId,p.stageIndex) as {n:number}).n;
+    if(count>=(p.spec.maxContinuations??3)){this.transition(p,"BLOCKED","maximum_development_continuations_reached:"+reason);return;}
+    const next=p.spec.stages[p.stageIndex];
+    verifyTask(p.workspaceRoot,p.workspaceId,next.task);
+    if((await captureCodexFingerprint(p.workspaceRoot)).sha!==packet.finalFingerprint)throw new Error("COACH_REVIEW_STALE_EVIDENCE");
+    const nextOp="coach-cont-"+createHash("sha256").update(p.planId+"|"+p.currentOperationId).digest("hex").slice(0,40);
+    // Durable intention before dispatch; recovery never replays an unknown outcome.
+    this.db.transaction(()=>{
+      this.db.prepare("INSERT INTO realtime_continuations VALUES(?,?,?,?)").run(p.planId,p.stageIndex,p.currentOperationId,nextOp);
+      this.transition(p,"DISPATCHING",reason,nextOp);
+    }).immediate();
+    const selection=this.d.events.getRunConfig(p.workspaceId,p.currentOperationId)?.next??next;
+    await this.d.runner().start({workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,operationId:nextOp,
+      task:next.task,stageId:next.stageId,prompt:reason+". Read prior operation report "+p.currentOperationId+"; preserve it and write a new operation report. "+next.prompt,
+      model:selection.model,reasoningEffort:selection.reasoningEffort,sandbox:next.sandbox,
+      sessionId:String(packet.threadId),parentOperationId:p.currentOperationId,expectedFingerprint:String(packet.finalFingerprint)});
+    this.transition(this.get(p.planId)!,"ACTIVE",null);
   }
   private operationId(p:CoachRealtimePlan,kind:"review"):string {
     return createHash("sha256").update(p.planId+"|"+p.currentOperationId+"|"+kind)
@@ -409,6 +457,7 @@ export class CoachRealtimeEngine {
   }
   private async review(plan:CoachRealtimePlan,eventId:number,packet:Record<string,unknown>,
       operationId:string):Promise<RealtimeReviewRecommendation> {
+    verifyTask(plan.workspaceRoot,plan.workspaceId,plan.spec.stages[plan.stageIndex].task);
     if(this.d.review)return this.d.review({plan,eventId,packet,operationId});
     const guidance="You are a SEPARATE read-only Codex reviewer. Assess the developer's ACTUAL workspace "+
       "against the following stage specification, not the developer's self-reported tests. "+
@@ -418,14 +467,14 @@ export class CoachRealtimeEngine {
       "APPROVED only if you independently inspected the deliverable and are prepared for a separate deterministic test. "+
       "No source text, paths or secrets in the reason. Final answer MUST BE one valid compact JSON object, "+
       'exactly {"decision":"APPROVED"|"REWORK"|"BLOCKED","reason":"3-350 chars safe plain text"}. '+
-      "Developer task:\n"+plan.spec.stages[plan.stageIndex].prompt.slice(0,7000)+"\n"+
+      "Read the ENTIRE authoritative TASK and verify its pinned version: "+JSON.stringify(plan.spec.stages[plan.stageIndex].task)+"\n"+
       "Signed evidence SHA: "+String(packet.evidenceSha256)+"\n"+
       "Workspace fingerprint: "+String(packet.finalFingerprint);
     const status:RunnerStatus=await this.d.runner().run({
       workspaceId:plan.workspaceId,workspaceRoot:plan.workspaceRoot,operationId,
       model:plan.spec.reviewerModel,reasoningEffort:plan.spec.reviewerEffort,
       prompt:guidance.slice(0,10000),sandbox:"read-only",
-      timeoutMs:600000,internalReview:true,
+      timeoutMs:600000,internalReview:true,task:plan.spec.stages[plan.stageIndex].task,
     });
     if(status.state!=="COMPLETED"||status.exitCode!==0||!status.eventId)
       throw new Error("COACH_REALTIME_REVIEWER_FAILED");

@@ -1,3 +1,4 @@
+import { fixtureTask, fixtureReportSource } from "./coach-contract-fixture.js";
 import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
 import {createHash} from "node:crypto";
@@ -22,9 +23,9 @@ const space=join(root,"workspace"),state=join(root,"state"),mock=join(root,"code
 mkdirSync(join(space,".devspace"),{recursive:true});
 const yaml="version: 1\ntasks:\n  smoke:\n    mode: run\n    runtime: system\n    command: [\"/usr/bin/true\"]\n";
 writeFileSync(join(space,".devspace","tasks.yaml"),yaml);
-writeFileSync(mock,[
+writeFileSync(mock,[fixtureReportSource,
  'let p="";process.stdin.on("data",b=>p+=b);',
- 'process.stdin.on("end",()=>{',
+ 'process.stdin.on("end",()=>{ fixtureReport(p);',
  'require("node:fs").writeFileSync("deliverable.txt",p.trim());',
  'const tid="11111111-1111-4111-8111-111111111111";',
  'process.stdout.write(JSON.stringify({type:"thread.started",thread_id:tid})+"\\n");',
@@ -45,10 +46,10 @@ const ws={root:space,mode:"worktree",worktree:{managed:true},
 const options={events,tasks:task,runner:()=>runner,workspaces:{getWorkspace:(id:string)=>{
  if(id!==workspaceId)throw Error("other_workspace");return ws;}} as any,gate,recoveryIntervalMs:30};
 const stages=[
- {prompt:"stage-zero",testTaskId:"smoke",model:"gpt-6-luna" as const,reasoningEffort:"none" as const,sandbox:"workspace-write" as const},
- {prompt:"stage-one",testTaskId:"smoke",model:"gpt-6-luna" as const,reasoningEffort:"none" as const,sandbox:"workspace-write" as const}
+ {task:fixtureTask(space,workspaceId),prompt:"stage-zero",testTaskId:"smoke",model:"gpt-6-luna" as const,reasoningEffort:"none" as const,sandbox:"workspace-write" as const},
+ {task:fixtureTask(space,workspaceId),prompt:"stage-one",testTaskId:"smoke",model:"gpt-6-luna" as const,reasoningEffort:"none" as const,sandbox:"workspace-write" as const}
 ];
-const initialInput=(operationId:string)=>({workspaceId,workspaceRoot:space,operationId,
+const initialInput=(operationId:string)=>({task:fixtureTask(space,workspaceId),workspaceId,workspaceRoot:space,operationId,
  prompt:"stage-zero",model:"gpt-6-luna" as const,reasoningEffort:"none" as const,
  sandbox:"workspace-write" as const,timeoutMs:5000});
 const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
@@ -67,7 +68,7 @@ try{
    reviewerModel:"gpt-6-luna" as const,reviewerEffort:"none" as const,
    reviewerMode:"webgpt" as const,maxReworks:2,stages};
  ws.mode="checkout";
- assert.throws(()=>engine!.register(spec),/MANAGED_WORKTREE_REQUIRED/,
+ await assert.rejects(()=>engine!.register(spec),/MANAGED_WORKTREE_REQUIRED/,
    "never authorize unattended Web GPT writes in an attached main checkout");
  ws.mode="worktree";
  mc=new McpServer({name:"webgpt-coach-mcp-qa",version:"1.0"});
@@ -85,7 +86,7 @@ try{
    reviewerModel:"gpt-6-luna",reviewerEffort:"none",maxReworks:2,stages}});
  assert.equal(enrolled.isError??false,false,JSON.stringify(enrolled));
  await until(()=>engine!.get(spec.planId)?.phase==="AWAITING_WEBGPT");
- assert.throws(()=>engine!.register({...spec,planId:"parallel-unsafe"}),/ALREADY_ENROLLED/,
+ await assert.rejects(()=>engine!.register({...spec,planId:"parallel-unsafe"}),/ALREADY_ENROLLED/,
    "one workspace cannot launch two uncoordinated autonomous plans");
  engine.pause(spec.planId);
  assert.equal(engine.get(spec.planId)?.phase,"PAUSED");
@@ -163,7 +164,7 @@ try{
  // A separate capped plan must stop on REWORK instead of creating a child.
  const limit=await runner.run(initialInput("limit"));
  const limitSpec={...spec,planId:"web-limit",initialOperationId:"limit",maxReworks:0,stages:[stages[0]]};
- engine.register(limitSpec);
+ await engine.register(limitSpec);
  await until(()=>engine!.get("web-limit")?.phase==="AWAITING_WEBGPT");
  const limitEv=events.getEvidence(workspaceId,"limit") as {evidenceSha256:string};
  await engine.submitWebVerdict({planId:"web-limit",workspaceId,operationId:"limit",

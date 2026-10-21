@@ -1,3 +1,4 @@
+import { TaskGateError } from "../coach-task-contract.js";
 import { isPathInsideRoot } from "../roots.js";
 import { describeAuthorizations } from "../git-branch-authorization.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -159,10 +160,10 @@ export const registerAppTool: typeof registerMcpAppTool = ((
           isError: true,
           _meta: {
             tool: String(name),
-            error: errorPayload,
+            error: error instanceof TaskGateError?error.diagnostic:errorPayload,
           },
           structuredContent: {
-            error: errorPayload,
+            error: error instanceof TaskGateError?error.diagnostic:errorPayload,
             result: message,
           },
         };
@@ -301,6 +302,8 @@ export function exposedToolNames(
       "reclaim_workspace",
       "start_coach_sidecar",
       "stop_coach_sidecar",
+      "coach_webgpt_claim_browser_route",
+      "codex_task_freeze",
       "codex_agent_start",
       "codex_agent_update_config",
       "codex_agent_stop",
@@ -463,6 +466,8 @@ export function requiredCapabilityForTool(tool: string): ToolCapability {
       "project_task",
       "start_coach_sidecar",
       "stop_coach_sidecar",
+      "coach_webgpt_claim_browser_route",
+      "codex_task_freeze",
       "codex_agent_start",
       "codex_agent_update_config",
       "codex_agent_stop",

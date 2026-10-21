@@ -1,3 +1,4 @@
+import { taskReferenceSchema, verifyTask } from "../coach-task-contract.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { resultOutputSchema, type ServerContext } from "./server-types.js";
@@ -30,7 +31,7 @@ export function registerCodexReviewTools(server: McpServer, ctx: ServerContext):
     title: "Resume Codex from approved REWORK",
     description: "Explicitly launch a new Codex operation in the parent verified REWORK thread; never automatically resubmit or use a caller-supplied arbitrary thread ID.",
     inputSchema: { workspaceId:id, parentOperationId:id, operationId:id,
-      prompt:z.string().min(1).max(10000),
+      prompt:z.string().max(10000).default(""),task:taskReferenceSchema.optional(),stageId:id.optional(),
       // Optional fields override the parent's queued selection independently.
       model:z.enum(CODEX_MODELS).optional(),
       reasoningEffort:z.enum(CODEX_EFFORTS).optional(),
@@ -38,8 +39,9 @@ export function registerCodexReviewTools(server: McpServer, ctx: ServerContext):
       timeoutMs:z.number().int().min(3000).max(3600000).optional() },
     outputSchema: resultOutputSchema({status:z.unknown().optional(),error:z.unknown().optional()}),
     _meta: {},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:false},
-  },async({workspaceId,parentOperationId,operationId,prompt,model,reasoningEffort,sandbox,timeoutMs})=>{
+  },async({workspaceId,parentOperationId,operationId,prompt,task,stageId,model,reasoningEffort,sandbox,timeoutMs})=>{
     const workspace=ctx.workspaces.getWorkspace(workspaceId);
+    verifyTask(workspace.root,workspaceId,task);
     if(parentOperationId===operationId)throw new Error("COACH_REWORK_SAME_OPERATION");
     const review=ctx.coachReviewEvents.getReview(workspaceId,parentOperationId);
     const packet=ctx.coachReviewEvents.getEvidence(workspaceId,parentOperationId) as
@@ -59,7 +61,7 @@ export function registerCodexReviewTools(server: McpServer, ctx: ServerContext):
     const selected={model:model??parentConfig!.next.model,
       reasoningEffort:reasoningEffort??parentConfig!.next.reasoningEffort};
     const status=await runner.start({workspaceId,workspaceRoot:workspace.root,operationId,
-      parentOperationId,expectedFingerprint:packet.finalFingerprint,prompt,
+      parentOperationId,expectedFingerprint:packet.finalFingerprint,prompt,task,stageId,
       ...selected,sandbox,sessionId:packet.threadId,...(timeoutMs?{timeoutMs}:{})});
     const result="Started explicit Codex rework operation "+operationId+" on parent thread.";
     return {content:[textBlock(result)],structuredContent:{result,status}};

@@ -1,3 +1,5 @@
+import { registerCodexReviewTools } from "./server/tools-codex-review.js";
+import { fixtureTask, fixtureReportSource } from "./coach-contract-fixture.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -18,9 +20,9 @@ const workspace=join(root,"workspace");
 const fs=await import("node:fs");
 fs.mkdirSync(workspace);
 const fake=join(root,"codex-fixture.cjs");
-writeFileSync(fake,[
+writeFileSync(fake,[fixtureReportSource,
 'let input="";process.stdin.on("data",c=>input+=c);',
-'process.stdin.on("end",()=>{',
+'process.stdin.on("end",()=>{ fixtureReport(input);',
 ' const thread=JSON.stringify({type:"thread.started",thread_id:"11111111-1111-4111-8111-111111111111"});',
 ' const end=JSON.stringify({type:"turn.completed",usage:{input_tokens:5,output_tokens:2,prompt:"not_a_real_usage_field"}});',
 ' require("node:fs").writeFileSync("mcp-edit.txt",input);',
@@ -43,25 +45,45 @@ function context(readOnly:boolean):ServerContext {
 }
 const mp=new McpServer({name:"native-b1-roundtrip",version:"1.0.0"});
 registerCodexAgentTools(mp,context(false));
+registerCodexReviewTools(mp,context(false));
 const client=new Client({name:"native-b1-test",version:"1.0.0"});
 const [a,b]=InMemoryTransport.createLinkedPair();
 await mp.connect(b);await client.connect(a);
 try {
  const names=(await client.listTools()).tools.map(t=>t.name).sort();
- assert.deepEqual(names,["codex_agent_clear_quarantine","codex_agent_evidence","codex_agent_observe","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_start","codex_agent_status","codex_agent_stop","codex_agent_update_config"]);
+ assert.deepEqual(names,["codex_agent_start_rework","codex_agent_submit_review","codex_agent_verify_test","codex_task_freeze","codex_agent_clear_quarantine","codex_agent_evidence","codex_agent_observe","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_start","codex_agent_status","codex_agent_stop","codex_agent_update_config"].sort());
  const denied=await client.callTool({name:"codex_agent_start",arguments:{
   workspaceId:"untrusted",operationId:"denied",prompt:"edit",model:"gpt-6-luna",
   reasoningEffort:"none",sandbox:"workspace-write"
  }});
  assert.equal(denied.isError,true);
  assert.equal(store.listPending("authorized").pending_count,0);
- const input={workspaceId:"authorized",operationId:"mcp-real",prompt:"mcp-fixture-edit",
+ const noDoc=await client.callTool({name:"codex_agent_start",arguments:{workspaceId:"authorized",operationId:"no-doc",internalReview:true,prompt:"arbitrary",model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write"}});
+ assert.equal(noDoc.isError,true);assert.equal((noDoc.structuredContent as any).error.codex_started,false);
+ assert.equal(store.getAgentRun("authorized","no-doc"),undefined);
+ const noDocRework=await client.callTool({name:"codex_agent_start_rework",arguments:{workspaceId:"authorized",operationId:"no-doc-rework",parentOperationId:"missing-parent",prompt:"arbitrary",sandbox:"workspace-write"}});
+ assert.equal(noDocRework.isError,true);assert.equal((noDocRework.structuredContent as any).error.codex_started,false);
+ assert.equal(store.getAgentRun("authorized","no-doc-rework"),undefined);
+ const input={task:fixtureTask(workspace,"authorized"),workspaceId:"authorized",operationId:"mcp-real",prompt:"mcp-fixture-edit",
   model:"gpt-6-luna",reasoningEffort:"none",sandbox:"workspace-write"} as const;
+ const frozen=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",task:input.task}});
+ assert.equal(frozen.isError??false,false,JSON.stringify(frozen));
+ for(const selector of [{taskId:input.task.taskId},{taskPath:input.task.taskPath},{taskId:input.task.taskId,version:1,expectedSha256:input.task.sha256}]){
+  const automatic=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",...selector}});
+  assert.equal(automatic.isError??false,false,JSON.stringify(automatic));
+  assert.deepEqual((automatic.structuredContent as any).task,input.task);
+ }
+ const wrongHash=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",taskId:input.task.taskId,expectedSha256:"0".repeat(64)}});
+ assert.equal(wrongHash.isError,true);assert.equal((wrongHash.structuredContent as any).error.diagnostics[0].code,"TASK_EXPECTED_HASH_MISMATCH");
+ const ambiguous=await client.callTool({name:"codex_task_freeze",arguments:{workspaceId:"authorized",task:input.task,taskId:input.task.taskId}});
+ assert.equal(ambiguous.isError,true);assert.equal((ambiguous.structuredContent as any).error.diagnostics[0].code,"TASK_FREEZE_INPUT_CONFLICT");
  const initial=await client.callTool({name:"codex_agent_start",arguments:input});
  assert.equal(initial.isError ?? false,false,JSON.stringify(initial));
  assert.equal(JSON.stringify(initial).includes(input.prompt),false,"prompt must not echo");
  const complete=await runner.run({...input,workspaceRoot:workspace});
  assert.equal(complete.state,"COMPLETED");
+ assert.equal(complete.report?.status,"READY_FOR_REVIEW");
+ assert.equal(store.listPending("authorized").events[0].report?.testsIndependentlyVerified,false);
  const status=await client.callTool({name:"codex_agent_status",
   arguments:{workspaceId:"authorized",operationId:"mcp-real"}});
  assert.equal(status.isError ?? false,false);

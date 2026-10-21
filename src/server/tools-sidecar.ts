@@ -126,6 +126,38 @@ export function registerSidecarTools(
     }
   );
 
+  if (!config.readOnly) {
+  // The browser challenge is created only by a user clicking the extension in
+  // one concrete ChatGPT tab. This MCP action proves which DevSpace workspace
+  // that exact conversation is reviewing, without reading chat history.
+  registerAppTool(
+    server,
+    "coach_webgpt_claim_browser_route",
+    {
+      title:"Claim a one-click Coach browser binding",
+      description:"Use only after receiving a binding request in THIS ChatGPT conversation. Read its exact nonce and canonical chat URL and identify the DevSpace workspace this conversation actually owns. Never guess an active or most-recent workspace. Claims expire and are scoped to the browser's authenticated Sidecar.",
+      inputSchema:{workspaceId:workspaceIdSchema,nonce:z.string().regex(/^[a-f0-9]{32}$/),url:z.string().url().max(400)},
+      outputSchema:resultOutputSchema({claimed:z.boolean().optional(),error:optionalError}),
+      _meta:{},
+      annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
+    },
+    async ({workspaceId,nonce,url})=>{
+      workspaces.getWorkspace(workspaceId);
+      if(!managedCoachSidecar.claimBrowserRoute)throw new Error("COACH_BIND_NOT_SUPPORTED");
+      const claimed=managedCoachSidecar.claimBrowserRoute(workspaceId,nonce,url,(nextScope)=>{
+        const saved=ctx.coachReviewEvents.coachFeedConfig();
+        if(!saved || !nextScope.includes(saved.workspaceId) ||
+           nextScope.length>8 || new Set(nextScope).size!==nextScope.length)
+          throw new Error("COACH_BIND_SCOPE_PERSISTENCE_DENIED");
+        ctx.coachReviewEvents.saveCoachFeedConfig({...saved,authorizedWorkspaceIds:nextScope});
+      });
+      const result=claimed?"Exact browser route claimed; browser may finish the one-click authorization.":"Binding request expired, mismatched, duplicated, or unauthorized.";
+      return {content:[textBlock(result)],structuredContent:{result,claimed}};
+    },
+  );
+
+  }
+
   registerAppTool(
     server,
     "coach_sidecar_status",
