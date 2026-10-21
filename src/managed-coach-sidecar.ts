@@ -26,6 +26,7 @@ export interface ManagedCoachSidecarControl {
   activeServiceIdsForRoot(root:string):string[];
   getDeliveryReceipt?(workspaceId:string,eventId:number):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
   close():Promise<void>;
+  claimBrowserRoute?(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean;
 }
 
 function validPort(port: unknown): asserts port is number {
@@ -61,6 +62,8 @@ function schemaCheck(database: Database.Database, native: boolean): void {
 
 export class ManagedCoachSidecar {
   private readonly services = new Map<string, Entry>();
+  // Browser-origin challenges are short-lived, memory-only, and bound to one exact chat URL.
+  private readonly browserClaims = new Map<string,{entryId:string;url:string;expires:number;workspaceId?:string}>();
   private starting?: Promise<CoachSidecarStartResult>;
   private closing = false;
   private readonly handoffPath?: string;
@@ -156,6 +159,7 @@ export class ManagedCoachSidecar {
       entry.server.once("close", () => {
         if (this.services.get(input.workspaceId) !== entry) return;
         this.services.delete(input.workspaceId);
+        for(const [nonce,v] of this.browserClaims)if(v.entryId===input.workspaceId)this.browserClaims.delete(nonce);
         try { this.revokeHandoff(entry.handoffPath); } catch { /* Keep shutdown best-effort. */ }
         try { entry.database.close(); } catch { /* Already shutting down. */ }
         try { entry.receiptDb?.close(); } catch { /* Already shutting down. */ }
@@ -187,6 +191,12 @@ export class ManagedCoachSidecar {
       if (!entry.pairedExtensionId || origin !== `chrome-extension://${entry.pairedExtensionId}`) return send(res, 403, { error: "origin forbidden" });
       return send(res, 204, {}, { ...cors, "access-control-allow-methods": "GET, POST", "access-control-allow-headers": "Authorization, Content-Type" });
     }
+    if(req.method==="POST" && req.url==="/bind/start") {
+      if(!entry.pairedExtensionId || origin!==`chrome-extension://${entry.pairedExtensionId}` ||
+         !tokenMatches(entry.token,req.headers.authorization))
+        return send(res,403,{error:"binding transport forbidden"},cors);
+      void this.startBrowserClaim(entry,req,res,cors);return;
+    }
     if(req.method==="POST" && req.url==="/delivery-receipt") {
       if(!entry.receiptDb || !entry.pairedExtensionId ||
           origin!==`chrome-extension://${entry.pairedExtensionId}`)
@@ -199,6 +209,18 @@ export class ManagedCoachSidecar {
     if (req.method !== "GET") return send(res, 405, { error: "method not allowed" }, cors);
     if (!tokenMatches(entry.token, req.headers.authorization)) return send(res, 401, { error: "unauthorized" }, cors);
     if (req.url === "/health") return send(res, 200, { ok: true, service: SERVICE_NAME, status: "ok" }, cors);
+    if(req.url?.startsWith("/bind/status?")) {
+      const u=new URL(req.url,"http://127.0.0.1");
+      if(u.pathname!=="/bind/status" || [...u.searchParams.keys()].join(",")!=="nonce")
+        return send(res,400,{error:"invalid binding query"},cors);
+      const nonce=u.searchParams.get("nonce")??"";
+      const v=this.browserClaims.get(nonce);
+      if(!/^[a-f0-9]{32}$/.test(nonce)||!v||v.entryId!==entry.workspaceId||v.expires<Date.now())
+        return send(res,404,{error:"binding unavailable"},cors);
+      res.setHeader("cache-control","no-store");
+      return send(res,200,{ok:true,state:v.workspaceId?"claimed":"pending",
+        ...(v.workspaceId?{workspaceId:v.workspaceId,url:v.url}:{})},cors);
+    }
     if (req.url) {
       const parsed=new URL(req.url,"http://127.0.0.1");
       if (parsed.pathname === "/agent/events") {
@@ -277,6 +299,52 @@ export class ManagedCoachSidecar {
     } catch {
       return send(res, 503, { error: "event store unavailable" }, cors);
     }
+  }
+
+  // This endpoint never accepts a workspaceId from the browser: only an independent
+  // Web GPT MCP claim can associate the authenticated challenge with a workspace.
+  private async startBrowserClaim(entry:Entry,req:IncomingMessage,res:ServerResponse,cors:Record<string,string>):Promise<void> {
+    try {
+      if(req.headers["content-type"]!=="application/json")return send(res,415,{error:"invalid content type"},cors);
+      let raw="",length=0;
+      for await(const part of req){
+        length+=Buffer.byteLength(part);if(length>600)return send(res,413,{error:"binding too large"},cors);
+        raw+=part.toString("utf8");
+      }
+      const data=JSON.parse(raw) as Record<string,unknown>;
+      if(!data||Array.isArray(data)||typeof data!=="object"||
+         Object.keys(data).sort().join(",")!=="nonce,url"||
+         typeof data.nonce!=="string"||!/^[a-f0-9]{32}$/.test(data.nonce)||
+         typeof data.url!=="string"||!/^https:\/\/chatgpt\.com\/(?:g\/[^/?#]+\/)?c\/[A-Za-z0-9_-]{8,128}$/.test(data.url))
+        return send(res,400,{error:"invalid binding"},cors);
+      const now=Date.now();
+      for(const [k,v] of this.browserClaims)if(v.expires<now)this.browserClaims.delete(k);
+      if(this.browserClaims.size>=16)return send(res,429,{error:"too many binding requests"},cors);
+      if(this.browserClaims.has(data.nonce))return send(res,409,{error:"binding already exists"},cors);
+      this.browserClaims.set(data.nonce,{entryId:entry.workspaceId,url:data.url,expires:now+600_000});
+      send(res,200,{ok:true,expiresSeconds:600},cors);
+    } catch {if(!res.headersSent)send(res,400,{error:"invalid binding"},cors);}
+  }
+
+  claimBrowserRoute(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean {
+    if(!/^[a-f0-9]{32}$/.test(nonce))return false;
+    const claim=this.browserClaims.get(nonce);
+    if(!claim||claim.expires<Date.now()||claim.workspaceId||claim.url!==url)return false;
+    const entry=this.services.get(claim.entryId);
+    if(!entry)return false;
+    // Prevent simultaneously claiming the same workspace from two browser handshakes.
+    for(const [key,v] of this.browserClaims)
+      if(key!==nonce&&v.entryId===claim.entryId&&v.workspaceId===workspaceId&&v.expires>=Date.now())return false;
+    const scope=entry.authorizedWorkspaceIds??[entry.workspaceId];
+    if(!scope.includes(workspaceId)){
+      // The user's one-click request plus the exact Web GPT MCP claim are
+      // the only authorization for expanding scope; never discover all roots.
+      if(scope.length>=8||!persistScope)return false;
+      const next=[...scope,workspaceId];
+      try{persistScope(next);}catch{return false;}
+      entry.authorizedWorkspaceIds=next;
+    }
+    claim.workspaceId=workspaceId;return true;
   }
 
   private async acceptDeliveryReceipt(entry:Entry,req:IncomingMessage,res:ServerResponse,cors:Record<string,string>):Promise<void> {

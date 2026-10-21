@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { bearerTokenFingerprint, geminiClientMatches, geminiToolAllowlist, selectGeminiTools } from "../gemini-toolset.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +41,7 @@ import {
   requestLogFields,
   sendJsonRpcError,
   processMemorySnapshot,
+  toolNamesFor,
 } from "./server-helpers.js";
 import {
   workspaceAppHtml,
@@ -369,15 +371,13 @@ export function setupExpressRoutes(params: {
   // Wire diagnosis + Gemini Spark compatibility for /mcp POST requests.
   // GET (SSE stream) and DELETE pass through untouched.
   //
-  // Gemini compat trial: expose the full current tools/list catalog to Gemini
-  // after removing schema and Apps UI fields that its function declaration
-  // pipeline has struggled with. Google does not publish a numeric MCP tool
-  // limit, so confirm acceptance with a real Spark session. Only the observed
-  // Gemini signature is rewritten; other clients remain byte-identical.
-  const GEMINI_CLIENT_MATCH = (name: string, version: string): boolean =>
-    name === "mcp" && version === "0.1.0";
-
+  // Gemini gets a bounded coding/Godot catalog. Stateless transport has no
+  // MCP session id, so a successful initialize is correlated by a short-lived
+  // one-way fingerprint of its bearer token for the following tools/list.
+  const geminiAllowedTools = geminiToolAllowlist(toolNamesFor(config));
   const geminiSessions = new Map<string, true>();
+  const geminiCredentials = new Map<string, number>();
+  const GEMINI_CREDENTIAL_TTL_MS = 60 * 60 * 1000;
 
   // Recursively drop JSON-Schema features Gemini's function-declaration
   // pipeline is documented to struggle with / sanitize itself.
@@ -429,14 +429,17 @@ export function setupExpressRoutes(params: {
       const result = (parsed as { result?: { tools?: unknown } })?.result;
       if (!result || !Array.isArray(result.tools)) return line;
       const before = result.tools.length;
-      result.tools = (result.tools as Record<string, unknown>[]).map(
-        stripToolForGemini,
+      const selected = selectGeminiTools(
+        result.tools as Record<string, unknown>[],
+        geminiAllowedTools,
       );
+      result.tools = selected.map(stripToolForGemini);
       changed = true;
-      logEvent(config.logging, "info", "gemini_tools_rewritten", {
+      logEvent(config.logging, "info", "gemini_tools_filtered", {
         requestId,
         toolsBefore: before,
         toolsAfter: (result.tools as unknown[]).length,
+        toolLimit: geminiAllowedTools.size,
       });
       return "data: " + JSON.stringify(parsed);
     });
@@ -460,9 +463,19 @@ export function setupExpressRoutes(params: {
 
     // Is this request part of a known Gemini session?
     const requestSessionId = req.header("mcp-session-id");
+    const bearerFingerprint = bearerTokenFingerprint(req.header("authorization"));
+    const credentialExpiry = bearerFingerprint
+      ? geminiCredentials.get(bearerFingerprint)
+      : undefined;
+    if (bearerFingerprint && credentialExpiry !== undefined && credentialExpiry <= Date.now()) {
+      geminiCredentials.delete(bearerFingerprint);
+    }
     const geminiCompat =
-      requestSessionId !== undefined &&
-      geminiSessions.get(requestSessionId) === true;
+      (requestSessionId !== undefined && geminiSessions.get(requestSessionId) === true) ||
+      (rpcMethod === "tools/list" &&
+        bearerFingerprint !== undefined &&
+        credentialExpiry !== undefined &&
+        credentialExpiry > Date.now());
 
     let responseBytes = 0;
     const origWrite = res.write.bind(res);
@@ -525,8 +538,8 @@ export function setupExpressRoutes(params: {
     res.end = ((chunk?: unknown, ...rest: unknown[]) => {
       if (chunk !== undefined && chunk !== null) chunk = processChunk(chunk);
 
-      // Remember Gemini sessions from initialize responses so subsequent
-      // tools/list calls on the same session get the filtered catalog.
+      // Correlate successful Gemini initialization with subsequent requests.
+      // Stateful clients use mcp-session-id; stateless clients use a token hash.
       if (rpcMethod === "initialize") {
         const newSessionId = res.getHeader("mcp-session-id");
         const clientInfo = (
@@ -535,16 +548,22 @@ export function setupExpressRoutes(params: {
           }
         )?.params?.clientInfo;
         if (
-          typeof newSessionId === "string" &&
-          typeof clientInfo?.name === "string" &&
-          GEMINI_CLIENT_MATCH(clientInfo.name, String(clientInfo.version ?? ""))
+          res.statusCode < 400 &&
+          geminiClientMatches(clientInfo?.name, clientInfo?.version)
         ) {
-          geminiSessions.set(newSessionId, true);
-          logEvent(config.logging, "info", "gemini_session_marked", {
+          if (typeof newSessionId === "string") geminiSessions.set(newSessionId, true);
+          if (bearerFingerprint) {
+            if (geminiCredentials.size >= 128) geminiCredentials.clear();
+            geminiCredentials.set(bearerFingerprint, Date.now() + GEMINI_CREDENTIAL_TTL_MS);
+          }
+          logEvent(config.logging, "info", "gemini_client_marked", {
             requestId,
-            sessionIdPrefix: sessionIdPrefix(newSessionId),
-            clientName: clientInfo.name,
-            clientVersion: String(clientInfo.version ?? ""),
+            sessionIdPrefix: sessionIdPrefix(
+              typeof newSessionId === "string" ? newSessionId : undefined,
+            ),
+            credentialBound: Boolean(bearerFingerprint),
+            clientName: clientInfo?.name,
+            clientVersion: String(clientInfo?.version ?? ""),
           });
         }
       }

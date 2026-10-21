@@ -1,0 +1,154 @@
+"use strict";
+// Isolated-world script: neither reads the conversation nor contacts the network.
+(() => {
+  // Isolated binding-only protocol; never handles audit events.
+  // V5 is isolated by protocol so they cannot handle newer deliveries.
+  if (globalThis.__devspaceCoachBindV1Installed) return;
+  globalThis.__devspaceCoachBindV1Installed = true;
+  const canonical=url=>{
+    try {
+      const u=new URL(url);
+      return u.protocol==="https:" && u.hostname==="chatgpt.com" &&
+        /^\/(?:g\/[^/]+\/)?c\/[A-Za-z0-9_-]{8,128}\/?$/.test(u.pathname) ?
+        u.origin+u.pathname.replace(/\/$/,""):null;
+    }catch{return null;}
+  };
+  const visible=el=>!!el && el.isConnected && !el.hidden &&
+    getComputedStyle(el).display!=="none" && getComputedStyle(el).visibility!=="hidden";
+  const single=selector=>{
+    const nodes=[...document.querySelectorAll(selector)].filter(visible);
+    return nodes.length===1?nodes[0]:null;
+  };
+  // ChatGPT may render a labelled ProseMirror editor instead of #prompt-textarea.
+  // Explicitly allow only known composer identities, never a generic contenteditable.
+  // Resolve *all* candidates first: competing editors are an ambiguity, not a fallback.
+  const findEditor=()=>{
+    const selectors=[
+      '#prompt-textarea[contenteditable="true"]',
+      '[data-testid="prompt-textarea"][contenteditable="true"]',
+      '[aria-label="Ask ChatGPT"][contenteditable="true"]',
+      '[aria-label="向 ChatGPT 提问"][contenteditable="true"]',
+      'contenteditable[aria-label="Ask ChatGPT"]',
+      'contenteditable[aria-label="向 ChatGPT 提问"]'
+    ];
+    const candidates=[...new Set(selectors.flatMap(s=>[...document.querySelectorAll(s)]))]
+      .filter(visible)
+      .filter(el=>el.isContentEditable===true || el.getAttribute("contenteditable")==="true");
+    return candidates.length===1?candidates[0]:null;
+  };
+  // React updates the send control asynchronously after insertText. Restrict the
+  // fallback to a submit button belonging to the editor's own form.
+  const findSend=editor=>{
+    const selector='button[data-testid="send-button"],'+
+      'button[data-testid="composer-send-button"],'+
+      'button[aria-label="Send prompt"],button[aria-label="Send message"],'+
+      'button[aria-label="Send"],button[aria-label="发送消息"],button[aria-label="发送"]';
+    const form=editor.closest?.("form");
+    const candidates=[...new Set([
+      ...document.querySelectorAll(selector),
+      ...(form?[...form.querySelectorAll('button[type="submit"]')]:[])
+    ])].filter(visible);
+    return candidates.length===1?candidates[0]:null;
+  };
+  const busy=()=>!!document.querySelector(
+    '[data-testid="stop-button"],button[aria-label="Stop generating"],'+
+    'button[aria-label="Stop"],button[aria-label="停止生成"]'
+  );
+  // ProseMirror may materialize inserted newline characters as paragraphs.
+  // Its innerText can therefore contain extra structural blank lines, while
+  // textContent may differ in line layout. Only normalize whitespace around
+  // line boundaries; never ignore actual characters, words, or punctuation.
+  const normalizeComposerText=value=>String(value||"")
+    .replace(/\r\n?/g,"\n").replace(/[\u2028\u2029]/g,"\n")
+    .replace(/\u00a0/g," ")
+    .replace(/[ \t]*\n[ \t]*/g,"\n")
+    .replace(/\n{2,}/g,"\n").trim();
+  const editorTexts=editor=>[editor.innerText,editor.textContent]
+    .map(normalizeComposerText);
+  const hasDraft=editor=>editorTexts(editor).some(Boolean);
+  const matchesInstruction=(editor,instruction)=>{
+    const expected=normalizeComposerText(instruction);
+    return editorTexts(editor).some(actual=>actual===expected);
+  };
+  const intact=(editor,msg)=>
+    canonical(location.href)===msg.url && editor.isConnected &&
+    matchesInstruction(editor,msg.instruction);
+  const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  let sending=false;
+  async function deliver(msg) {
+    if(sending)return {ok:false,notSubmitted:true,reason:"投递正在进行"};
+    if(window.top!==window || canonical(location.href)!==msg.url ||
+      canonical(msg.url)===null || typeof msg.instruction!=="string" ||
+      msg.instruction.length>1500 || !msg.instruction.startsWith("DevSpace Coach 一键绑定请求"))
+      return {ok:false,notSubmitted:true,reason:"目标对话不匹配"};
+    const editor=findEditor();
+    if(!editor)return {ok:false,notSubmitted:true,reason:"找不到唯一的 ChatGPT 编辑器（旧版或带标签的新版输入框）"};
+    if(hasDraft(editor))
+      return {ok:false,notSubmitted:true,reason:"用户已有草稿，未覆盖"};
+    if(busy())return {ok:false,notSubmitted:true,reason:"Web GPT 正在生成"};
+    if(!editor.isConnected)return {ok:false,notSubmitted:true,reason:"编辑器已变化"};
+    sending=true;
+    try {
+      if(hasDraft(editor))
+        return {ok:false,notSubmitted:true,reason:"编辑期间出现用户草稿"};
+      editor.focus();
+      const selection=window.getSelection();
+      const range=document.createRange();
+      range.selectNodeContents(editor);range.collapse(false);
+      selection.removeAllRanges();selection.addRange(range);
+      if(!document.execCommand("insertText",false,msg.instruction))
+        return {ok:false,reason:"不能安全输入审核指令"};
+      // Do not treat an immediate DOM text mismatch as a failed edit: the
+      // framework may render a multi-paragraph value on a later microtask.
+      // Require stable, exact normalized content on two successive checks.
+      let verified=false;
+      for(let i=0;i<16;i++){
+        if(canonical(location.href)!==msg.url || !editor.isConnected || busy())
+          return {ok:false,reason:"输入校验期间对话或生成状态已变化，保留草稿"};
+        if(matchesInstruction(editor,msg.instruction)){
+          await wait(75);
+          if(intact(editor,msg) && !busy()){verified=true;break;}
+        } else {
+          await wait(75);
+        }
+      }
+      if(!verified) {
+        const size=editorTexts(editor).map(x=>x.length).join("/");
+        return {ok:false,reason:"输入内容未通过多行一致性校验（编辑器文本长度 "+size+"），保留草稿核查"};
+      }
+      // Allow the page to commit the editor's input and enable its send button.
+      // At most one click is ever attempted. No Enter-key fallback (it can
+      // insert a newline or create a duplicate submission).
+      let send=null;
+      for(let i=0;i<20;i++){
+        if(!intact(editor,msg))return {ok:false,reason:"发送前页面或草稿已变化，需人工确认"};
+        if(busy())return {ok:false,reason:"生成状态变化，已保留草稿"};
+        const candidate=findSend(editor);
+        if(candidate&&!candidate.disabled&&candidate.getAttribute("aria-disabled")!=="true"){
+          send=candidate;
+          break;
+        }
+        await wait(100);
+      }
+      if(!send)return {ok:false,reason:"输入已填入，但 2 秒内发送按钮仍不可用，请人工检查"};
+      if(!intact(editor,msg)||busy()||!visible(send)||send.disabled||
+          send.getAttribute("aria-disabled")==="true")
+        return {ok:false,reason:"点击前发送条件变化，已保留草稿"};
+      send.click();
+      // Only inspect composer; DO NOT read or scrape any conversation messages.
+      for(let i=0;i<12;i++){
+        await wait(250);
+        if(canonical(location.href)!==msg.url)return {ok:false,reason:"发送时页面变化"};
+        if(!hasDraft(editor))
+          return {ok:true,submitted:true};
+      }
+      return {ok:false,uncertain:true,reason:"发送后编辑器未确认清空，请人工核查"};
+    }catch{return {ok:false,uncertain:true,reason:"浏览器输入或发送异常"};}
+    finally{sending=false;}
+  }
+  chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
+    if(msg?.type!=="COACH_BIND_REQUEST_V1")return false;
+    void deliver(msg).then(reply).catch(()=>reply({ok:false,uncertain:true,reason:"投递异常"}));
+    return true;
+  });
+})();

@@ -112,6 +112,45 @@ try {
   assert.equal((await fetch(url + "/health", { headers: { ...auth, Origin: "https://evil.test" } })).status, 403);
   assert.equal((await fetch(url + "/health", { headers: { ...auth, Origin: "chrome-extension://" + "b".repeat(32) } })).status, 403);
   const origin = "chrome-extension://" + id;
+  // One-click binding is initiated only by the paired extension and is
+  // incomplete until Web GPT independently claims the exact workspace.
+  const nonce="0123456789abcdef0123456789abcdef";
+  const chatUrl="https://chatgpt.com/c/12345678-abcd-1234-abcd-123456789abc";
+  const bindingRequest={method:"POST",headers:{...auth,Origin:origin,
+    "Content-Type":"application/json"},body:JSON.stringify({nonce,url:chatUrl})};
+  assert.equal((await fetch(url+"/bind/start",{
+    ...bindingRequest,headers:{...bindingRequest.headers,Origin:"https://evil.test"}
+  })).status,403);
+  assert.equal((await fetch(url+"/bind/start",{
+    ...bindingRequest,headers:{...bindingRequest.headers,Authorization:"Bearer wrong"}
+  })).status,403);
+  const created=await fetch(url+"/bind/start",bindingRequest);
+  assert.equal(created.status,200);
+  const endpoint=url+"/bind/status?nonce="+nonce;
+  assert.equal((await (await fetch(endpoint,{headers:auth})).json() as {state:string}).state,"pending");
+  assert.equal(manager.claimBrowserRoute("w",nonce,chatUrl+"/wrong"),false);
+  assert.equal(manager.claimBrowserRoute("unauthorized",nonce,chatUrl),false);
+  assert.equal(manager.claimBrowserRoute("w",nonce,chatUrl),true);
+  assert.equal(manager.claimBrowserRoute("w",nonce,chatUrl),false,"claim must be one-shot");
+  const confirmed=await (await fetch(endpoint,{headers:auth})).json() as {
+    state:string;workspaceId:string;url:string};
+  assert.equal(confirmed.state,"claimed");
+  assert.equal(confirmed.workspaceId,"w");
+  assert.equal(confirmed.url,chatUrl);
+  assert.equal((await fetch(url+"/bind/start",bindingRequest)).status,409);
+  const nonce2="abcdef0123456789abcdef0123456789";
+  const chatUrl2="https://chatgpt.com/c/87654321-abcd-1234-abcd-123456789abc";
+  assert.equal((await fetch(url+"/bind/start",{...bindingRequest,
+    body:JSON.stringify({nonce:nonce2,url:chatUrl2})})).status,200);
+  assert.equal(manager.claimBrowserRoute("w-new",nonce2,chatUrl2),false,
+    "scope must not expand without durable explicit consent");
+  assert.equal(manager.claimBrowserRoute("w-new",nonce2,chatUrl2,()=>{throw Error("disk full");}),false);
+  let capturedScope:string[]=[];
+  assert.equal(manager.claimBrowserRoute("w-new",nonce2,chatUrl2,ids=>{capturedScope=ids;}),true);
+  assert.deepEqual(capturedScope,["w","w-new"]);
+  assert.equal((await fetch(url+"/events?workspaceId=w-new",{headers:auth})).status,200);
+  assert.equal((await fetch(url+"/events?workspaceId=not-authorized",{headers:auth})).status,403);
+  assert.equal((await fetch(url+"/bind/status?nonce=bad",{headers:auth})).status,404);
   const feed = await fetch(url + "/events", { headers: { ...auth, Origin: origin } });
   assert.equal(feed.status, 200);
   assert.equal(feed.headers.get("access-control-allow-origin"), origin);
