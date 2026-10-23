@@ -107,6 +107,7 @@ import type { CodexAgentControl } from "./codex-agent-control.js";
 import { CodexWorkerClient, CodexWorkerCoachClient, defaultCodexWorkerKey } from "./codex-worker-ipc.js";
 import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
 import { registerCodexAgentTools } from "./server/tools-codex-agent.js";
+import { registerSharedCodexAppTools } from "./server/tools-codex-app.js";
 import { registerCodexReviewTools } from "./server/tools-codex-review.js";
 import { registerAgentAuditTools } from "./server/tools-agent-audit.js";
 import {
@@ -191,6 +192,7 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   registerGodotImportTool(server, ctx);
   registerSidecarTools(server, ctx);
   registerCodexAgentTools(server, ctx);
+  registerSharedCodexAppTools(server, ctx);
   registerCodexReviewTools(server, ctx);
   registerCoachRealtimeTools(server, ctx);
   registerAgentAuditTools(server, ctx);
