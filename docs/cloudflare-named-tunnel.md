@@ -493,3 +493,68 @@ For the production service, set `DEVSPACE_WIDGETS=review_only`. This preserves
 rich diff, artifact, media, model, and capture review while avoiding Workspace
 App metadata on ordinary tools. The tunnel hostname, route, OAuth settings, and
 Cloudflare token do not need to change when switching this mode.
+
+## Version Pinning, Upgrade and Rollback (macOS production)
+
+The production Mac runs a pinned, manually installed `cloudflared` binary rather
+than an auto-updating one. The LaunchAgent starts
+`~/.local/bin/start-devspace-cloudflared.sh`, which calls
+`~/.local/bin/cloudflared tunnel --protocol http2 --no-autoupdate run ...`.
+`--no-autoupdate` is intentional: a production tunnel must not change version
+unattended.
+
+### Current pin
+
+| Item | Value (2026-10-24) |
+| --- | --- |
+| Version | `2026.10.3` (built 2026-10-21) |
+| Binary | `~/.local/bin/cloudflared` |
+| Binary sha256 | `f249139e0541fa589c987397d867cc16c83ab1236d31eb6782f2e4552ee9cf80` |
+| Archive | `cloudflared-darwin-arm64.tgz` from the `2026.10.3` GitHub release |
+| Archive sha256 | `1165d14b6f6360a3b8c283d7d1100024d6ec7cd9bc9e32519e96150645f3ec55` |
+| Signing authority | Developer ID Application: Cloudflare Inc. (`68WVV388M8`) |
+| Metrics endpoint | `http://127.0.0.1:20241/metrics` (cloudflared default) |
+| Previous version (backup) | `~/.local/share/devspace/bin-backup/cloudflared-2026.7.3` |
+
+Checksum note: the GitHub release notes label the published SHA256 lines with
+the `.tgz` asset names, but those hashes are of the **extracted binaries**. The
+GitHub API asset `digest` is the hash of the **archive**. A safe upgrade
+verifies both: archive digest against the API digest, and the extracted
+binary hash against the release-note checksum. Do not proceed if either fails.
+
+### Upgrade procedure (maintenance window, ~5 min)
+
+1. Record the current state: `cloudflared --version`, binary sha256,
+   `launchctl print gui/$(id -u)/com.liz.cloudflared-devspace`, public
+   `curl --noproxy '*' -s -o /dev/null -w '%{http_code}' https://mcp.workspaceport.com/healthz`.
+2. Back up the running binary to
+   `~/.local/share/devspace/bin-backup/cloudflared-<current-version>`.
+3. Download the release asset into a temporary directory, verify the archive
+   digest against the GitHub API asset `digest`, extract it, run
+   `./cloudflared --version`, and compare the extracted-binary sha256 with the
+   release-note checksum.
+4. Install atomically:
+   `install -m 0755 cloudflared ~/.local/bin/.cloudflared.new && mv ~/.local/bin/.cloudflared.new ~/.local/bin/cloudflared`.
+5. `launchctl kickstart -k "gui/$(id -u)/com.liz.cloudflared-devspace"`.
+6. Verify: the log shows four `Registered tunnel connection` lines, the metrics
+   endpoint reports `cloudflared_tunnel_ha_connections 4`, and the public
+   health check returns 200.
+
+### Rollback
+
+1. Disable watchdog self-healing for the duration of the rollback
+   (set `AUTORESTART=0` in `~/.local/state/devspace/watchdog.conf`, or stop the
+   watchdog LaunchAgent).
+2. Copy the backup binary back over `~/.local/bin/cloudflared`.
+3. `launchctl kickstart -k "gui/$(id -u)/com.liz.cloudflared-devspace"`.
+4. Verify four registered connections and a public 200
+   (`curl --noproxy '*'`), then restore the watchdog config.
+
+### Observing the tunnel
+
+- `~/.local/state/devspace/watchdog.log` — three-layer checks plus
+  host-pressure dimension (see `scripts/ops/devspace-tunnel-watchdog.sh`).
+- `http://127.0.0.1:20241/metrics` — `cloudflared_tunnel_ha_connections`,
+  `cloudflared_tunnel_total_requests`, `cloudflared_tunnel_request_errors`.
+- `~/.devspace/logs/cloudflared.err.log` — rotate at 100 MB via the watchdog
+  (copytruncate to `.1`).

@@ -1,0 +1,25 @@
+# DevSpace watchdog overrides — install to ~/.local/state/devspace/watchdog.conf
+# The watchdog sources this file from its state directory before applying
+# environment-variable overrides and built-in defaults.
+
+# --- tunnel self-healing -----------------------------------------------------
+AUTORESTART=1
+AUTORESTART_AFTER=3          # consecutive tunnel_down samples before restarting
+RESTART_COOLDOWN=900         # minimum seconds between cloudflared restarts
+REMIND_SECONDS=1800          # repeat a persistent alert at most this often
+
+# --- host pressure thresholds (WS-5) ----------------------------------------
+HOST_SATURATED_AFTER=2       # consecutive samples before alerting
+MEMORY_PRESSURE_AFTER=3      # consecutive samples before alerting
+EVENTLOOP_MAX_MS=5000        # a 5 s event-loop stall is already pathological
+LOAD_FACTOR=2                # load1 >= factor * cpuCount
+SWAP_PERCENT=80              # swapUsedPercent threshold
+MEMORY_AVAILABLE_MIB=1024    # available memory floor
+
+# --- optional cloudflared metrics (record-only degradation signal) ----------
+# METRICS_URL=http://127.0.0.1:20241/metrics
+# EXPECTED_CONNECTIONS=4
+
+# --- log rotation -----------------------------------------------------------
+LOG_ROTATE=1
+LOG_ROTATE_MAX_BYTES=104857600   # devspace.log and cloudflared.err.log
