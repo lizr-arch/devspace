@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { statfsSync } from "node:fs";
-import { cpus, freemem, totalmem } from "node:os";
+import { cpus, freemem, loadavg, totalmem } from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { Request, Response } from "express";
 
@@ -186,6 +187,16 @@ export interface ResourceHistoryPoint {
   systemCpuPercent: number;
   rssMiB: number;
   eventLoopP95Ms: number;
+  /** Longest event-loop stall observed in the sample window (ms). */
+  eventLoopMaxMs: number;
+  /** macOS swap usage ratio; null when unavailable or off-platform. */
+  swapUsedPercent: number | null;
+}
+
+export interface LoadAverageSnapshot {
+  one: number;
+  five: number;
+  fifteen: number;
 }
 
 export interface ProcessResourceSnapshot {
@@ -202,6 +213,13 @@ export interface ProcessResourceSnapshot {
   systemMemoryUsedPercent: number;
   systemMemoryAvailableMiB: number;
   systemMemoryTotalMiB: number;
+  /** "used" above derives from os.freemem(), which on macOS excludes reclaimable pages. */
+  memoryPressureFreePercent: number | null;
+  cpuCount: number;
+  loadAverage: LoadAverageSnapshot;
+  swapUsedMiB: number | null;
+  swapTotalMiB: number | null;
+  swapUsedPercent: number | null;
   rssGrowthMiBPerMinute: number;
   history: ResourceHistoryPoint[];
 }
@@ -209,6 +227,96 @@ export interface ProcessResourceSnapshot {
 interface CpuTimes {
   idle: number;
   total: number;
+}
+
+interface HostPressureSnapshot {
+  swapUsedMiB: number | null;
+  swapTotalMiB: number | null;
+  swapUsedPercent: number | null;
+  memoryPressureFreePercent: number | null;
+}
+
+/**
+ * External command sampling is intentionally amortised: sysctl/vm_stat are
+ * cheap but must not run on every 1 s tick.
+ */
+const HOST_PRESSURE_SAMPLE_INTERVAL = 5;
+const HOST_PRESSURE_COMMAND_TIMEOUT_MS = 2_000;
+
+let cachedHostPressure: HostPressureSnapshot = {
+  swapUsedMiB: null,
+  swapTotalMiB: null,
+  swapUsedPercent: null,
+  memoryPressureFreePercent: null,
+};
+let hostPressureSampleCount = 0;
+
+function readMacosSwapUsage(): {
+  usedMiB: number | null;
+  totalMiB: number | null;
+} {
+  if (process.platform !== "darwin") return { usedMiB: null, totalMiB: null };
+  try {
+    const raw = execFileSync("/usr/sbin/sysctl", ["-n", "vm.swapusage"], {
+      encoding: "utf8",
+      timeout: HOST_PRESSURE_COMMAND_TIMEOUT_MS,
+    }).trim();
+    const match = /total = ([\d.]+)M\s+used = ([\d.]+)M/.exec(raw);
+    if (!match) return { usedMiB: null, totalMiB: null };
+    const totalMiB = Number(match[1]);
+    const usedMiB = Number(match[2]);
+    if (!Number.isFinite(totalMiB) || !Number.isFinite(usedMiB)) {
+      return { usedMiB: null, totalMiB: null };
+    }
+    return { usedMiB, totalMiB };
+  } catch {
+    return { usedMiB: null, totalMiB: null };
+  }
+}
+
+function readMacosMemoryPressureFreePercent(): number | null {
+  if (process.platform !== "darwin") return null;
+  try {
+    const raw = execFileSync("/usr/bin/vm_stat", [], {
+      encoding: "utf8",
+      timeout: HOST_PRESSURE_COMMAND_TIMEOUT_MS,
+    });
+    const pageSize = /page size of (\d+) bytes/.exec(raw);
+    const free = /Pages free:\s+(\d+)\./.exec(raw);
+    const inactive = /Pages inactive:\s+(\d+)\./.exec(raw);
+    const speculative = /Pages speculative:\s+(\d+)\./.exec(raw);
+    if (!pageSize || !free || !inactive || !speculative) return null;
+    const reclaimablePages =
+      Number(free[1]) + Number(inactive[1]) + Number(speculative[1]);
+    const freeBytes = reclaimablePages * Number(pageSize[1]);
+    return roundTo(
+      Math.min(100, Math.max(0, (freeBytes / totalmem()) * 100)),
+      1,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function readHostPressure(): HostPressureSnapshot {
+  const swap = readMacosSwapUsage();
+  return {
+    swapUsedMiB: swap.usedMiB,
+    swapTotalMiB: swap.totalMiB,
+    swapUsedPercent:
+      swap.usedMiB !== null && swap.totalMiB !== null && swap.totalMiB > 0
+        ? roundTo((swap.usedMiB / swap.totalMiB) * 100, 1)
+        : null,
+    memoryPressureFreePercent: readMacosMemoryPressureFreePercent(),
+  };
+}
+
+function currentHostPressure(): HostPressureSnapshot {
+  if (hostPressureSampleCount % HOST_PRESSURE_SAMPLE_INTERVAL === 0) {
+    cachedHostPressure = readHostPressure();
+  }
+  hostPressureSampleCount += 1;
+  return cachedHostPressure;
 }
 
 export class ProcessResourceMonitor {
@@ -243,6 +351,12 @@ export class ProcessResourceMonitor {
         systemMemoryUsedPercent: 0,
         systemMemoryAvailableMiB: 0,
         systemMemoryTotalMiB: 0,
+        memoryPressureFreePercent: null,
+        cpuCount: cpus().length,
+        loadAverage: { one: 0, five: 0, fifteen: 0 },
+        swapUsedMiB: null,
+        swapTotalMiB: null,
+        swapUsedPercent: null,
         rssGrowthMiBPerMinute: 0,
         history: [],
       }
@@ -284,12 +398,16 @@ export class ProcessResourceMonitor {
     const eventLoopMaxMs = nanosecondsToMilliseconds(this.eventLoop.max);
     this.eventLoop.reset();
 
+    const pressure = currentHostPressure();
+    const load = loadavg();
     const point: ResourceHistoryPoint = {
       observedAt: new Date().toISOString(),
       processCpuPercent,
       systemCpuPercent,
       rssMiB: bytesToMiB(memory.rss),
       eventLoopP95Ms,
+      eventLoopMaxMs,
+      swapUsedPercent: pressure.swapUsedPercent,
     };
     this.history.push(point);
     if (this.history.length > RESOURCE_HISTORY_LIMIT) this.history.shift();
@@ -320,6 +438,16 @@ export class ProcessResourceMonitor {
       ),
       systemMemoryAvailableMiB: bytesToMiB(memoryAvailable),
       systemMemoryTotalMiB: bytesToMiB(memoryTotal),
+      memoryPressureFreePercent: pressure.memoryPressureFreePercent,
+      cpuCount: cpus().length,
+      loadAverage: {
+        one: roundTo(load[0] ?? 0, 2),
+        five: roundTo(load[1] ?? 0, 2),
+        fifteen: roundTo(load[2] ?? 0, 2),
+      },
+      swapUsedMiB: pressure.swapUsedMiB,
+      swapTotalMiB: pressure.swapTotalMiB,
+      swapUsedPercent: pressure.swapUsedPercent,
       rssGrowthMiBPerMinute:
         elapsedMilliseconds < 60_000
           ? 0

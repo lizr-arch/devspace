@@ -24,8 +24,26 @@ assert.equal(isLocalMonitorHost("127.0.0.1.evil.example"), false);
 assert.equal(isLocalMonitorHost(undefined), false);
 
 const resourceMonitor = new ProcessResourceMonitor();
-assert.equal(resourceMonitor.snapshot().processCpuPercent, 0);
-assert.equal(resourceMonitor.snapshot().systemCpuPercent, 0);
+const hostSnapshot = resourceMonitor.snapshot();
+assert.equal(hostSnapshot.processCpuPercent, 0);
+assert.equal(hostSnapshot.systemCpuPercent, 0);
+assert.equal(typeof hostSnapshot.cpuCount, "number");
+assert.ok(hostSnapshot.cpuCount >= 1);
+assert.equal(typeof hostSnapshot.loadAverage.one, "number");
+assert.equal(typeof hostSnapshot.loadAverage.five, "number");
+assert.equal(typeof hostSnapshot.loadAverage.fifteen, "number");
+assert.ok(
+  hostSnapshot.swapUsedPercent === null ||
+    typeof hostSnapshot.swapUsedPercent === "number",
+);
+assert.ok(
+  hostSnapshot.swapUsedMiB === null ||
+    typeof hostSnapshot.swapUsedMiB === "number",
+);
+assert.ok(
+  hostSnapshot.memoryPressureFreePercent === null ||
+    typeof hostSnapshot.memoryPressureFreePercent === "number",
+);
 resourceMonitor.close();
 
 const monitor = new LiveRequestMonitor();
@@ -73,6 +91,12 @@ const assessment = calculateLoadAssessment({
     systemMemoryUsedPercent: 60,
     systemMemoryAvailableMiB: 6_000,
     systemMemoryTotalMiB: 16_000,
+    memoryPressureFreePercent: 34,
+    cpuCount: 10,
+    loadAverage: { one: 1.5, five: 2, fifteen: 2.5 },
+    swapUsedMiB: 0,
+    swapTotalMiB: 0,
+    swapUsedPercent: 0,
     rssGrowthMiBPerMinute: 0,
     history: [],
   },
@@ -137,8 +161,14 @@ try {
     service: { name: string };
     requests: { mcp: { total: number } };
     load: { score: number; level: string };
-    eventLoop: { p95Ms: number };
-    system: { disk: { availableGiB: number } };
+    eventLoop: { p95Ms: number; maxMs: number };
+    system: {
+      disk: { availableGiB: number };
+      cpuCount: number;
+      loadAverage: { one: number; five: number; fifteen: number };
+      swapUsedPercent: number | null;
+      memoryPressureFreePercent: number | null;
+    };
     resourceHistory: unknown[];
     errors: {
       recent: Array<{ code: string; category: string }>;
@@ -151,7 +181,23 @@ try {
   assert.equal(typeof payload.load.score, "number");
   assert.match(payload.load.level, /^(idle|light|busy|saturated)$/);
   assert.equal(typeof payload.eventLoop.p95Ms, "number");
+  assert.equal(typeof payload.eventLoop.maxMs, "number");
   assert.equal(typeof payload.system.disk.availableGiB, "number");
+  assert.equal(typeof payload.system.cpuCount, "number");
+  assert.equal(typeof payload.system.loadAverage.one, "number");
+  assert.ok(
+    payload.system.swapUsedPercent === null ||
+      typeof payload.system.swapUsedPercent === "number",
+  );
+  assert.ok(
+    payload.system.memoryPressureFreePercent === null ||
+      typeof payload.system.memoryPressureFreePercent === "number",
+  );
+  assert.equal(
+    typeof (payload.resourceHistory[0] as { eventLoopMaxMs?: unknown })
+      .eventLoopMaxMs,
+    "number",
+  );
   assert.ok(payload.resourceHistory.length >= 1);
   assert.equal(payload.errors.persisted, true);
   assert.ok(Array.isArray(payload.jobs.recentFailures));

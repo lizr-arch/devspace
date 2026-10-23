@@ -12,7 +12,6 @@ import { RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { logEvent, requestPath, sessionIdPrefix } from "../logger.js";
 import { classifyMcpClient } from "../mcp-client-classification.js";
 import { SingleUserOAuthProvider } from "../oauth-provider.js";
-import { safeMonitorPath } from "../monitor-events.js";
 import {
   type LiveRequestMonitor,
   type ProcessResourceMonitor,
@@ -43,6 +42,7 @@ import {
   processMemorySnapshot,
   toolNamesFor,
 } from "./server-helpers.js";
+import { createRequestLoggingMiddleware } from "./request-logging.js";
 import {
   workspaceAppHtml,
   workspaceAppUiMetadata,
@@ -50,7 +50,7 @@ import {
   webGptTestBuildDirectoryUrl,
 } from "./server-workspace-app.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { mcpDiagnosticsSnapshot, recordMcpDiagnostic, requestTraceId, withMcpRequest } from "../mcp-diagnostics.js";
+import { mcpDiagnosticsSnapshot, recordMcpDiagnostic, withMcpRequest } from "../mcp-diagnostics.js";
 
 export function setupExpressRoutes(params: {
   app: express.Express;
@@ -80,68 +80,13 @@ export function setupExpressRoutes(params: {
     app.set("trust proxy", 1);
   }
 
-  app.use((req, res, next) => {
-    const requestId = randomUUID();
-    const inboundTraceId=req.header("x-devspace-trace-id");
-    const traceId=inboundTraceId&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(inboundTraceId)
-      ?inboundTraceId:requestTraceId();
-    const startedAt = performance.now();
-    const finishMonitoring = requestMonitor.begin(requestPath(req));
-    res.locals.requestId = requestId;
-    res.locals.traceId = traceId;
-    res.setHeader("X-DevSpace-Request-Id", requestId);
-    res.setHeader("X-DevSpace-Trace-Id", traceId);
-
-    let completed = false;
-    const completeRequest = () => {
-      if (completed) return;
-      completed = true;
-      finishMonitoring(res.statusCode, performance.now() - startedAt);
-      const path = requestPath(req);
-      if (
-        res.statusCode >= 400 &&
-        path !== "/monitor" &&
-        !path.startsWith("/monitor/") &&
-        path !== "/app-test" &&
-        !path.startsWith("/app-test/")
-      ) {
-        runtime.monitorEvents.record({
-          source: "http",
-          severity: res.statusCode >= 500 ? "error" : "warning",
-          code: `HTTP_${res.statusCode}`,
-          message: `${req.method} ${safeMonitorPath(path)} returned ${res.statusCode}`,
-          statusCode: res.statusCode,
-        });
-      }
-      if (!config.logging.requests) return;
-      if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
-
-      logEvent(config.logging, "info", "http_request", {
-        requestId,
-        method: req.method,
-        path,
-        status: res.statusCode,
-        durationMs: Math.round(performance.now() - startedAt),
-        ...requestLogFields(req, config),
-      });
-    };
-    res.once("finish", () => {
-      if (requestPath(req) === "/mcp") {
-        const errorClass = res.statusCode === 401 ? "AUTH_FAILURE"
-          : [400,404,405].includes(res.statusCode) ? "MCP_PROTOCOL_ERROR"
-          : res.statusCode >= 500 ? "HTTP_RESPONSE_ERROR" : undefined;
-        withMcpRequest({requestId,traceId},()=>recordMcpDiagnostic("response_written", { statusCode: res.statusCode, ...(errorClass ? {errorClass} : {}) }));
-      }
-      completeRequest();
-    });
-    res.once("close", () => {
-      if (!res.writableFinished) withMcpRequest({requestId,traceId},()=>recordMcpDiagnostic("client_abort", { statusCode: res.statusCode, errorClass: "CLIENT_ABORT" }));
-      completeRequest();
-    });
-    res.once("error", () => withMcpRequest({requestId,traceId},()=>recordMcpDiagnostic("http_response_error", { statusCode: res.statusCode, errorClass: "HTTP_RESPONSE_ERROR" })));
-
-    next();
-  });
+  app.use(
+    createRequestLoggingMiddleware({
+      config,
+      requestMonitor,
+      monitorEvents: runtime.monitorEvents,
+    }),
+  );
 
   app.get("/monitor", (req, res) => {
     if (!requireLocalMonitor(req, res)) return;
@@ -185,6 +130,16 @@ export function setupExpressRoutes(params: {
         memoryUsedPercent: resources.systemMemoryUsedPercent,
         memoryAvailableMiB: resources.systemMemoryAvailableMiB,
         memoryTotalMiB: resources.systemMemoryTotalMiB,
+        memoryAccounting:
+          process.platform === "darwin"
+            ? "freemem_excludes_inactive_speculative"
+            : "os_freemem",
+        memoryPressureFreePercent: resources.memoryPressureFreePercent,
+        cpuCount: resources.cpuCount,
+        loadAverage: resources.loadAverage,
+        swapUsedMiB: resources.swapUsedMiB,
+        swapTotalMiB: resources.swapTotalMiB,
+        swapUsedPercent: resources.swapUsedPercent,
         disk: diskSpaceSnapshot(config.stateDir),
       },
       eventLoop: {
