@@ -1,10 +1,29 @@
 # DevSpace 稳定性加固计划：WS-3 日志语义 / WS-4 隧道加固 / WS-5 主机可观测性
 
 - 文档日期：2026-10-24
-- 状态：**DRAFT — 待确认执行顺序、维护窗口与阈值后开工**
+- 状态：**IMPLEMENTED（2026-10-24）** — WS-3 / WS-5 / WS-4 已落地，已合并 `devspace` main 并完成构建与重启；24 h 隧道观察与主机告警误报复核待完成
 - 触发事故：2026-10-24 02:10–02:19（CST）ChatGPT Web 侧 DevSpace 连接器反复断线，watchdog 报 `tunnel_down`（公网 502 / 本地 200）与 `local_down`（http=000）
 - 关联证据目录：`~/.local/state/devspace/`、`~/.devspace/logs/`
 - 仓库基线：`devspace@df1539c`，生产 `dist/cli.js` sha256 `1265140c08386e8ccd0ee70d3936371705434e40646cad79a9f714e18fa74ccd`
+
+---
+
+## 0. 执行结果（2026-10-24，回填）
+
+执行顺序按本文档建议：WS-3 → WS-5 → WS-4 → 合并 main → 构建 → 重启。
+
+| 项目 | 结果 |
+| --- | --- |
+| 提交 | `63e9f41`（doctor 测试钉值维护）、`dc2b29e`（WS-3+WS-5）、`3427e57`（WS-4/watchdog 运维与文档） |
+| main | 已快进合并至 `3427e57`（本地领先 `origin/main`，**未推送**） |
+| 构建 | `npm run build` 通过；`dist/server/request-logging.js` 与 `dist/live-monitor.js` 含新逻辑 |
+| 重启 | `com.liz.devspace` 重启成功：新 bootId `e7f51179-7fae-47fd-be0c-1dcc82b1e1c3`，PID 35342 |
+| WS-3 活体验证 | 客户端中断资源流后日志出现 `status:499, aborted:true`，`/monitor/api` 的 errors/recentErrors +1 且出现 `HTTP_499` 事件 |
+| WS-5 活体验证 | `/monitor/api` 返回 swap/load/eventLoopMax 等新字段；watchdog 入库并在 launchd 下周期运行，`host_saturated`/`memory_pressure` 在真实高负载下均为真阳性，隧道自愈未误触发 |
+| WS-4 活体验证 | cloudflared 2026.10.3、4 条 ha 连接、公网 healthz 200、metrics 端点可用 |
+| 校验冲突 | 已澄清：Release 正文 checksum 是**解压后二进制**哈希，GitHub API `digest` 是**压缩包**哈希；升级对两者分别校验通过 |
+| 偏差 | 无需给启动脚本加 `--metrics`：cloudflared 默认已监听 `127.0.0.1:20241` |
+| 遗留 | 24 h 隧道观察；真实高负载下 1 h 告警节奏复核；ChatGPT 页面级复验；外部测试并发属运维决策 |
 
 ---
 
