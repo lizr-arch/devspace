@@ -27,7 +27,7 @@ assert.equal(
   TOOL_SCHEMA_REVISION,
   // Pinned deliberately: any change to the exposed tool surface must be an
   // explicit, reviewable bump of TOOL_SCHEMA_REVISION.
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-14+coach-runtime-dynamic-observe-v2+agent-efficiency-audit-v1+coach-realtime-001",
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-14+coach-runtime-dynamic-observe-v2+agent-efficiency-audit-v1+coach-realtime-001+coach-webgpt-loop-001+delivery-receipt-001+coach-tool-catalog-v037+coach-sidecar-scope-v1+coach-oneclick-v0310+coach-contract-001+codex-app-shared-001",
 );
 
 try {
@@ -413,7 +413,7 @@ async function testPublicExternalClientProbe(
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
     // Locked against the independently reviewed B1/B2/B3 + Sidecar + Coach
     // event-driven review surface present on current main.
-    assert.equal(probe.toolNames?.length, 82);
+    assert.equal(probe.toolNames?.length, 94);
     for (const approved of [
       "codex_agent_start", "codex_agent_status", "codex_agent_stop",
       "codex_agent_evidence", "codex_agent_source_diff",
@@ -652,12 +652,17 @@ async function testPublicExternalClientProbeReadOnly(): Promise<void> {
       "list_task_sessions",
       "wait_task",
       "poll_task",
+      "coach_delivery_receipt",
       "coach_sidecar_status",
       "codex_agent_observe",
       "codex_agent_status",
       "codex_agent_quarantine_status",
       "codex_agent_source_diff",
       "codex_agent_evidence",
+      "codex_app_shared_status",
+      "codex_app_turn_receipt",
+      "codex_app_thread_current",
+      "codex_app_thread_read",
       "coach_realtime_status",
       "get_agent_efficiency_audit",
     ]);
