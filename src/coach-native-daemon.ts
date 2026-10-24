@@ -177,6 +177,50 @@ export function resolveCodexBin(opts:{
  throw new NativeOutboundError("CODEX_BINARY_UNAVAILABLE","no trusted absolute Codex CLI executable found");
 }
 
+/** Trusted Node.js runtime used for the `<codex>` launcher shebang `#!/usr/bin/env node`. */
+export interface NodeRuntime {nodePath:string;nodeDir:string}
+
+export function resolveNodeRuntime(opts:{
+ execPath?:string;
+ candidates?:string[];
+ exists?:(path:string)=>boolean;
+ isExecutable?:(path:string)=>boolean;
+}={}):NodeRuntime{
+ const exists=opts.exists??((path:string)=>existsSync(path));
+ const isExecutable=opts.isExecutable??((path:string)=>{
+  try{const st=statSync(path);if(!st.isFile())return false;accessSync(path,1);return true;}catch{return false;}
+ });
+ const accepted=(path:string|undefined):path is string=>{
+  if(typeof path!=="string"||!path.startsWith("/"))return false;
+  try{return exists(path)&&isExecutable(path);}catch{return false;}
+ };
+ // The running DevSpace process's own Node is the primary trusted runtime; the
+ // absolute candidates cover the service/CLI install locations without ever
+ // consulting PATH.
+ const primary=opts.execPath??process.execPath;
+ if(accepted(primary))return{nodePath:primary,nodeDir:dirname(primary)};
+ const candidates=opts.candidates??[
+  join(homedir(),".hermes","node","bin","node"),
+  join(homedir(),".local","bin","node"),
+  "/opt/homebrew/bin/node",
+  "/usr/local/bin/node",
+ ];
+ for(const candidate of candidates){
+  if(accepted(candidate))return{nodePath:candidate,nodeDir:dirname(candidate)};
+ }
+ throw new NativeOutboundError("NODE_RUNTIME_UNAVAILABLE","no trusted absolute Node.js runtime found for the Codex launcher");
+}
+
+function assertNodeRuntime(runtime:{nodePath:string}|undefined):NodeRuntime{
+ if(!runtime)return resolveNodeRuntime();
+ if(typeof runtime.nodePath!=="string"||!runtime.nodePath.startsWith("/"))
+  throw new NativeOutboundError("NODE_RUNTIME_UNTRUSTED","node runtime must be an absolute path");
+ let valid=false;
+ try{const st=statSync(runtime.nodePath);valid=st.isFile();accessSync(runtime.nodePath,1);}catch{valid=false;}
+ if(!valid)throw new NativeOutboundError("NODE_RUNTIME_UNTRUSTED","node runtime is not an executable regular file");
+ return{nodePath:runtime.nodePath,nodeDir:dirname(runtime.nodePath)};
+}
+
 function makeRealRuntime():NativeOutboundRuntime{
  return {
   uid:process.getuid?.()??501,
@@ -407,6 +451,7 @@ export function buildNativeOutboundQueueCommand(input:{
  threadId:string;
  prompt:string;
  codexBin?:string;
+ nodeRuntime?:{nodePath:string};
 }):NativeOutboundQueueCommand{
  assertValidThread(input.threadId);
  if(!input.socketRealpath.startsWith("unix://")&&!input.socketRealpath.startsWith("/"))
@@ -418,10 +463,18 @@ export function buildNativeOutboundQueueCommand(input:{
   "--message",input.prompt,
  ];
  const codexBin=input.codexBin??resolveCodexBin();
+ const node=assertNodeRuntime(input.nodeRuntime);
+ // The Codex CLI is a JS launcher with `#!/usr/bin/env node`; launchd's
+ // PATH=/usr/bin:/bin:/usr/sbin:/sbin has no node, which produced the real
+ // `queue exited 127: env: node: No such file or directory`. Give the child a
+ // deterministic, explicit trusted PATH instead of inheriting an uncontrolled
+ // launchd/shell PATH. No bare/PATH lookup is ever used to resolve the binary.
+ const pathDirs=[node.nodeDir,dirname(codexBin),"/usr/bin","/bin","/usr/sbin","/sbin"];
+ const PATH=[...new Set(pathDirs)].join(":");
  return {
   codexBin,
   argv,
-  env:{...process.env,CODEX_HOME:input.codexHome},
+  env:{...process.env,PATH,CODEX_HOME:input.codexHome},
  };
 }
 

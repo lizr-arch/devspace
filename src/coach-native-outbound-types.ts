@@ -172,6 +172,8 @@ export interface NativeOutboundDeps {
  codexHome?:string;
  socketPath?:string;
  codexBin?:string;
+ /** Trusted Node.js runtime for the codex launcher (test seam; production resolves). */
+ nodeRuntime?:{nodePath:string};
  timeoutMs?:number;
  observeTimeoutMs?:number;
  pollMs?:number;

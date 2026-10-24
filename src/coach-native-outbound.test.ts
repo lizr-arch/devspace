@@ -8,8 +8,9 @@
  * Run: node --import tsx src/coach-native-outbound.test.ts
  * Success prints: NATIVE_OUTBOUND_TEST_PASS <n>
  */
+import {spawnSync} from "node:child_process";
 import assert from "node:assert/strict";
-import { resolveCodexBin } from "./coach-native-daemon.js";
+import { resolveCodexBin, resolveNodeRuntime } from "./coach-native-daemon.js";
 import {spawn} from "node:child_process";
 import {existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync,statSync,truncateSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
@@ -428,12 +429,13 @@ process.stdout.write(JSON.stringify(result));
     codexBinary?:{name:string;size:number|null;mtimeMs:number|null}};
    inspectDaemon?:(opts:{codexHome:string;socketPath:string})=>Promise<ReturnType<typeof fakeIdentity>>;
    verifyOwnership?:(input:{threadId:string;root:string;codexHome:string;socketPath:string})=>{threadId:string;root:string;status:string};
-   observeTimeoutMs?:number;pollMs?:number;
+   observeTimeoutMs?:number;pollMs?:number;nodeRuntime?:{nodePath:string};
   }={}):NativeOutboundDeps=>{
    let now=1_000_000;
    queueCalls=[];
    return {
     codexHome:sendHome,
+    ...(options.nodeRuntime?{nodeRuntime:options.nodeRuntime}:{}),
     observeTimeoutMs:options.observeTimeoutMs??200,
     pollMs:options.pollMs??5,
     inspectDaemon:options.inspectDaemon??(async()=>sendIdentity),
@@ -666,6 +668,51 @@ process.stdout.write(JSON.stringify(result));
    }
    // approved symlink still resolves (the real ~/.local/bin/codex is a symlink)
    assert.ok(resolveCodexBin().startsWith("/"));
+  });
+
+  await checkAsync("P0 queue env carries trusted Node PATH and exact --remote argv (launchd node shebang fix)",async()=>{
+   const codexBin=resolveCodexBin();
+   const command=buildNativeOutboundQueueCommand({codexHome:HOME,socketRealpath:"/private/tmp/codex-daemon-501/"+"a".repeat(64),
+    threadId:THREAD_A,prompt:"node path proof"});
+   assert.equal(command.codexBin,codexBin);
+   assert.deepEqual(command.argv.slice(0,4),["queue","--remote","unix:///private/tmp/codex-daemon-501/"+"a".repeat(64),"--thread"]);
+   const node=resolveNodeRuntime();
+   const dirs=new Set((command.env.PATH??"").split(":"));
+   assert.ok(dirs.has(node.nodeDir),"child PATH must contain the trusted node dir");
+   assert.ok(dirs.has("/usr/bin")&&dirs.has("/bin"),"child PATH keeps minimal system dirs");
+   assert.equal(command.env.CODEX_HOME,HOME);
+  });
+
+  await checkAsync("P0 real launchd-like smoke: codex --version works only with the child PATH (no env: node)",async()=>{
+   const codexBin=resolveCodexBin();
+   const command=buildNativeOutboundQueueCommand({codexHome:HOME,socketRealpath:"/private/tmp/codex-daemon-501/"+"a".repeat(64),
+    threadId:THREAD_A,prompt:"smoke"});
+   const good=spawnSync(command.codexBin,["--version"],{encoding:"utf8",timeout:10_000,env:command.env});
+   assert.equal(good.status,0,"trusted child PATH must run the codex launcher: "+String(good.stderr).slice(0,200));
+   assert.match(good.stdout||"",/codex-cli /);
+   const bad=spawnSync(command.codexBin,["--version"],{encoding:"utf8",timeout:10_000,
+    env:{...command.env,PATH:"/usr/bin:/bin:/usr/sbin:/sbin"}});
+   assert.ok(bad.status===127||/env: node/.test((bad.stderr||"")+(bad.stdout||"")),
+    "negative control must reproduce the launchd shebang failure");
+  });
+
+  await checkAsync("P0 node runtime resolution fails closed (no PATH fallback)",async()=>{
+   expectSyncReject(()=>resolveNodeRuntime({execPath:"/nope/node",candidates:["/also-nope"],exists:()=>false,isExecutable:()=>false}),"NODE_RUNTIME_UNAVAILABLE");
+   // relative exec paths are never accepted
+   expectSyncReject(()=>resolveNodeRuntime({execPath:"node",candidates:["relative/node"],exists:()=>true,isExecutable:()=>true}),"NODE_RUNTIME_UNAVAILABLE");
+   const real=resolveNodeRuntime();
+   assert.ok(real.nodePath.startsWith("/"));
+  });
+
+  await checkAsync("P0 untrusted node runtime => build throws, send BLOCKED with zero queue spawn",async()=>{
+   const codexBin=resolveCodexBin();
+   expectSyncReject(()=>buildNativeOutboundQueueCommand({codexHome:HOME,socketRealpath:"/private/tmp/codex-daemon-501/"+"a".repeat(64),
+    threadId:THREAD_A,prompt:"x",nodeRuntime:{nodePath:"node"}}),"NODE_RUNTIME_UNTRUSTED");
+   const deps=makeDeps({nodeRuntime:{nodePath:"node"}} as never);
+   const error=await expectReject(sendNativeOutbound({workspaceId:"ws-send",root:WORK,threadId:THREAD_A,operationId:"send-op-badnode",prompt:"bad node proof",stateDir:STATE_DIR,deps}),"NODE_RUNTIME_UNTRUSTED");
+   assert.ok(error instanceof NativeOutboundError);
+   assert.equal(queueCalls.length,0,"no CLI spawn with an untrusted node runtime");
+   assert.equal(readNativeOutboundReceipt(STATE_DIR,"ws-send","send-op-badnode")?.state,"BLOCKED");
   });
 
   await checkAsync("P0 fail-closed binary resolution: no candidate => CODEX_BINARY_UNAVAILABLE, zero spawn",async()=>{

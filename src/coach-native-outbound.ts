@@ -213,6 +213,7 @@ export async function sendNativeOutbound(input:{
   const command=buildNativeOutboundQueueCommand({
    codexHome,socketRealpath:secondIdentity.socketRealpath,threadId:input.threadId,prompt:input.prompt,
    ...(deps.codexBin?{codexBin:deps.codexBin}:{}),
+   ...(deps.nodeRuntime?{nodeRuntime:deps.nodeRuntime}:{}),
   });
   assertQueueArgv(command.argv);
 
