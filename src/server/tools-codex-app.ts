@@ -2,7 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { bindSharedThread, boundSharedThread, assertSharedThreadOwnership, createSharedThread, readSharedThread, sendSharedTurn, sharedTurnReceipt, sharedAppStatus, reconcileSharedTurn, AppBridgeError } from "../coach-app-server-bridge.js";
 import { taskReferenceSchema, verifyTask, sha256 } from "../coach-task-contract.js";
-import { readNativeCodexThread, openNativeCodexThread, verifyThreadWriterOwnership } from "../coach-codex-native-continuity.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
+import { readNativeCodexThread, openNativeCodexThread, verifyThreadWriterOwnership } from "../coach-codex-native-continuity.js";
+import { readNativeOutboundReceipt, sendNativeOutbound, verifyNativeAppOwnership } from "../coach-native-outbound.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
@@ -81,6 +82,18 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
     }
     return{content:[textBlock("Read authorized Codex thread "+threadId+" without taking its writer lock.")],
       structuredContent:{result:"Codex App thread read",...result}};
+  });
+  registerAppTool(server,"codex_app_native_receipt",{
+    title:"Read durable native outbound receipt",
+    description:"Read-only status of one exact native Codex queue delivery operation (PRESEND/ACCEPTED/TURN_OBSERVED/COMPLETED/REPLY_VERIFIED/UNCERTAIN/BLOCKED). Durable across processes; never resends the message.",
+    inputSchema:{workspaceId:id,operationId:id},
+    outputSchema:resultOutputSchema({receipt:z.unknown().optional(),error:z.unknown().optional()}),
+    _meta:{},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  },async({workspaceId,operationId})=>{
+    ctx.workspaces.getWorkspace(workspaceId);
+    const receipt=readNativeOutboundReceipt(ctx.config.stateDir,workspaceId,operationId);
+    return{content:[textBlock("Native outbound "+((receipt&&receipt.state)||"NOT_FOUND")+".")],
+      structuredContent:{result:"Native App outbound receipt",...(receipt?{receipt}:{})}};
   });
   if(ctx.config.readOnly)return;
   registerAppTool(server,"codex_app_thread_open",{
@@ -203,4 +216,41 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
       return{content:[textBlock("Native App REWORK turn completed on the pinned thread; independent review is still required.")],structuredContent:{result:"Native App REWORK completed",receipt}};
     }catch(error){ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"UNCERTAIN"});throw error;}
   });
+
+  registerAppTool(server,"codex_app_native_send",{
+    title:"Queue one message to an App-owned native Codex thread",
+    description:"Explicit exact threadId + unique operationId required. Preconditions: pinned workspace binding, App GUI present, writer held by the one managed daemon, exact canonical socket. Uses ONLY `codex queue --remote unix://<canonical>`; exit 0 records ACCEPTED, not completion. Cross-process ledger makes duplicate operationIds impossible. Never launches/kills App or daemon; UNCERTAIN is never retried.",
+    inputSchema:{workspaceId:id,threadId,operationId:id,prompt:z.string().min(1).max(10000),timeoutMs:z.number().int().min(3000).max(3600000).optional()},
+    outputSchema:resultOutputSchema({receipt:z.unknown().optional(),error:z.unknown().optional()}),
+    _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
+  },async({workspaceId,threadId,operationId,prompt,timeoutMs})=>{
+    const workspace=ctx.workspaces.getWorkspace(workspaceId);
+    assertSharedThreadOwnership(ctx.config.stateDir,workspaceId,workspace.root,threadId);
+    verifyNativeAppOwnership({threadId,root:workspace.root});
+    const receipt=await sendNativeOutbound({workspaceId,root:workspace.root,threadId,operationId,prompt,
+      stateDir:ctx.config.stateDir,...(timeoutMs?{timeoutMs}:{})});
+    return{content:[textBlock("Native queue delivery "+receipt.state+" for thread "+threadId+"; this is not execution or review approval.")],
+      structuredContent:{result:"Native App outbound receipt",receipt}};
+  });
+  registerAppTool(server,"codex_app_native_rework",{
+    title:"Queue bounded REWORK to the same native App thread",
+    description:"After a recorded Web GPT REWORK verdict on an exact native event, queues one new operation to that same pinned native thread under the same frozen TASK (max 3 cycles). Native queue only; App GUI and single managed writer required; never starts CLI or a new thread.",
+    inputSchema:{workspaceId:id,eventId:z.string().regex(/^app:[a-f0-9]{64}$/),operationId:id,prompt:z.string().min(1).max(8000),task:taskReferenceSchema},
+    outputSchema:resultOutputSchema({receipt:z.unknown().optional(),error:z.unknown().optional()}),
+    _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
+  },async({workspaceId,eventId,operationId,prompt,task})=>{
+    const workspace=ctx.workspaces.getWorkspace(workspaceId);verifyTask(workspace.root,workspaceId,task);
+    const prior=ctx.coachReviewEvents.getAppEventTask(workspaceId,eventId);
+    if(!prior||prior.decision!=="REWORK")throw new Error("CODEX_APP_REWORK_NOT_AUTHORIZED");
+    assertSharedThreadOwnership(ctx.config.stateDir,workspaceId,workspace.root,prior.thread_id);
+    if(prior.task_id!==task.taskId||prior.task_sha256!==task.sha256)throw new Error("CODEX_APP_REWORK_TASK_MISMATCH");
+    if(ctx.coachReviewEvents.countAppReworks(workspaceId,task.taskId,task.sha256)>=3)throw new Error("CODEX_APP_REWORK_LIMIT");
+    const effectivePrompt="Authorized frozen development TASK: "+task.taskPath+"\nExpected SHA-256: "+task.sha256+
+      "\nRead this exact TASK file and comply with its full scope and acceptance criteria. Do not modify .devspace control files.\n"+prompt;
+    verifyNativeAppOwnership({threadId:prior.thread_id,root:workspace.root});
+    const receipt=await sendNativeOutbound({workspaceId,root:workspace.root,threadId:prior.thread_id,operationId,prompt:effectivePrompt,stateDir:ctx.config.stateDir});
+    return{content:[textBlock("Native REWORK delivery "+receipt.state+" on the same pinned thread; independent review is still required.")],
+      structuredContent:{result:"Native App REWORK receipt",receipt}};
+  });
 }
+

@@ -24,13 +24,13 @@ async function pair(readOnly:boolean){
 try{
  const ro=await pair(true);
  const namesRo=(await ro.client.listTools()).tools.map(t=>t.name).sort();
- assert.deepEqual(namesRo,["codex_app_shared_status","codex_app_thread_current","codex_app_thread_read","codex_app_turn_receipt"].sort());
+ assert.deepEqual(namesRo,["codex_app_shared_status","codex_app_thread_current","codex_app_thread_read","codex_app_turn_receipt","codex_app_native_receipt"].sort());
  const blocked=await ro.client.callTool({name:"codex_app_thread_read",arguments:{workspaceId:"other_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf"}});
  assert.equal(blocked.isError,true);
  await ro.client.close();await ro.server.close();
  const rw=await pair(false);
  const namesRw=(await rw.client.listTools()).tools.map(t=>t.name);
- for(const name of ["codex_app_thread_bind","codex_app_thread_create","codex_app_thread_open","codex_app_thread_send"])
+ for(const name of ["codex_app_thread_bind","codex_app_thread_create","codex_app_thread_open","codex_app_thread_send","codex_app_native_send","codex_app_native_rework"])
    assert.ok(namesRw.includes(name));
  assert.ok(namesRw.includes("codex_app_review"));assert.ok(namesRw.includes("codex_app_thread_rework"));
  // App-native ownership safety: no new invisible thread and no competing
