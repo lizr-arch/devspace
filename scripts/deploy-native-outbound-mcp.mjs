@@ -68,7 +68,7 @@ function ensurePlistEnv(key, value, backupPath) {
     if (insert.status !== 0) throw new Error("failed to set LaunchAgent environment");
   }
 }
-function waitLive(timeoutMs = 60_000) {
+function waitLive(timeoutMs = 240_000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
@@ -160,7 +160,10 @@ function promote(stagedDir) {
   ensurePlistEnv("DEVSPACE_NATIVE_EVENT_SNAPSHOT_PATH", "/Users/liz/agy/dsh-wake-e2e/state/coach-review-events.sqlite", plistBackup);
   const boot = restartService();
   if (boot.status !== 0) {
-    renameSync(join(PROD, "dist"), join(stagedDir, "rejected-dist"));
+    // Stop the failed/crash-looping job BEFORE touching dist again: swapping
+    // the artifact under a booting process makes lazy imports fail with ENOENT.
+    run("/bin/launchctl", ["bootout", `gui/${process.getuid()}/${LABEL}`], { timeout: 20_000 });
+    if (existsSync(join(PROD, "dist"))) renameSync(join(PROD, "dist"), join(stagedDir, "rejected-dist-" + stamp));
     renameSync(backup, join(PROD, "dist"));
     if (existsSync(plistBackup)) cpSync(plistBackup, plistPath());
     const rollback = restartService();
