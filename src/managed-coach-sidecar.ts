@@ -12,6 +12,24 @@ import { AgentObserverStore } from "./agent-observer.js";
 const SERVICE_NAME = "coach-feed";
 const PAIRING_EXTENSION_ID = "bapcebjlgncogfpgbhllioaichcldkbl";
 const MAX_EVENTS = 50;
+type FeedCursor={at:string;kind:"c"|"a";id:string};
+const FEED_CURSOR=/^[A-Za-z0-9_-]{8,400}$/;
+function decodeFeedCursor(raw:string):FeedCursor {
+  if(!FEED_CURSOR.test(raw))throw new Error("INVALID_FEED_CURSOR");
+  const data=JSON.parse(Buffer.from(raw,"base64url").toString("utf8")) as Record<string,unknown>;
+  if(!data||Object.keys(data).sort().join(",")!=="at,id,kind,v"||data.v!==1||
+     typeof data.at!=="string"||data.at.length<1||data.at.length>64||
+     (data.kind!=="c"&&data.kind!=="a")||typeof data.id!=="string"||
+     (data.kind==="c"?!/^[1-9][0-9]{0,15}$/.test(data.id):!/^[A-Za-z0-9:._-]{1,128}$/.test(data.id)))
+    throw new Error("INVALID_FEED_CURSOR");
+  const cursor:FeedCursor={at:data.at,kind:data.kind as "c"|"a",id:data.id};
+  if(Buffer.from(JSON.stringify({v:1,...cursor})).toString("base64url")!==raw)
+    throw new Error("INVALID_FEED_CURSOR");
+  return cursor;
+}
+function encodeFeedCursor(cursor:FeedCursor):string{
+  return Buffer.from(JSON.stringify({v:1,...cursor})).toString("base64url");
+}
 const EXTENSION_ID = /^[a-p]{32}$/;
 
 type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string; authorizedWorkspaceIds?:string[] };
@@ -266,9 +284,17 @@ export class ManagedCoachSidecar {
     }
     const feedUrl=req.url?new URL(req.url,"http://127.0.0.1"):null;
     if(feedUrl?.pathname!=="/events")return send(res,404,{error:"not found"},cors);
-    if([...feedUrl.searchParams.keys()].some(k=>k!=="workspaceId")||
-       feedUrl.searchParams.getAll("workspaceId").length>1)
+    if([...feedUrl.searchParams.keys()].some(k=>!["workspaceId","cursor","limit"].includes(k))||
+       ["workspaceId","cursor","limit"].some(k=>feedUrl.searchParams.getAll(k).length>1))
       return send(res,400,{error:"invalid feed selector"},cors);
+    const rawLimit=feedUrl.searchParams.get("limit");
+    if(rawLimit!==null&&!/^[1-9][0-9]?$/.test(rawLimit))
+      return send(res,400,{error:"invalid feed limit"},cors);
+    const limit=rawLimit===null?MAX_EVENTS:Number(rawLimit);
+    if(limit<1||limit>MAX_EVENTS)return send(res,400,{error:"invalid feed limit"},cors);
+    let cursor:FeedCursor|null=null;
+    try{const raw=feedUrl.searchParams.get("cursor");if(raw!==null)cursor=decodeFeedCursor(raw);}
+    catch{return send(res,400,{error:"invalid feed cursor"},cors);}
     // No selector returns only the explicitly authorized union. A caller may
     // also request one selected workspace for bounded per-workspace recovery.
     const selected=feedUrl.searchParams.get("workspaceId");
@@ -288,20 +314,45 @@ export class ManagedCoachSidecar {
           "and not exists (select 1 from review_decisions r where r.event_id = e.event_id)";
       const total = entry.database.prepare("select count(*) as count " + pendingQuery)
         .get(...(native ? ids : [])) as { count: number };
+      const coachAfter=cursor
+        ?cursor.kind==="c"
+          ?" and (e.created_at > ? or (e.created_at = ? and e.event_id > ?))"
+          :" and e.created_at > ?"
+        :"";
+      const coachArgs=cursor?(cursor.kind==="c"
+        ?[cursor.at,cursor.at,Number(cursor.id)]:[cursor.at]):[];
       const rows = entry.database.prepare(
         "select e.event_id as event_id, " +
         (native?"e.workspace_id as workspace_id, ":"") +
         "substr(cast(e.operation_id as text),1,128) as operation_id, " +
         "e.event_type, substr(cast(e.created_at as text),1,64) as created_at " +
-        pendingQuery + " order by e.created_at asc,e.event_id asc limit 50",
-      ).all(...(native ? ids : [])) as EventRow[];
+        pendingQuery+coachAfter+" order by e.created_at asc,e.event_id asc limit ?",
+      ).all(...(native ? ids : []),...coachArgs,limit+1) as EventRow[];
       const hasAppEvents=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='codex_app_review_events'").get());
       const appPendingCount=hasAppEvents?(entry.database.prepare("SELECT count(*) AS count FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id IN ("+ids.map(()=>"?").join(",")+") AND d.event_id IS NULL").get(...ids) as {count:number}).count:0;
-      const appRows=hasAppEvents?entry.database.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,'CODEX_APP_READY_FOR_GPT_REVIEW' AS event_type,e.thread_id,e.turn_id,e.evidence_sha256,e.created_at FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id IN ("+ids.map(()=>"?").join(",")+") AND d.event_id IS NULL ORDER BY e.created_at LIMIT 50").all(...ids) as Array<EventRow&{thread_id:string;turn_id:string;evidence_sha256:string}>:[];
-      const combined=[...rows.map(row=>({row,app:undefined as undefined|{thread_id:string;turn_id:string;evidence_sha256:string}})),...appRows.map(row=>({row,app:row}))].sort((a,b)=>String(a.row.created_at).localeCompare(String(b.row.created_at))).slice(0,MAX_EVENTS);
+      const appAfter=cursor
+        ?cursor.kind==="a"
+          ?" AND (e.created_at > ? OR (e.created_at = ? AND e.event_id > ?))"
+          :" AND e.created_at >= ?"
+        :"";
+      const appArgs=cursor?(cursor.kind==="a"
+        ?[cursor.at,cursor.at,cursor.id]:[cursor.at]):[];
+      const appRows=hasAppEvents?entry.database.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,'CODEX_APP_READY_FOR_GPT_REVIEW' AS event_type,e.thread_id,e.turn_id,e.evidence_sha256,e.created_at FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id IN ("+ids.map(()=>"?").join(",")+") AND d.event_id IS NULL"+appAfter+" ORDER BY e.created_at,e.event_id LIMIT ?").all(...ids,...appArgs,limit+1) as Array<EventRow&{thread_id:string;turn_id:string;evidence_sha256:string}>:[];
+      const combined=[...rows.map(row=>({row,kind:"c" as const,app:undefined as undefined|{thread_id:string;turn_id:string;evidence_sha256:string}})),...appRows.map(row=>({row,kind:"a" as const,app:row}))].sort((a,b)=>{
+        const at=String(a.row.created_at),bt=String(b.row.created_at);
+        if(at!==bt)return at<bt?-1:1;
+        if(a.kind!==b.kind)return a.kind==="c"?-1:1;
+        return a.kind==="c"?Number(a.row.event_id)-Number(b.row.event_id)
+          :String(a.row.event_id).localeCompare(String(b.row.event_id),"en");
+      });
+      const hasMore=combined.length>limit;
+      const page=combined.slice(0,limit);
+      const last=page[page.length-1];
       return send(res,200,{
         pending_count:total.count+appPendingCount,
-        events:combined.map(({row,app})=>{
+        has_more:hasMore,
+        next_cursor:hasMore&&last?encodeFeedCursor({at:String(last.row.created_at),kind:last.kind,id:String(last.row.event_id)}):null,
+        events:page.map(({row,app})=>{
           if(app)return {...row,event_type:"CODEX_APP_READY_FOR_GPT_REVIEW",app_kind:"native_chatgpt_app_codex",thread_id:app.thread_id,turn_id:app.turn_id,evidence_sha256:app.evidence_sha256};
           const evidence=hasEvidence?entry.database.prepare("SELECT packet_json,evidence_sha256 FROM coach_review_evidence WHERE event_id=?").get(row.event_id) as {packet_json:string;evidence_sha256:string}|undefined:undefined;
           let report;

@@ -1,0 +1,44 @@
+import assert from "node:assert/strict";
+import {mkdtempSync,mkdirSync,rmSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import Database from "better-sqlite3";
+import {ManagedCoachSidecar} from "./managed-coach-sidecar.js";
+import {JobResourceLocks} from "./job-resource-locks.js";
+
+const root=mkdtempSync(join(tmpdir(),"coach-feed-pagination-"));
+const workspace=join(root,"workspace");
+mkdirSync(join(workspace,".devspace"),{recursive:true});
+const db=new Database(join(workspace,".devspace","coach_loop_spike.sqlite"));
+db.exec("CREATE TABLE events(event_id INTEGER PRIMARY KEY,operation_id TEXT,event_type TEXT,created_at TEXT); CREATE TABLE review_decisions(event_id INTEGER PRIMARY KEY);");
+const insert=db.prepare("INSERT INTO events VALUES(?,?,?,?)");
+for(let i=1;i<=67;i++)insert.run(i,"case-"+i,"READY_FOR_GPT_REVIEW",new Date(Date.UTC(2026,0,1,0,0,i)).toISOString());
+db.close();
+const server=new ManagedCoachSidecar(new JobResourceLocks());
+let checks=0;
+try {
+ const port=await new Promise<number>((resolve,reject)=>{import("node:net").then(({createServer})=>{const s=createServer();s.once("error",reject);s.listen(0,"127.0.0.1",()=>{const address=s.address();const p=address&&typeof address!=="string"?address.port:null;if(typeof p!=="number")return reject(Error("INVALID_PORT"));s.close(()=>resolve(p));});});});
+ const started=await server.start({workspaceId:"scope1",workspaceRoot:workspace,port});
+ const base="http://127.0.0.1:"+port;
+ const headers={Authorization:"Bearer "+started.token};
+ const request=async (q:string)=>{const r=await fetch(base+q,{headers});let json=await r.json();return {code:r.status,json}};
+ assert.equal((await request("/events?limit=0")).code,400);checks++;
+ assert.equal((await request("/events?limit=51")).code,400);checks++;
+ assert.equal((await request("/events?cursor=bad")).code,400);checks++;
+ assert.equal((await request("/events?limit=50&limit=50")).code,400);checks++;
+ assert.equal((await request("/events?workspaceId=other")).code,403);checks++;
+ assert.equal((await fetch(base+"/events?limit=50")).status,401);checks++;
+ const first=await request("/events?limit=50");
+ assert.equal(first.code,200);assert.equal(first.json.pending_count,67);assert.equal(first.json.events.length,50);
+ assert.equal(first.json.has_more,true);assert.equal(typeof first.json.next_cursor,"string");checks++;
+ const second=await request("/events?limit=50&cursor="+encodeURIComponent(first.json.next_cursor));
+ assert.equal(second.code,200);assert.equal(second.json.events.length,17);assert.equal(second.json.has_more,false);assert.equal(second.json.next_cursor,null);checks++;
+ const merged=[...first.json.events,...second.json.events];
+ assert.equal(new Set(merged.map(x=>x.event_id)).size,67);
+ assert.deepEqual(merged.map(x=>x.event_id),Array.from({length:67},(_,i)=>i+1));checks++;
+ const legacy=await request("/events");
+ assert.equal(legacy.code,200);assert.equal(legacy.json.events.length,50);assert.equal(legacy.json.has_more,true);checks++;
+ const forged=Buffer.from(JSON.stringify({v:1,at:"2026-01-01",kind:"c",id:"01"})).toString("base64url");
+ assert.equal((await request("/events?cursor="+forged)).code,400);checks++;
+ console.log("COACH_PAGINATED_FEED_PASS "+checks+" CHECKS 67/67 unique, legacy and authorization gates");
+} finally {await server.close();rmSync(root,{recursive:true,force:true});}
