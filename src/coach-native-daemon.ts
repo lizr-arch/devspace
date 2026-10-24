@@ -6,7 +6,7 @@
  */
 import {spawnSync} from "node:child_process";
 import {randomBytes} from "node:crypto";
-import {existsSync,lstatSync,readFileSync,readlinkSync,realpathSync,statSync,type Stats} from "node:fs";
+import {accessSync,existsSync,lstatSync,readFileSync,readlinkSync,realpathSync,statSync,type Stats} from "node:fs";
 import {homedir} from "node:os";
 import {connect} from "node:net";
 import {dirname,join,sep} from "node:path";
@@ -142,12 +142,39 @@ function statLike(stat:Stats):FileStatLike{
  * ENOENT was discarded into an opaque CLI_UNCERTAIN — the real cause of the
  * r2 native send failure.
  */
-export function resolveCodexBin():string{
- const override=process.env.CODEX_BIN;
- if(override)return override;
- const candidates=[join(homedir(),".local","bin","codex"),"/opt/homebrew/bin/codex","/usr/local/bin/codex"];
- for(const candidate of candidates){try{if(existsSync(candidate))return candidate;}catch{}}
- return "codex";
+export function resolveCodexBin(opts:{
+ env?:NodeJS.ProcessEnv;
+ candidates?:string[];
+ exists?:(path:string)=>boolean;
+ isExecutable?:(path:string)=>boolean;
+}={}):string{
+ const env=opts.env??process.env;
+ const exists=opts.exists??((path:string)=>existsSync(path));
+ const isExecutable=opts.isExecutable??((path:string)=>{
+  try{const st=statSync(path);if(!st.isFile())return false;accessSync(path,1);return true;}catch{return false;}
+ });
+ const assertAbsolute=(value:string,code:string,detail:string)=>{
+  if(!value.startsWith("/"))throw new NativeOutboundError(code,detail);
+ };
+ const override=env.CODEX_BIN;
+ if(override){
+  // Explicit overrides must be trusted absolute executables. A relative value
+  // would silently reintroduce PATH lookup (the r2 incident).
+  assertAbsolute(override,"CODEX_BIN_OVERRIDE_NOT_ABSOLUTE","CODEX_BIN override must be an absolute path");
+  if(!exists(override)||!isExecutable(override))
+   throw new NativeOutboundError("CODEX_BIN_OVERRIDE_INVALID","CODEX_BIN override is not an executable regular file");
+  return override;
+ }
+ const candidates=opts.candidates??[join(homedir(),".local","bin","codex"),"/opt/homebrew/bin/codex","/usr/local/bin/codex"];
+ for(const candidate of candidates){
+  if(typeof candidate!=="string"||!candidate.startsWith("/"))continue;
+  try{
+   if(exists(candidate)&&isExecutable(candidate))return candidate;
+  }catch{}
+ }
+ // Fail closed: never fall back to a bare PATH name. A missing trusted binary
+ // must block BEFORE any spawn (zero CLI calls, terminal BLOCKED).
+ throw new NativeOutboundError("CODEX_BINARY_UNAVAILABLE","no trusted absolute Codex CLI executable found");
 }
 
 function makeRealRuntime():NativeOutboundRuntime{

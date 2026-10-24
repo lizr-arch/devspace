@@ -631,6 +631,12 @@ process.stdout.write(JSON.stringify(result));
    assert.equal(receipt.queueDiagnostic?.errnoCode,"ENOENT");
    assert.equal(receipt.queueDiagnostic?.codexBinary?.name,"codex");
    assert.equal(queueCalls.length,1);
+   // binary disappearing between resolution and spawn must stay terminal: the
+   // same operationId returns the persisted UNCERTAIN receipt without another CLI call.
+   const again=await sendNativeOutbound({workspaceId:"ws-send",root:WORK,threadId:THREAD_A,operationId:"send-op-enoent",prompt,stateDir:STATE_DIR,deps});
+   assert.equal(again.state,"UNCERTAIN");
+   assert.equal(again.uncertaintyReason,"QUEUE_BINARY_NOT_FOUND");
+   assert.equal(queueCalls.length,1,"uncertain operation must never be retried");
   });
 
   await checkAsync("P0 null status with no signal/error => QUEUE_NULL_STATUS (falsifiable, never silent)",async()=>{
@@ -654,10 +660,42 @@ process.stdout.write(JSON.stringify(result));
    }finally{
     if(saved!==undefined)process.env.CODEX_BIN=saved;
    }
-   process.env.CODEX_BIN="/tmp/explicit-codex";
-   try{assert.equal(resolveCodexBin(),"/tmp/explicit-codex");}finally{
+   process.env.CODEX_BIN="/usr/bin/true";
+   try{assert.equal(resolveCodexBin(),"/usr/bin/true");}finally{
     if(saved===undefined)delete process.env.CODEX_BIN;else process.env.CODEX_BIN=saved;
    }
+   // approved symlink still resolves (the real ~/.local/bin/codex is a symlink)
+   assert.ok(resolveCodexBin().startsWith("/"));
+  });
+
+  await checkAsync("P0 fail-closed binary resolution: no candidate => CODEX_BINARY_UNAVAILABLE, zero spawn",async()=>{
+   const error=expectSyncReject(()=>resolveCodexBin({env:{},candidates:["/nope/codex","/also-nope"],exists:()=>false,isExecutable:()=>false}),"CODEX_BINARY_UNAVAILABLE");
+   assert.ok(error instanceof NativeOutboundError);
+   // non-absolute candidates are ignored rather than PATH-resolved
+   expectSyncReject(()=>resolveCodexBin({env:{},candidates:["codex","/usr/bin/true"],exists:()=>true,isExecutable:()=>false}),"CODEX_BINARY_UNAVAILABLE");
+  });
+
+  await checkAsync("P0 fail-closed binary resolution: CODEX_BIN override must be absolute + executable",async()=>{
+   expectSyncReject(()=>resolveCodexBin({env:{CODEX_BIN:"codex"},candidates:["/usr/bin/true"],exists:()=>true,isExecutable:()=>true}),"CODEX_BIN_OVERRIDE_NOT_ABSOLUTE");
+   expectSyncReject(()=>resolveCodexBin({env:{CODEX_BIN:"relative/codex"},candidates:["/usr/bin/true"],exists:()=>true,isExecutable:()=>true}),"CODEX_BIN_OVERRIDE_NOT_ABSOLUTE");
+   expectSyncReject(()=>resolveCodexBin({env:{CODEX_BIN:"/missing/codex"},exists:()=>false,isExecutable:()=>false}),"CODEX_BIN_OVERRIDE_INVALID");
+   expectSyncReject(()=>resolveCodexBin({env:{CODEX_BIN:"/etc/hosts"},exists:()=>true,isExecutable:()=>false}),"CODEX_BIN_OVERRIDE_INVALID");
+   assert.equal(resolveCodexBin({env:{CODEX_BIN:"/opt/good/codex"},exists:()=>true,isExecutable:()=>true}),"/opt/good/codex");
+  });
+
+  await checkAsync("P0 send with relative CODEX_BIN => BLOCKED receipt, zero CLI spawn, no fallback path",async()=>{
+   const saved=process.env.CODEX_BIN;
+   process.env.CODEX_BIN="codex";
+   try{
+    const deps=makeDeps({});
+    const error=await expectReject(sendNativeOutbound({workspaceId:"ws-send",root:WORK,threadId:THREAD_A,operationId:"send-op-badbin",prompt:"bad binary proof",stateDir:STATE_DIR,deps}),"CODEX_BIN_OVERRIDE_NOT_ABSOLUTE");
+    assert.ok(error instanceof NativeOutboundError);
+   }finally{
+    if(saved===undefined)delete process.env.CODEX_BIN;else process.env.CODEX_BIN=saved;
+   }
+   assert.equal(queueCalls.length,0,"no CLI spawn before a trusted absolute binary is resolved");
+   const receipt=readNativeOutboundReceipt(STATE_DIR,"ws-send","send-op-badbin");
+   assert.equal(receipt?.state,"BLOCKED");
   });
 
   await checkAsync("G10 exit0 unparseable stdout => ACCEPTED then UNCERTAIN, never retried",async()=>{
