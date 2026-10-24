@@ -14,6 +14,13 @@
  * reported as UNKNOWN.
  */
 import {spawnSync} from "node:child_process";
+import {inspectCommand,isLsofNoMatch,LSOF_LOCK_MAX_BUFFER,PS_COMMAND_MAX_BUFFER} from "./coach-native-inspection.js";
+/** Attach the redacted inspection diagnostic without changing the public error code. */
+function inspectionError(code:string,diagnostic:string):AppBridgeError{
+ const error=new AppBridgeError(code);
+ (error as AppBridgeError&{diagnostic?:string}).diagnostic=diagnostic;
+ return error;
+}
 import {lstatSync,readFileSync,readdirSync,realpathSync,existsSync} from "node:fs";
 import {homedir} from "node:os";
 import {join,basename,resolve,sep} from "node:path";
@@ -156,17 +163,22 @@ export function readNativeCodexThread(input:{threadId:string;root:string;codexHo
 }
 
 export function listProcesses():ProcessInfo[]{
- const ps=spawnSync("/bin/ps",["-axo","pid=,ppid=,uid=,command="],{encoding:"utf8",timeout:5000,maxBuffer:2_000_000});
- if(ps.error||ps.status!==0||typeof ps.stdout!=="string")throw new AppBridgeError("CODEX_NATIVE_PROCESS_INSPECTION_FAILED");
+ const ps=inspectCommand("ps_command","/bin/ps",["-axo","pid=,ppid=,uid=,command=","-ww"],{maxBuffer:PS_COMMAND_MAX_BUFFER});
+ if(!ps.ok||ps.status!==0)throw inspectionError("CODEX_NATIVE_PROCESS_INSPECTION_FAILED",ps.diagnostic);
  return ps.stdout.split("\n").map(line=>{
   const m=/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
   return m?{pid:Number(m[1]),ppid:Number(m[2]),uid:Number(m[3]),cmd:m[4]}:null;
  }).filter((v):v is ProcessInfo=>!!v);
 }
 function lockHolders(lockPath:string):number[]{
- const listing=spawnSync("/usr/sbin/lsof",["-nP","-F","p",lockPath],{encoding:"utf8",timeout:5000,maxBuffer:16000});
- if(listing.error||listing.status===null||listing.status===undefined||listing.status>1)
-  throw new AppBridgeError("CODEX_NATIVE_PROCESS_INSPECTION_FAILED");
+ const listing=inspectCommand("lsof_lock","/usr/sbin/lsof",["-nP","-F","p",lockPath],{maxBuffer:LSOF_LOCK_MAX_BUFFER});
+ if(listing.errorCode||listing.status===null)
+  throw inspectionError("CODEX_NATIVE_PROCESS_INSPECTION_FAILED",listing.diagnostic);
+ if(listing.status===1){
+  if(!isLsofNoMatch(listing))throw inspectionError("CODEX_NATIVE_PROCESS_INSPECTION_FAILED",listing.diagnostic);
+  return [];
+ }
+ if(listing.status!==0)throw inspectionError("CODEX_NATIVE_PROCESS_INSPECTION_FAILED",listing.diagnostic);
  const owners=[...(listing.stdout||"").matchAll(/^p(\d+)$/gm)].map(m=>Number(m[1]));
  return [...new Set(owners.filter(pid=>Number.isInteger(pid)&&pid>0))].sort((a,b)=>a-b);
 }

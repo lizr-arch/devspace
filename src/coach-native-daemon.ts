@@ -10,6 +10,7 @@ import {lstatSync,readFileSync,readlinkSync,realpathSync,statSync,type Stats} fr
 import {connect} from "node:net";
 import {dirname,join,sep} from "node:path";
 import {findCodexRollout} from "./coach-codex-native-continuity.js";
+import {inspectCommand,isLsofNoMatch,LSOF_LOCK_MAX_BUFFER,LSOF_TEXT_MAX_BUFFER,PS_COMMAND_MAX_BUFFER,PS_COMM_MAX_BUFFER} from "./coach-native-inspection.js";
 import {
  type FileStatLike,
  type ManagedDaemonIdentity,
@@ -53,9 +54,10 @@ function parsePsField(out:string):Map<number,string>{
 }
 
 function realListProcesses():ManagedProcessInfo[]{
- const comm=spawnSync("/bin/ps",["-axo","pid=,comm="],{encoding:"utf8",timeout:5000,maxBuffer:4_000_000});
- const cmd=spawnSync("/bin/ps",["-axo","pid=,ppid=,uid=,command=","-ww"],{encoding:"utf8",timeout:5000,maxBuffer:8_000_000});
- if(comm.error||comm.status!==0||cmd.error||cmd.status!==0)throw new NativeOutboundError("PROCESS_INSPECTION_FAILED");
+ const comm=inspectCommand("ps_comm","/bin/ps",["-axo","pid=,comm="],{maxBuffer:PS_COMM_MAX_BUFFER});
+ if(!comm.ok||comm.status!==0)throw new NativeOutboundError("PROCESS_INSPECTION_FAILED",comm.diagnostic);
+ const cmd=inspectCommand("ps_command","/bin/ps",["-axo","pid=,ppid=,uid=,command=","-ww"],{maxBuffer:PS_COMMAND_MAX_BUFFER});
+ if(!cmd.ok||cmd.status!==0)throw new NativeOutboundError("PROCESS_INSPECTION_FAILED",cmd.diagnostic);
  const commMap=parsePsField(comm.stdout||"");
  const result:ManagedProcessInfo[]=[];
  for(const line of (cmd.stdout||"").split("\n")){
@@ -69,21 +71,27 @@ function realListProcesses():ManagedProcessInfo[]{
 }
 
 function realLsofPids(lockPath:string):number[]{
- const listing=spawnSync("/usr/sbin/lsof",["-nP","-F","p",lockPath],{encoding:"utf8",timeout:5000,maxBuffer:16000});
- if(listing.error||listing.status===null||listing.status===undefined||listing.status>1)
-  throw new NativeOutboundError("PROCESS_INSPECTION_FAILED");
+ const listing=inspectCommand("lsof_lock","/usr/sbin/lsof",["-nP","-F","p",lockPath],{maxBuffer:LSOF_LOCK_MAX_BUFFER});
+ if(listing.errorCode||listing.status===null)
+  throw new NativeOutboundError("PROCESS_INSPECTION_FAILED",listing.diagnostic);
+ if(listing.status===1){
+  if(!isLsofNoMatch(listing))throw new NativeOutboundError("PROCESS_INSPECTION_FAILED",listing.diagnostic);
+  return [];
+ }
+ if(listing.status!==0)throw new NativeOutboundError("PROCESS_INSPECTION_FAILED",listing.diagnostic);
  const owners=[...(listing.stdout||"").matchAll(/^p(\d+)$/gm)].map(m=>Number(m[1]));
  return [...new Set(owners.filter(pid=>Number.isInteger(pid)&&pid>0))].sort((a,b)=>a-b);
 }
 
 function realLsofTextPaths(pid:number):string[]{
- const result=spawnSync("/usr/sbin/lsof",["-a","-p",String(pid),"-d","txt","-Fn"],{encoding:"utf8",timeout:5000,maxBuffer:1_000_000});
- if(result.error)throw new NativeOutboundError("PROCESS_INSPECTION_FAILED");
+ const result=inspectCommand("lsof_text","/usr/sbin/lsof",["-a","-p",String(pid),"-d","txt","-Fn"],{maxBuffer:LSOF_TEXT_MAX_BUFFER});
+ if(result.errorCode||result.status===null)
+  throw new NativeOutboundError("PROCESS_INSPECTION_FAILED",result.diagnostic);
  if(result.status===0){
   return (result.stdout||"").split("\n").filter(line=>line.startsWith("n")).map(line=>line.slice(1));
  }
- if(result.status===1&&!(result.stderr||"").trim())return [];
- throw new NativeOutboundError("PROCESS_INSPECTION_FAILED");
+ if(isLsofNoMatch(result))return [];
+ throw new NativeOutboundError("PROCESS_INSPECTION_FAILED",result.diagnostic);
 }
 
 function realProbeWebSocket(socketPath:string):Promise<boolean>{
