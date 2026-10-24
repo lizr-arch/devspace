@@ -3,7 +3,8 @@ import * as z from "zod/v4";
 import { bindSharedThread, boundSharedThread, assertSharedThreadOwnership, createSharedThread, readSharedThread, sendSharedTurn, sharedTurnReceipt, sharedAppStatus, reconcileSharedTurn, AppBridgeError } from "../coach-app-server-bridge.js";
 import { taskReferenceSchema, verifyTask, sha256 } from "../coach-task-contract.js";
 import { readNativeCodexThread, openNativeCodexThread, verifyThreadWriterOwnership } from "../coach-codex-native-continuity.js";
-import { readNativeOutboundReceipt, sendNativeOutbound, verifyNativeAppOwnership } from "../coach-native-outbound.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
+import { readNativeOutboundReceipt, sendNativeOutbound, verifyNativeAppOwnership } from "../coach-native-outbound.js";
+import { beginNativeJournal, publishNativeReceipt, readNativeReviewEvent } from "../coach-native-events.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
@@ -92,8 +93,10 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
   },async({workspaceId,operationId})=>{
     ctx.workspaces.getWorkspace(workspaceId);
     const receipt=readNativeOutboundReceipt(ctx.config.stateDir,workspaceId,operationId);
-    return{content:[textBlock("Native outbound "+((receipt&&receipt.state)||"NOT_FOUND")+".")],
-      structuredContent:{result:"Native App outbound receipt",...(receipt?{receipt}:{})}};
+    const reviewEvent=readNativeReviewEvent(ctx.coachReviewEvents,workspaceId,operationId);
+    return{content:[textBlock("Native outbound "+((receipt&&receipt.state)||"NOT_FOUND")+
+      (reviewEvent?"; review event "+reviewEvent.eventId+" is pending in the bound ChatGPT conversation feed":"; no review event published")+".")],
+      structuredContent:{result:"Native App outbound receipt",...(receipt?{receipt}:{}),...(reviewEvent?{reviewEvent}:{})}};
   });
   if(ctx.config.readOnly)return;
   registerAppTool(server,"codex_app_thread_open",{
@@ -227,10 +230,22 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
     const workspace=ctx.workspaces.getWorkspace(workspaceId);
     assertSharedThreadOwnership(ctx.config.stateDir,workspaceId,workspace.root,threadId);
     verifyNativeAppOwnership({threadId,root:workspace.root});
-    const receipt=await sendNativeOutbound({workspaceId,root:workspace.root,threadId,operationId,prompt,
-      stateDir:ctx.config.stateDir,...(timeoutMs?{timeoutMs}:{})});
-    return{content:[textBlock("Native queue delivery "+receipt.state+" for thread "+threadId+"; this is not execution or review approval.")],
-      structuredContent:{result:"Native App outbound receipt",receipt}};
+    beginNativeJournal(ctx.coachReviewEvents,{workspaceId,operationId,workspaceRoot:workspace.root,threadId,
+      promptSha256:sha256(prompt),taskId:"read-only",taskSha256:sha256("read-only")});
+    let receipt;
+    try{
+      receipt=await sendNativeOutbound({workspaceId,root:workspace.root,threadId,operationId,prompt,
+        stateDir:ctx.config.stateDir,...(timeoutMs?{timeoutMs}:{})});
+    }catch(error){
+      const prior=readNativeOutboundReceipt(ctx.config.stateDir,workspaceId,operationId);
+      if(prior)publishNativeReceipt(ctx.coachReviewEvents,{workspaceId,operationId,receipt:prior});
+      throw error;
+    }
+    const published=publishNativeReceipt(ctx.coachReviewEvents,{workspaceId,operationId,receipt});
+    return{content:[textBlock("Native queue delivery "+receipt.state+" for thread "+threadId+
+      (published.published?"; Web GPT review event "+published.eventId+" is now in the bound conversation feed":"; no review event yet (not a completed reply)")+
+      "; this is not execution or review approval.")],
+      structuredContent:{result:"Native App outbound receipt",receipt,reviewPublication:published}};
   });
   registerAppTool(server,"codex_app_native_rework",{
     title:"Queue bounded REWORK to the same native App thread",
@@ -248,9 +263,21 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
     const effectivePrompt="Authorized frozen development TASK: "+task.taskPath+"\nExpected SHA-256: "+task.sha256+
       "\nRead this exact TASK file and comply with its full scope and acceptance criteria. Do not modify .devspace control files.\n"+prompt;
     verifyNativeAppOwnership({threadId:prior.thread_id,root:workspace.root});
-    const receipt=await sendNativeOutbound({workspaceId,root:workspace.root,threadId:prior.thread_id,operationId,prompt:effectivePrompt,stateDir:ctx.config.stateDir});
-    return{content:[textBlock("Native REWORK delivery "+receipt.state+" on the same pinned thread; independent review is still required.")],
-      structuredContent:{result:"Native App REWORK receipt",receipt}};
+    beginNativeJournal(ctx.coachReviewEvents,{workspaceId,operationId,workspaceRoot:workspace.root,threadId:prior.thread_id,
+      promptSha256:sha256(effectivePrompt),taskId:task.taskId,taskSha256:task.sha256});
+    let receipt;
+    try{
+      receipt=await sendNativeOutbound({workspaceId,root:workspace.root,threadId:prior.thread_id,operationId,prompt:effectivePrompt,stateDir:ctx.config.stateDir});
+    }catch(error){
+      const priorReceipt=readNativeOutboundReceipt(ctx.config.stateDir,workspaceId,operationId);
+      if(priorReceipt)publishNativeReceipt(ctx.coachReviewEvents,{workspaceId,operationId,receipt:priorReceipt});
+      throw error;
+    }
+    const published=publishNativeReceipt(ctx.coachReviewEvents,{workspaceId,operationId,receipt});
+    return{content:[textBlock("Native REWORK delivery "+receipt.state+" on the same pinned thread"+
+      (published.published?"; Web GPT review event "+published.eventId+" published":"; no review event yet")+
+      "; independent review is still required.")],
+      structuredContent:{result:"Native App REWORK receipt",receipt,reviewPublication:published}};
   });
 }
 
