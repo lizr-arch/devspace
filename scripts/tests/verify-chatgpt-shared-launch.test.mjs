@@ -37,6 +37,7 @@ import {
   preflightFingerprint,
   probeDaemonIdentity,
   probeDaemonPidFile,
+  probeNativeRolloutLedger,
   probeProcesses,
   probeSocket,
   probeThreads,
@@ -1063,6 +1064,178 @@ test("L2: A/B thread metadata mismatch => FAIL; B must be idle; A may be notLoad
   aNotLoaded.threads.threads.A = { ...aNotLoaded.threads.threads.A, status: "notLoaded" };
   assert.equal(evaluatePostLaunch(cfg, pre, aNotLoaded).outcome, L2_PASS);
 });
+
+/* ------------------------------------------------------------------ *
+ * DORMANT_RECOVERABLE (reviewer ruling ONEPASS-003-REVIEW-663d19b #2)
+ * ------------------------------------------------------------------ */
+
+function writeNativeRollout(sessionsDir, threadId, spec = {}) {
+  const {
+    cwd = DEFAULT_THREADS.B.cwd,
+    source = "vscode",
+    id = threadId,
+    started = 3,
+    completed = 3,
+    trailingUser = false,
+    corrupt = false,
+    omitMeta = false,
+  } = spec;
+  const dir = join(sessionsDir, "2026", "10", "24");
+  mkdirSync(dir, { recursive: true });
+  const lines = [];
+  if (!omitMeta)
+    lines.push(JSON.stringify({ timestamp: "2026-10-24T08:13:11.857Z", type: "session_meta", payload: { id, cwd, source } }));
+  for (let i = 0; i < started; i++)
+    lines.push(JSON.stringify({ timestamp: `2026-10-24T08:${10 + i}:00.000Z`, type: "event_msg", payload: { type: "task_started" } }));
+  for (let i = 0; i < completed; i++)
+    lines.push(JSON.stringify({ timestamp: `2026-10-24T08:${20 + i}:00.000Z`, type: "event_msg", payload: { type: "task_complete" } }));
+  if (trailingUser)
+    lines.push(JSON.stringify({ timestamp: "2026-10-24T09:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [] } }));
+  if (corrupt) lines.push("{not-json");
+  const path = join(dir, `rollout-2026-10-24T08-13-11-${threadId}.jsonl`);
+  writeFileSync(path, lines.join("\n") + "\n");
+  return path;
+}
+
+test("probeNativeRolloutLedger: complete 3x start/complete ledger => PRESENT + complete + identity", () => {
+  const sessionsDir = mkdtempSync(join("/tmp", "onepass003-sessions-"));
+  try {
+    const threadId = DEFAULT_THREADS.B.id;
+    writeNativeRollout(sessionsDir, threadId);
+    const cfg = defaultConfig({ sessionsDir, threads: DEFAULT_THREADS });
+    const probe = probeNativeRolloutLedger(cfg, "B");
+    assert.equal(probe.state, PROBE.PRESENT);
+    assert.equal(probe.ledger.started, 3);
+    assert.equal(probe.ledger.completed, 3);
+    assert.equal(probe.ledger.lastType, "task_complete");
+    assert.equal(probe.ledger.complete, true);
+    assert.deepEqual(probe.matches, { id: true, cwd: true, source: true });
+  } finally {
+    rmSync(sessionsDir, { recursive: true, force: true });
+  }
+});
+
+test("probeNativeRolloutLedger: missing => ABSENT; corrupt => UNKNOWN; partial => incomplete", () => {
+  const sessionsDir = mkdtempSync(join("/tmp", "onepass003-sessions-"));
+  try {
+    const threadId = DEFAULT_THREADS.B.id;
+    const cfg = defaultConfig({ sessionsDir, threads: DEFAULT_THREADS });
+    assert.equal(probeNativeRolloutLedger(cfg, "B").state, PROBE.ABSENT);
+
+    writeNativeRollout(sessionsDir, threadId, { corrupt: true });
+    assert.equal(probeNativeRolloutLedger(cfg, "B").state, PROBE.UNKNOWN);
+    rmSync(sessionsDir, { recursive: true, force: true });
+    mkdirSync(sessionsDir, { recursive: true });
+
+    writeNativeRollout(sessionsDir, threadId, { started: 3, completed: 2 });
+    const partial = probeNativeRolloutLedger(cfg, "B");
+    assert.equal(partial.state, PROBE.PRESENT);
+    assert.equal(partial.ledger.complete, false);
+
+    rmSync(sessionsDir, { recursive: true, force: true });
+    mkdirSync(sessionsDir, { recursive: true });
+    writeNativeRollout(sessionsDir, threadId, { trailingUser: true });
+    const trailing = probeNativeRolloutLedger(cfg, "B");
+    assert.equal(trailing.ledger.complete, false);
+    assert.equal(trailing.ledger.trailingUserAfterComplete, true);
+
+    rmSync(sessionsDir, { recursive: true, force: true });
+    mkdirSync(sessionsDir, { recursive: true });
+    writeNativeRollout(sessionsDir, threadId, { omitMeta: true });
+    const noMeta = probeNativeRolloutLedger(cfg, "B");
+    assert.equal(noMeta.state, PROBE.PRESENT);
+    assert.equal(noMeta.ledger.complete, true);
+    assert.equal(noMeta.matches.id, false);
+    assert.equal(noMeta.matches.cwd, false);
+  } finally {
+    rmSync(sessionsDir, { recursive: true, force: true });
+  }
+});
+
+test("L2 B notLoaded + zero writers + complete ledger => DORMANT_RECOVERABLE PASS", () => {
+  const { cfg, daemonRealpath } = makeFixture();
+  const pre = okObs(cfg, daemonRealpath);
+  const post = okPost(cfg, pre);
+  post.threads.threads.B = { ...post.threads.threads.B, status: "notLoaded" };
+  post.writers.B = { state: PROBE.PRESENT, owners: [], unsafe: false, managedPid: MANAGED_PID };
+  post.nativeLedger = {
+    state: PROBE.PRESENT,
+    matches: { id: true, cwd: true, source: true },
+    ledger: { started: 3, completed: 3, lastType: "task_complete", trailingUserAfterComplete: false, complete: true },
+    complete: true,
+  };
+  const decision = evaluatePostLaunch(cfg, pre, post);
+  assert.equal(decision.outcome, L2_PASS, JSON.stringify(decision.failures));
+  assert.equal(decision.threadClassifications.B.classification, "DORMANT_RECOVERABLE");
+  assert.equal(decision.threadClassifications.B.ledger.started, 3);
+  assert.equal(decision.gates.thread_b_metadata, GATE.PASS);
+});
+
+test("L2 dormant B: writer / ledger / identity / unknown variants all block", () => {
+  const { cfg, daemonRealpath } = makeFixture();
+  const pre = okObs(cfg, daemonRealpath);
+  const baseDormant = () => {
+    const post = okPost(cfg, pre);
+    post.threads.threads.B = { ...post.threads.threads.B, status: "notLoaded" };
+    post.writers.B = { state: PROBE.PRESENT, owners: [], unsafe: false, managedPid: MANAGED_PID };
+    post.nativeLedger = {
+      state: PROBE.PRESENT,
+      matches: { id: true, cwd: true, source: true },
+      ledger: { started: 3, completed: 3, lastType: "task_complete", trailingUserAfterComplete: false, complete: true },
+      complete: true,
+    };
+    return post;
+  };
+
+  const writerHeld = baseDormant();
+  writerHeld.writers.B = { state: PROBE.PRESENT, owners: [MANAGED_PID], unsafe: false, managedPid: MANAGED_PID };
+  let d = evaluatePostLaunch(cfg, pre, writerHeld);
+  assert.equal(d.outcome, L2_FAIL);
+  assert.ok(d.failures.some((f) => f.code === "L2_THREAD_NOT_DORMANT_WRITER"));
+
+  const noLockFile = baseDormant();
+  noLockFile.writers.B = { state: PROBE.ABSENT, owners: [], unsafe: false, managedPid: MANAGED_PID };
+  d = evaluatePostLaunch(cfg, pre, noLockFile);
+  assert.equal(d.outcome, L2_PASS, JSON.stringify(d.failures));
+  assert.equal(d.threadClassifications.B.classification, "DORMANT_RECOVERABLE");
+
+  const incomplete = baseDormant();
+  incomplete.nativeLedger.ledger = { started: 3, completed: 2, lastType: "task_started", trailingUserAfterComplete: false, complete: false };
+  d = evaluatePostLaunch(cfg, pre, incomplete);
+  assert.equal(d.outcome, L2_FAIL);
+  assert.ok(d.failures.some((f) => f.code === "L2_THREAD_DORMANT_LEDGER_INCOMPLETE"));
+
+  const badIdentity = baseDormant();
+  badIdentity.nativeLedger.matches = { id: true, cwd: false, source: true };
+  d = evaluatePostLaunch(cfg, pre, badIdentity);
+  assert.equal(d.outcome, L2_FAIL);
+  assert.ok(d.failures.some((f) => f.code === "L2_THREAD_DORMANT_IDENTITY"));
+
+  const missing = baseDormant();
+  missing.nativeLedger = { state: PROBE.ABSENT, reason: "no rollout" };
+  d = evaluatePostLaunch(cfg, pre, missing);
+  assert.equal(d.outcome, L2_FAIL);
+  assert.ok(d.failures.some((f) => f.code === "L2_THREAD_DORMANT_HISTORY_MISSING"));
+
+  const unknown = baseDormant();
+  unknown.nativeLedger = { state: PROBE.UNKNOWN, reason: "scan failed" };
+  d = evaluatePostLaunch(cfg, pre, unknown);
+  assert.equal(d.outcome, L2_INCOMPLETE);
+  assert.ok(d.unknowns.some((f) => f.code === "L2_THREAD_DORMANT_UNKNOWN"));
+
+  const noProbe = baseDormant();
+  delete noProbe.nativeLedger;
+  d = evaluatePostLaunch(cfg, pre, noProbe);
+  assert.equal(d.outcome, L2_INCOMPLETE);
+});
+
+test("L2 idle B stays IDLE classification (dormant path not required)", () => {
+  const { cfg, daemonRealpath } = makeFixture();
+  const pre = okObs(cfg, daemonRealpath);
+  const decision = evaluatePostLaunch(cfg, pre, okPost(cfg, pre));
+  assert.equal(decision.threadClassifications.B.classification, "IDLE");
+});
+
 
 test("L2: uncheckable DevSpace tool surface => INCOMPLETE, never PASS (default side-effect-free policy)", async () => {
   const { cfg, daemonRealpath } = makeFixture();

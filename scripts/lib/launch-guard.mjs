@@ -102,6 +102,7 @@ export function defaultConfig(overrides = {}) {
     releasesDir: overrides.releasesDir ?? join(codexHome, "packages", "app-server-daemon", "releases"),
     codexCliPath: overrides.codexCliPath ?? join(home, ".local", "bin", "codex"),
     threadLockDir: overrides.threadLockDir ?? join(codexHome, "thread-writer-locks"),
+    sessionsDir: overrides.sessionsDir ?? join(codexHome, "sessions"),
     threads: overrides.threads ?? DEFAULT_THREADS,
     processTimeoutMs: overrides.processTimeoutMs ?? 5000,
     lsofTimeoutMs: overrides.lsofTimeoutMs ?? 5000,
@@ -125,6 +126,7 @@ export function defaultConfig(overrides = {}) {
   merged.aliasParent = overrides.aliasParent ?? dirname(merged.socketAlias);
   merged.threadLockDir =
     overrides.threadLockDir ?? join(merged.codexHome, "thread-writer-locks");
+  merged.sessionsDir = overrides.sessionsDir ?? join(merged.codexHome, "sessions");
   merged.daemonPidPath =
     overrides.daemonPidPath ?? join(merged.codexHome, "app-server-daemon", "daemon.pid");
   merged.releasesDir =
@@ -1116,6 +1118,145 @@ export async function probeThreads(cfg, deps = {}) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Native (local rollout) ledger probe for DORMANT_RECOVERABLE threads
+ * ------------------------------------------------------------------ */
+
+const ROLLOUT_SEARCH_MAX_DEPTH = 6;
+
+function findRolloutFile(sessionsDir, threadId, depth = 0) {
+  if (depth > ROLLOUT_SEARCH_MAX_DEPTH) return null;
+  let entries;
+  try {
+    entries = readdirSync(sessionsDir, { withFileTypes: true });
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+  // Sort for determinism; only `<prefix>-<threadId>.jsonl` files match.
+  const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of sorted) {
+    const full = join(sessionsDir, entry.name);
+    if (entry.isDirectory()) {
+      const found = findRolloutFile(full, threadId, depth + 1);
+      if (found) return found;
+    } else if (entry.isFile() && entry.name.endsWith(`-${threadId}.jsonl`)) {
+      return full;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the *persisted* native rollout ledger for a thread that the managed
+ * daemon currently reports as `notLoaded` (evicted from memory).
+ *
+ * Reviewer ruling (ONEPASS-003-REVIEW-663d19b item 2): a thread may pass the L2
+ * metadata gate as DORMANT_RECOVERABLE only when ALL of the following hold:
+ *  - live `thread/read {includeTurns:false}` gave the exact id + canonical cwd
+ *    (checked by the caller);
+ *  - the native rollout session_meta id/cwd/source match (source must be vscode);
+ *  - the ledger is complete: started >= 1, started === completed, the last turn
+ *    lifecycle event is task_complete, and no user message follows it;
+ *  - the writer holder set for that thread is empty (checked by the caller).
+ * Any unreadable/corrupt/partial/identity-mismatched rollout is NOT dormant.
+ */
+export function probeNativeRolloutLedger(cfg, threadKey = "B", deps = {}) {
+  const readFile = deps.readFileSync ?? readFileSync;
+  const find = deps.findRolloutFile ?? findRolloutFile;
+  const spec = cfg.threads?.[threadKey];
+  if (!spec) return { state: PROBE.UNKNOWN, reason: `unknown thread key ${threadKey}` };
+  const sessionsDir = cfg.sessionsDir ?? join(cfg.codexHome, "sessions");
+  let path;
+  try {
+    path = deps.rolloutPath ?? find(sessionsDir, spec.id);
+  } catch (e) {
+    return { state: PROBE.UNKNOWN, reason: `sessions scan error: ${e?.code ?? e?.message}` };
+  }
+  if (!path) {
+    return {
+      state: PROBE.ABSENT,
+      threadId: spec.id,
+      reason: "no native rollout file for thread",
+    };
+  }
+  let raw;
+  try {
+    raw = readFile(path, "utf8");
+  } catch (e) {
+    return { state: PROBE.UNKNOWN, path, reason: `rollout read error: ${e?.code ?? e?.message}` };
+  }
+  let meta = null;
+  let started = 0;
+  let completed = 0;
+  let lastType = null;
+  let lastCompleteLine = -1;
+  let lastUserLine = -1;
+  let lineNo = 0;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    lineNo++;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      return { state: PROBE.UNKNOWN, path, reason: `corrupt rollout JSON at line ${lineNo}` };
+    }
+    const type = evt?.type;
+    const payload = evt?.payload;
+    if (type === "session_meta") {
+      meta = {
+        id: typeof payload?.id === "string" ? payload.id : null,
+        cwd: typeof payload?.cwd === "string" ? payload.cwd : null,
+        source: typeof payload?.source === "string" ? payload.source : null,
+      };
+    } else if (type === "event_msg") {
+      const t = payload?.type;
+      if (t === "task_started") {
+        started++;
+        lastType = "task_started";
+      } else if (t === "task_complete") {
+        completed++;
+        lastType = "task_complete";
+        lastCompleteLine = lineNo;
+      }
+    } else if (
+      type === "response_item" &&
+      payload?.type === "message" &&
+      payload?.role === "user"
+    ) {
+      lastUserLine = lineNo;
+    }
+  }
+  const matches = {
+    id: meta?.id === spec.id,
+    cwd: samePath(meta?.cwd, spec.cwd),
+    source: meta?.source === "vscode",
+  };
+  const trailingUserAfterComplete = lastCompleteLine >= 0 && lastUserLine > lastCompleteLine;
+  const ledger = {
+    started,
+    completed,
+    lastType,
+    trailingUserAfterComplete,
+    complete:
+      started >= 1 &&
+      started === completed &&
+      lastType === "task_complete" &&
+      !trailingUserAfterComplete,
+  };
+  return {
+    state: PROBE.PRESENT,
+    path,
+    threadId: spec.id,
+    cwd: meta?.cwd ?? null,
+    source: meta?.source ?? null,
+    matches,
+    ledger,
+    complete: ledger.complete,
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * DevSpace live MCP tool surface (L2 gate 8)
  * ------------------------------------------------------------------ */
 
@@ -1254,8 +1395,32 @@ export async function collectPostLaunch(cfg, preObs, deps = {}) {
     };
   }
   const threads = await (probes.threads ?? probeThreads)(cfg, deps);
+  // DORMANT_RECOVERABLE evidence: only needed when the daemon reports B as
+  // notLoaded (idle threads are checked live). Read-only local rollout parse.
+  let nativeLedger;
+  if (threads.state === PROBE.PRESENT && threads.threads?.B?.status === "notLoaded") {
+    nativeLedger = (probes.nativeLedger ?? ((c) => probeNativeRolloutLedger(c, "B", deps)))(cfg, deps);
+  } else {
+    nativeLedger = {
+      state: PROBE.ABSENT,
+      reason: "not required: thread B is not notLoaded",
+    };
+  }
   const toolSurface = await (probes.toolSurface ?? probeToolSurface)(cfg, deps);
-  return { ps, gui, guiEnv, managedDaemons: managed, appServer, daemonPidFile: pidFile, daemon, writers, socket, threads, toolSurface };
+  return {
+    ps,
+    gui,
+    guiEnv,
+    managedDaemons: managed,
+    appServer,
+    daemonPidFile: pidFile,
+    daemon,
+    writers,
+    socket,
+    threads,
+    nativeLedger,
+    toolSurface,
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1591,8 +1756,15 @@ export function evaluatePostLaunch(cfg, pre, post) {
     else put(gateName, "FAIL", v.code, v.detail);
   }
 
-  // 8. thread metadata (includeTurns:false only).
+  // 8. thread metadata (includeTurns:false only). A may be notLoaded.
+  //    B is either idle (live) or DORMANT_RECOVERABLE, per reviewer ruling
+  //    ONEPASS-003-REVIEW-663d19b item 2: notLoaded + exact id/canonical cwd +
+  //    complete native rollout ledger (started>=1, started==completed, last
+  //    task_complete, no trailing user) + zero writer holders. Any unknown or
+  //    mismatch blocks. DORMANT is a *recoverable history* classification, not
+  //    proof that the thread is loaded or GUI-resumable.
   const threads = post?.threads ?? { state: PROBE.UNKNOWN, threads: {} };
+  const threadClassifications = {};
   for (const key of Object.keys(cfg.threads)) {
     const gateName = `thread_${key.toLowerCase()}_metadata`;
     const t = threads.threads?.[key];
@@ -1603,9 +1775,70 @@ export function evaluatePostLaunch(cfg, pre, post) {
       const problems = [];
       if (!t.matches?.id) problems.push(`id ${JSON.stringify(t.threadId)} != ${JSON.stringify(cfg.threads[key].id)}`);
       if (!t.matches?.cwd) problems.push(`cwd ${JSON.stringify(t.cwd)} != ${JSON.stringify(cfg.threads[key].cwd)}`);
-      if (key === "B" && t.status !== "idle") problems.push(`B status ${JSON.stringify(t.status)} != idle`);
-      if (problems.length) put(gateName, "FAIL", "L2_THREAD_METADATA_MISMATCH", problems.join("; "));
-      else put(gateName, GATE.PASS);
+      if (key !== "B") {
+        threadClassifications[key] = { status: t.status ?? null, classification: t.status === "idle" ? "IDLE" : "READABLE" };
+        if (problems.length) put(gateName, "FAIL", "L2_THREAD_METADATA_MISMATCH", problems.join("; "));
+        else put(gateName, GATE.PASS);
+        continue;
+      }
+      if (problems.length) {
+        put(gateName, "FAIL", "L2_THREAD_METADATA_MISMATCH", problems.join("; "));
+        continue;
+      }
+      if (t.status === "idle") {
+        threadClassifications.B = { status: "idle", classification: "IDLE" };
+        put(gateName, GATE.PASS);
+        continue;
+      }
+      if (t.status !== "notLoaded") {
+        put(gateName, "FAIL", "L2_THREAD_METADATA_MISMATCH", `B status ${JSON.stringify(t.status)} is neither idle nor notLoaded`);
+        continue;
+      }
+      // notLoaded => strict DORMANT_RECOVERABLE evidence.
+      const ownerSet = post?.writers?.B;
+      const zeroWriters =
+        ownerSet &&
+        !ownerSet.unsafe &&
+        (ownerSet.owners ?? []).length === 0 &&
+        (ownerSet.state === PROBE.PRESENT || ownerSet.state === PROBE.ABSENT);
+      if (!zeroWriters) {
+        put(gateName, "FAIL", "L2_THREAD_NOT_DORMANT_WRITER", "dormant B must have zero writer holders");
+        continue;
+      }
+      const nl = post?.nativeLedger;
+      if (!nl || nl.state === PROBE.UNKNOWN) {
+        put(gateName, GATE.UNKNOWN, "L2_THREAD_DORMANT_UNKNOWN", nl?.reason ?? "native ledger probe missing");
+        continue;
+      }
+      if (nl.state !== PROBE.PRESENT) {
+        put(gateName, "FAIL", "L2_THREAD_DORMANT_HISTORY_MISSING", nl.reason ?? "native rollout not found");
+        continue;
+      }
+      if (!nl.matches?.id || !nl.matches?.cwd || !nl.matches?.source) {
+        put(
+          gateName,
+          "FAIL",
+          "L2_THREAD_DORMANT_IDENTITY",
+          `native rollout identity mismatch id=${!!nl.matches?.id} cwd=${!!nl.matches?.cwd} source=${!!nl.matches?.source}`,
+        );
+        continue;
+      }
+      if (!nl.ledger?.complete) {
+        put(
+          gateName,
+          "FAIL",
+          "L2_THREAD_DORMANT_LEDGER_INCOMPLETE",
+          `started=${nl.ledger?.started} completed=${nl.ledger?.completed} last=${nl.ledger?.lastType} trailingUser=${!!nl.ledger?.trailingUserAfterComplete}`,
+        );
+        continue;
+      }
+      threadClassifications.B = {
+        status: "notLoaded",
+        classification: "DORMANT_RECOVERABLE",
+        ledger: { started: nl.ledger.started, completed: nl.ledger.completed, lastType: nl.ledger.lastType },
+        note: "recoverable persisted history; NOT loaded and NOT user-visible-verified",
+      };
+      put(gateName, GATE.PASS);
     }
   }
 
@@ -1630,6 +1863,7 @@ export function evaluatePostLaunch(cfg, pre, post) {
     gates,
     failures,
     unknowns,
+    threadClassifications,
   };
 }
 
@@ -1745,7 +1979,13 @@ export async function runLaunch(deps = {}) {
 
   const post = await (deps.collectPostLaunch ?? ((c, pre) => collectPostLaunch(c, pre, deps)))(cfg, pre2);
   const decision = evaluatePostLaunch(cfg, pre2, post);
-  return { ...result, phase: "l2", decision, post: summarizePost(post) };
+  return {
+    ...result,
+    phase: "l2",
+    decision,
+    threadClassifications: decision.threadClassifications,
+    post: summarizePost(post),
+  };
 }
 
 function summary(obs) {
@@ -1779,6 +2019,15 @@ function summarizePost(post) {
     daemon: { state: post?.daemon?.state, pid: post?.daemon?.pid ?? null, version: post?.daemon?.version ?? null },
     writers: Object.fromEntries(Object.entries(post?.writers ?? {}).map(([k, w]) => [k, w.owners ?? []])),
     threads: post?.threads?.threads ?? null,
+    nativeLedger: post?.nativeLedger
+      ? {
+          state: post.nativeLedger.state,
+          complete: post.nativeLedger.ledger?.complete ?? post.nativeLedger.complete ?? null,
+          ledger: post.nativeLedger.ledger ?? null,
+          matches: post.nativeLedger.matches ?? null,
+          reason: post.nativeLedger.reason ?? null,
+        }
+      : null,
     toolSurface: { state: post?.toolSurface?.state, ok: post?.toolSurface?.ok ?? false, reason: post?.toolSurface?.reason ?? null },
   };
 }
