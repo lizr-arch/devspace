@@ -30,10 +30,22 @@ try{
  await ro.client.close();await ro.server.close();
  const rw=await pair(false);
  const namesRw=(await rw.client.listTools()).tools.map(t=>t.name);
- for(const name of ["codex_app_thread_bind","codex_app_thread_create","codex_app_thread_send"])
+ for(const name of ["codex_app_thread_bind","codex_app_thread_create","codex_app_thread_open","codex_app_thread_send"])
    assert.ok(namesRw.includes(name));
  assert.ok(namesRw.includes("codex_app_review"));assert.ok(namesRw.includes("codex_app_thread_rework"));
- const unauthorized=await rw.client.callTool({name:"codex_app_thread_send",arguments:{
+ // App-native ownership safety: no new invisible thread and no competing
+ // writer, even if the old daemon socket comes back after a reboot.
+ const openOther=await rw.client.callTool({name:"codex_app_thread_open",arguments:{workspaceId:"other_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf"}});
+ assert.equal(openOther.isError,true);
+ const creation=await rw.client.callTool({name:"codex_app_thread_create",arguments:{workspaceId:"own_workspace"}});
+ assert.equal(creation.isError,true);
+ assert.match(JSON.stringify(creation),/CODEX_APP_NATIVE_THREAD_CREATION_REQUIRED/);
+ const suspended=await rw.client.callTool({name:"codex_app_thread_send",arguments:{
+   workspaceId:"own_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf",
+   operationId:"safe_existing",prompt:"just say hello",sandbox:"read-only",
+ }});
+ assert.equal(suspended.isError,true);
+ assert.match(JSON.stringify(suspended),/CODEX_APP_SHARED_WRITES_PAUSED_UNTIL_OWNER_VERIFIED/); const unauthorized=await rw.client.callTool({name:"codex_app_thread_send",arguments:{
    workspaceId:"other_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf",operationId:"test",
    prompt:"do not send",sandbox:"read-only"
  }});

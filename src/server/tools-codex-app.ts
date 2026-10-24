@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { bindSharedThread, boundSharedThread, assertSharedThreadOwnership, createSharedThread, readSharedThread, sendSharedTurn, sharedTurnReceipt, sharedAppStatus, reconcileSharedTurn, AppBridgeError } from "../coach-app-server-bridge.js";
 import { taskReferenceSchema, verifyTask, sha256 } from "../coach-task-contract.js";
-import { resultOutputSchema, type ServerContext } from "./server-types.js";
+import { readNativeCodexThread, openNativeCodexThread } from "../coach-codex-native-continuity.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
@@ -66,17 +66,35 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
   });
   registerAppTool(server,"codex_app_thread_read",{
     title:"Read one authorized App-visible Codex thread",
-    description:"Read history only when thread cwd matches the exact authorized DevSpace workspace. No thread lock takeover; returns up to 20 most recent messages.",
+    description:"Read only exact authorized Codex thread history. If the shared App Server is unavailable after desktop restart, read its persisted local rollout by thread UUID and verified workspace cwd. Never resumes or acquires a writer lock.",
     inputSchema:{workspaceId:id,threadId,limit:z.number().int().min(1).max(20).default(8)},
-    outputSchema:resultOutputSchema({thread:z.unknown().optional(),historyAvailable:z.boolean().optional(),messages:z.unknown().optional(),error:z.unknown().optional()}),
+    outputSchema:resultOutputSchema({thread:z.unknown().optional(),historyAvailable:z.boolean().optional(),messages:z.unknown().optional(),origin:z.string().optional(),error:z.unknown().optional()}),
     _meta:{},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
   },async({workspaceId,threadId,limit})=>{
     const workspace=ctx.workspaces.getWorkspace(workspaceId);
-    const result=await readSharedThread({root:workspace.root,threadId,limit});
-    return{content:[textBlock("Read authorized App thread "+threadId+".")],
+    let result:Awaited<ReturnType<typeof readSharedThread>>|ReturnType<typeof readNativeCodexThread>;
+    try{result=await readSharedThread({root:workspace.root,threadId,limit});}
+    catch(e){
+      const code=e instanceof AppBridgeError?e.code:"";
+      if(!["CODEX_APP_SHARED_SOCKET_UNAVAILABLE","CODEX_APP_SOCKET_CLOSED","CODEX_APP_SOCKET_ERROR"].includes(code))throw e;
+      result=readNativeCodexThread({root:workspace.root,threadId,limit});
+    }
+    return{content:[textBlock("Read authorized Codex thread "+threadId+" without taking its writer lock.")],
       structuredContent:{result:"Codex App thread read",...result}};
   });
   if(ctx.config.readOnly)return;
+  registerAppTool(server,"codex_app_thread_open",{
+    title:"Open an existing Codex conversation in ChatGPT App",
+    description:"macOS only. Navigate to an exact existing App-visible local thread via the official codex://threads/UUID deep link. Verifies persisted source/cwd and rejects threads held by a different writer; never creates or sends a turn. Returns NAVIGATION_REQUESTED, not proof of UI focus.",
+    inputSchema:{workspaceId:id,threadId},
+    outputSchema:resultOutputSchema({navigation:z.unknown().optional(),error:z.unknown().optional()}),
+    _meta:{},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  },async({workspaceId,threadId})=>{
+    const workspace=ctx.workspaces.getWorkspace(workspaceId);
+    const navigation=openNativeCodexThread({root:workspace.root,threadId});
+    return{content:[textBlock("Requested ChatGPT App to navigate to existing thread "+threadId+".")],
+      structuredContent:{result:"Native Codex App navigation requested",navigation}};
+  });
   registerAppTool(server,"codex_app_thread_create",{
     title:"Create an App-visible Codex thread in workspace",
     description:"Explicit new native vscode-source thread on an already-running private shared App Server. No shell, no model turn, no App restart. Not idempotent: on transport uncertainty read existing threads instead of retrying.",
