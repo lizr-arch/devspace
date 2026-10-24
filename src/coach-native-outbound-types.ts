@@ -33,6 +33,8 @@ export interface NativeOutboundReceipt {
  replySha256?:string;
  error?:string;
  uncertaintyReason?:string;
+ /** P0 diagnostics for UNCERTAIN queue/CLI outcomes (safe, non-sensitive). */
+ queueDiagnostic?:QueueRunDiagnostic;
  /** Pre-send baseline of deliveries matching payloadSha256 (for durable reconcile). */
  preObservedTurnIds?:string[];
  preObservedItemIds?:string[];
@@ -112,12 +114,40 @@ export interface FileStatLike {
  mtimeMs:number;
 }
 
+export interface QueueRunDiagnostic {
+ /** Safe classification of a queue-CLI failure (no prompt/argv/env/contents). */
+ classification:
+  |"QUEUE_TIMEOUT"
+  |"QUEUE_SIGNALLED"
+  |"QUEUE_BINARY_NOT_FOUND"
+  |"QUEUE_BINARY_UNEXECUTABLE"
+  |"SPAWN_ERROR"
+  |"QUEUE_NULL_STATUS";
+ status:number|null;
+ signal:string|null;
+ timedOut:boolean;
+ errnoCode:string|null;
+ elapsedMs:number|null;
+ stdoutBytes:number;
+ stderrBytes:number;
+ /** Non-sensitive binary provenance (basename + size/mtime), no absolute path. */
+ codexBinary?:{name:string;size:number|null;mtimeMs:number|null};
+}
+
 export interface QueueRunResult {
  code:number|null;
  stdout:string;
  stderr:string;
  /** "TIMEOUT" when the CLI did not finish inside the configured timeout. */
  error?:string;
+ /** Process fate evidence (never contains command lines or file contents). */
+ signal?:string|null;
+ errnoCode?:string|null;
+ timedOut?:boolean;
+ elapsedMs?:number;
+ stdoutBytes?:number;
+ stderrBytes?:number;
+ codexBinary?:{name:string;size:number|null;mtimeMs:number|null};
 }
 
 export interface NativeOutboundRuntime {

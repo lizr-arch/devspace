@@ -30,6 +30,7 @@ import {
  type NativeOutboundDeps,
  type NativeOutboundReceipt,
  type QueueRunResult,
+ type QueueRunDiagnostic,
  assertValidNativeTask,
  assertValidOperation,
  assertValidSandbox,
@@ -97,6 +98,35 @@ export {claimOperation,readNativeOutboundReceipt} from "./coach-native-ledger.js
 /**
  * G2/G4/G5/G6/G10: the only sanctioned outbound path.
  */
+/**
+ * Classify a queue-CLI process failure without leaking prompt/argv/env contents.
+ * The previous code treated every null-status result as CLI_UNCERTAIN, hiding
+ * the real cause (ENOENT from `codex` not being on launchd PATH, or a signal).
+ */
+export function classifyQueueFailure(run:QueueRunResult):QueueRunDiagnostic{
+ const timedOut=run.timedOut===true||run.error==="TIMEOUT";
+ const errnoCode=run.errnoCode??null;
+ const signal=run.signal??null;
+ let classification:QueueRunDiagnostic["classification"];
+ if(timedOut)classification="QUEUE_TIMEOUT";
+ else if(errnoCode==="ENOENT")classification="QUEUE_BINARY_NOT_FOUND";
+ else if(errnoCode==="EACCES"||errnoCode==="EPERM")classification="QUEUE_BINARY_UNEXECUTABLE";
+ else if(signal)classification="QUEUE_SIGNALLED";
+ else if(run.error)classification="SPAWN_ERROR";
+ else classification="QUEUE_NULL_STATUS";
+ return{
+  classification,
+  status:run.code,
+  signal,
+  timedOut,
+  errnoCode,
+  elapsedMs:run.elapsedMs??null,
+  stdoutBytes:run.stdoutBytes??run.stdout.length,
+  stderrBytes:run.stderrBytes??run.stderr.length,
+  ...(run.codexBinary?{codexBinary:run.codexBinary}:{}),
+ };
+}
+
 export async function sendNativeOutbound(input:{
  workspaceId:string;
  root:string;
@@ -197,11 +227,21 @@ export async function sendNativeOutbound(input:{
   let run:QueueRunResult;
   try{run=runtime.runQueue({codexBin:command.codexBin,argv:command.argv,env:command.env,timeoutMs});}
   catch(error){
-   persist({state:"UNCERTAIN",uncertaintyReason:"CLI_SPAWN_UNCERTAIN",error:error instanceof Error?error.message:String(error),...baselineFields});
+   const errnoCode=(error as NodeJS.ErrnoException|undefined)?.code??null;
+   const diagnostic:QueueRunDiagnostic={classification:errnoCode==="ENOENT"?"QUEUE_BINARY_NOT_FOUND":"SPAWN_ERROR",
+    status:null,signal:null,timedOut:false,errnoCode,elapsedMs:null,stdoutBytes:0,stderrBytes:0};
+   persist({state:"UNCERTAIN",uncertaintyReason:"CLI_SPAWN_UNCERTAIN",queueDiagnostic:diagnostic,
+    error:"queue CLI spawn threw ("+diagnostic.classification+")",...baselineFields});
    return current;
   }
   if(run.error==="TIMEOUT"||run.code===null){
-   persist({state:"UNCERTAIN",uncertaintyReason:run.error==="TIMEOUT"?"CLI_TIMEOUT":"CLI_UNCERTAIN",queueExitCode:run.code??undefined,error:run.stderr.slice(0,2000),...baselineFields});
+   // P0: persist safe process-fate diagnostics instead of discarding the
+   // ENOENT/signal and writing an empty error. Never store raw stderr here.
+   const diagnostic=classifyQueueFailure(run);
+   persist({state:"UNCERTAIN",uncertaintyReason:diagnostic.classification,
+    queueDiagnostic:diagnostic,
+    error:"queue CLI did not return an exit status ("+diagnostic.classification+")",
+    ...baselineFields});
    return current;
   }
   if(run.code!==0){

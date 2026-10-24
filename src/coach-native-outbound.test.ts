@@ -9,6 +9,7 @@
  * Success prints: NATIVE_OUTBOUND_TEST_PASS <n>
  */
 import assert from "node:assert/strict";
+import { resolveCodexBin } from "./coach-native-daemon.js";
 import {spawn} from "node:child_process";
 import {existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync,statSync,truncateSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
@@ -422,7 +423,9 @@ process.stdout.write(JSON.stringify(result));
   let queueCalls:Array<{codexBin:string;argv:string[];env:Record<string,string|undefined>;timeoutMs:number}>=[];
 
   const makeDeps=(options:{
-   runQueue?:(input:{codexBin:string;argv:string[];env:Record<string,string|undefined>;timeoutMs:number})=>{code:number|null;stdout:string;stderr:string;error?:string};
+   runQueue?:(input:{codexBin:string;argv:string[];env:Record<string,string|undefined>;timeoutMs:number})=>{code:number|null;stdout:string;stderr:string;error?:string;
+    signal?:string|null;errnoCode?:string|null;timedOut?:boolean;elapsedMs?:number;stdoutBytes?:number;stderrBytes?:number;
+    codexBinary?:{name:string;size:number|null;mtimeMs:number|null}};
    inspectDaemon?:(opts:{codexHome:string;socketPath:string})=>Promise<ReturnType<typeof fakeIdentity>>;
    verifyOwnership?:(input:{threadId:string;root:string;codexHome:string;socketPath:string})=>{threadId:string;root:string;status:string};
    observeTimeoutMs?:number;pollMs?:number;
@@ -590,9 +593,71 @@ process.stdout.write(JSON.stringify(result));
    const deps=makeDeps({runQueue:()=>({code:null,stdout:"",stderr:"",error:"TIMEOUT"})});
    const receipt=await sendNativeOutbound({workspaceId:"ws-send",root:WORK,threadId:THREAD_A,operationId:"send-op-10",prompt,stateDir:STATE_DIR,deps});
    assert.equal(receipt.state,"UNCERTAIN");
-   assert.equal(receipt.uncertaintyReason,"CLI_TIMEOUT");
+   assert.equal(receipt.uncertaintyReason,"QUEUE_TIMEOUT");
+   assert.equal(receipt.queueDiagnostic?.classification,"QUEUE_TIMEOUT");
+   assert.equal(receipt.queueDiagnostic?.timedOut,true);
    assert.equal(queueCalls.length,1);
    assert.equal(readNativeOutboundReceipt(STATE_DIR,"ws-send","send-op-10")?.state,"UNCERTAIN");
+  });
+
+  await checkAsync("P0 signal-terminated queue CLI => QUEUE_SIGNALLED, signal captured, no raw stderr leak",async()=>{
+   const prompt="ONEPASS003 signal terminated proof 030";
+   const secret="SECRET_STDERR_MUST_NOT_BE_PERSISTED";
+   for(const signal of ["SIGTERM","SIGKILL","SIGPIPE"]){
+    const deps=makeDeps({runQueue:()=>({code:null,stdout:"",stderr:secret,signal,timedOut:false,errnoCode:null,
+      elapsedMs:1200,stdoutBytes:0,stderrBytes:secret.length,codexBinary:{name:"codex",size:1234,mtimeMs:1000}})});
+    const op="send-op-signal-"+signal;
+    const receipt=await sendNativeOutbound({workspaceId:"ws-send",root:WORK,threadId:THREAD_A,operationId:op,prompt,stateDir:STATE_DIR,deps});
+    assert.equal(receipt.state,"UNCERTAIN");
+    assert.equal(receipt.uncertaintyReason,"QUEUE_SIGNALLED");
+    assert.equal(receipt.queueDiagnostic?.classification,"QUEUE_SIGNALLED");
+    assert.equal(receipt.queueDiagnostic?.signal,signal);
+    assert.equal(receipt.queueDiagnostic?.timedOut,false);
+    assert.equal(receipt.queueDiagnostic?.elapsedMs,1200);
+    assert.equal(receipt.queueDiagnostic?.stderrBytes,secret.length);
+    assert.equal(receipt.queueDiagnostic?.codexBinary?.name,"codex");
+    assert.equal(JSON.stringify(receipt).includes(secret),false,"raw stderr must not be persisted");
+    assert.equal(queueCalls.length,1,"exactly one CLI call for this operation, no retry");
+   }
+  });
+
+  await checkAsync("P0 ENOENT (codex not on launchd PATH) => QUEUE_BINARY_NOT_FOUND, not opaque CLI_UNCERTAIN",async()=>{
+   const prompt="ONEPASS003 binary not found proof 031";
+   const deps=makeDeps({runQueue:()=>({code:null,stdout:"",stderr:"",error:"ENOENT",errnoCode:"ENOENT",
+     signal:null,timedOut:false,elapsedMs:30,stdoutBytes:0,stderrBytes:0,codexBinary:{name:"codex",size:null,mtimeMs:null}})});
+   const receipt=await sendNativeOutbound({workspaceId:"ws-send",root:WORK,threadId:THREAD_A,operationId:"send-op-enoent",prompt,stateDir:STATE_DIR,deps});
+   assert.equal(receipt.state,"UNCERTAIN");
+   assert.equal(receipt.uncertaintyReason,"QUEUE_BINARY_NOT_FOUND");
+   assert.equal(receipt.queueDiagnostic?.errnoCode,"ENOENT");
+   assert.equal(receipt.queueDiagnostic?.codexBinary?.name,"codex");
+   assert.equal(queueCalls.length,1);
+  });
+
+  await checkAsync("P0 null status with no signal/error => QUEUE_NULL_STATUS (falsifiable, never silent)",async()=>{
+   const prompt="ONEPASS003 null status proof 032";
+   const deps=makeDeps({runQueue:()=>({code:null,stdout:"",stderr:"",signal:null,timedOut:false,
+     elapsedMs:44,stdoutBytes:0,stderrBytes:0})});
+   const receipt=await sendNativeOutbound({workspaceId:"ws-send",root:WORK,threadId:THREAD_A,operationId:"send-op-null",prompt,stateDir:STATE_DIR,deps});
+   assert.equal(receipt.state,"UNCERTAIN");
+   assert.equal(receipt.uncertaintyReason,"QUEUE_NULL_STATUS");
+   assert.equal(receipt.queueDiagnostic?.classification,"QUEUE_NULL_STATUS");
+   assert.equal(receipt.queueDiagnostic?.signal,null);
+  });
+
+  await checkAsync("P0 default Codex CLI resolves to an absolute path (launchd PATH has no codex)",async()=>{
+   const saved=process.env.CODEX_BIN;
+   delete process.env.CODEX_BIN;
+   try{
+    const resolved=resolveCodexBin();
+    assert.ok(resolved.startsWith("/"),"default must be absolute, got "+resolved);
+    assert.ok(resolved.endsWith("/codex"));
+   }finally{
+    if(saved!==undefined)process.env.CODEX_BIN=saved;
+   }
+   process.env.CODEX_BIN="/tmp/explicit-codex";
+   try{assert.equal(resolveCodexBin(),"/tmp/explicit-codex");}finally{
+    if(saved===undefined)delete process.env.CODEX_BIN;else process.env.CODEX_BIN=saved;
+   }
   });
 
   await checkAsync("G10 exit0 unparseable stdout => ACCEPTED then UNCERTAIN, never retried",async()=>{

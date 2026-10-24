@@ -6,7 +6,8 @@
  */
 import {spawnSync} from "node:child_process";
 import {randomBytes} from "node:crypto";
-import {lstatSync,readFileSync,readlinkSync,realpathSync,statSync,type Stats} from "node:fs";
+import {existsSync,lstatSync,readFileSync,readlinkSync,realpathSync,statSync,type Stats} from "node:fs";
+import {homedir} from "node:os";
 import {connect} from "node:net";
 import {dirname,join,sep} from "node:path";
 import {findCodexRollout} from "./coach-codex-native-continuity.js";
@@ -134,6 +135,21 @@ function statLike(stat:Stats):FileStatLike{
  };
 }
 
+/**
+ * Resolve the Codex CLI to an ABSOLUTE path by default. DevSpace under launchd
+ * has PATH=/usr/bin:/bin:/usr/sbin:/sbin, where ~/.local/bin/codex is NOT on
+ * PATH. The previous default "codex" made spawnSync fail with ENOENT; that
+ * ENOENT was discarded into an opaque CLI_UNCERTAIN — the real cause of the
+ * r2 native send failure.
+ */
+export function resolveCodexBin():string{
+ const override=process.env.CODEX_BIN;
+ if(override)return override;
+ const candidates=[join(homedir(),".local","bin","codex"),"/opt/homebrew/bin/codex","/usr/local/bin/codex"];
+ for(const candidate of candidates){try{if(existsSync(candidate))return candidate;}catch{}}
+ return "codex";
+}
+
 function makeRealRuntime():NativeOutboundRuntime{
  return {
   uid:process.getuid?.()??501,
@@ -147,14 +163,29 @@ function makeRealRuntime():NativeOutboundRuntime{
   statFile:path=>{const s=statSync(path);return{size:s.size,mtimeMs:s.mtimeMs};},
   probeWebSocket:realProbeWebSocket,
   runQueue:input=>{
+   const started=Date.now();
+   let codexBinary:{name:string;size:number|null;mtimeMs:number|null}|undefined;
+   try{
+    const st=statSync(input.codexBin);
+    codexBinary={name:input.codexBin.split("/").pop()??"codex",size:st.size,mtimeMs:st.mtimeMs};
+   }catch{codexBinary=undefined;}
    const result=spawnSync(input.codexBin,input.argv,{
     encoding:"utf8",timeout:input.timeoutMs,maxBuffer:4_000_000,env:input.env as NodeJS.ProcessEnv,
    });
+   const elapsedMs=Date.now()-started;
+   const stdout=result.stdout??"";
+   const stderr=result.stderr??"";
+   const stdoutBytes=stdout.length;
+   const stderrBytes=stderr.length;
    if(result.error){
     const code=errnoCode(result.error);
-    return{code:null,stdout:result.stdout??"",stderr:result.stderr??"",error:code==="ETIMEDOUT"?"TIMEOUT":(code??"SPAWN_FAILED")};
+    const timedOut=code==="ETIMEDOUT";
+    return{code:null,stdout,stderr,error:timedOut?"TIMEOUT":(code??"SPAWN_FAILED"),
+     signal:result.signal??null,errnoCode:code??null,timedOut,elapsedMs,stdoutBytes,stderrBytes,
+     ...(codexBinary?{codexBinary}:{})};
    }
-   return{code:result.status,stdout:result.stdout??"",stderr:result.stderr??""};
+   return{code:result.status,stdout,stderr,signal:result.signal??null,errnoCode:null,timedOut:false,
+    elapsedMs,stdoutBytes,stderrBytes,...(codexBinary?{codexBinary}:{})};
   },
   findRollout:(threadId,codexHome)=>findCodexRollout(threadId,codexHome),
   readRolloutText:path=>readFileSync(path,"utf8"),
@@ -359,7 +390,7 @@ export function buildNativeOutboundQueueCommand(input:{
   "--thread",input.threadId,
   "--message",input.prompt,
  ];
- const codexBin=input.codexBin??process.env.CODEX_BIN??"codex";
+ const codexBin=input.codexBin??resolveCodexBin();
  return {
   codexBin,
   argv,
