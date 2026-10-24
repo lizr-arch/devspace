@@ -4,7 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createServer,type Socket} from "node:net";
 import {randomUUID,createHash} from "node:crypto";
-import {AppBridgeError,createSharedThread,readSharedThread,sendSharedTurn,sharedAppStatus,bindSharedThread,boundSharedThread} from "./coach-app-server-bridge.js";
+import {AppBridgeError,createSharedThread,readSharedThread,sendSharedTurn,sharedAppStatus,bindSharedThread,boundSharedThread,sharedTurnReceipt,reconcileSharedTurn,assertSharedThreadOwnership} from "./coach-app-server-bridge.js";
 
 const dir=mkdtempSync(join(tmpdir(),"codex-app-bridge-"));
 const socketPath=join(dir,"shared.sock"),root=join(dir,"project"),wrongRoot=join(dir,"other"),stateDir=join(dir,"state");
@@ -50,7 +50,7 @@ const server=createServer(s=>{
       state.lastPrompt=x.params.input?.[0]?.text;
       const turnId=randomUUID();
       reply(s,{id:x.id,result:{turn:{id:turnId}}});
-      if(state.slow)continue;
+      if(state.slow){thread.turns.push({status:{type:"inProgress"},id:turnId,items:[{type:"userMessage",content:[{type:"text",text:state.lastPrompt}]}]});continue;}
       const ack="REPLY:"+state.lastPrompt;
       thread.turns.push({status:"completed",id:turnId,items:[
         {type:"userMessage",content:[{type:"text",text:state.lastPrompt}]},
@@ -71,9 +71,9 @@ const context={workspaceId:"ws_test",root,threadId,stateDir,socketPath};
 async function rejectsCode(p:Promise<unknown>,code:string){await assert.rejects(p,e=>e instanceof AppBridgeError&&e.code===code);}
 try{
  assert.equal((await sharedAppStatus(socketPath)).connected,true);
- const thread=await readSharedThread({...context,limit:5});
- assert.equal(thread.thread.threadId,threadId);
- assert.equal(thread.messages.length,0);
+ const firstRead=await readSharedThread({...context,limit:5});
+ assert.equal(firstRead.thread.threadId,threadId);
+ assert.equal(firstRead.messages.length,0);
  state.historyUnsupported=true;
  const noHistory=await readSharedThread({...context,limit:5});assert.equal(noHistory.historyAvailable,false);
  state.historyUnsupported=false;
@@ -83,6 +83,8 @@ try{
  await rejectsCode(sendSharedTurn({...context,operationId:"unbound",prompt:"no",sandbox:"read-only"}),"CODEX_APP_THREAD_NOT_BOUND");
  assert.equal(boundSharedThread(stateDir,"ws_test"),undefined);
  assert.equal(await bindSharedThread(context),threadId);
+ assertSharedThreadOwnership(stateDir,"ws_test",root,threadId);
+ assert.throws(()=>assertSharedThreadOwnership(stateDir,"ws_test",wrongRoot,threadId),/OWNERSHIP_CHANGED/);
  assert.equal(await bindSharedThread(context),threadId);
  await rejectsCode(bindSharedThread({...context,workspaceId:"another_workspace"}),"CODEX_APP_THREAD_ALREADY_OWNED");
  await rejectsCode(bindSharedThread({...context,workspaceId:"ws_test",threadId:"aa2369a7-c3aa-44ae-9334-11ea12745fb1"}),"CODEX_APP_THREAD_MISMATCH");
@@ -107,9 +109,17 @@ try{
  // Uncertain response has already been admitted and cannot be replayed on transport timeout.
  state.slow=true;
  await rejectsCode(sendSharedTurn({...context,operationId:"turn_uncertain",prompt:"slow",sandbox:"read-only",timeoutMs:3000}),"CODEX_APP_TURN_TIMEOUT");
+ const uncertain=sharedTurnReceipt(stateDir,"ws_test","turn_uncertain");
+ assert.equal(uncertain?.state,"UNCERTAIN");assert.ok(uncertain?.acceptedTurnId,"accepted turn identity is durable before waiting");
  const n=state.turnStarts;
  await rejectsCode(sendSharedTurn({...context,operationId:"turn_uncertain",prompt:"slow",sandbox:"read-only"}),"CODEX_APP_OPERATION_UNCERTAIN");
  assert.equal(state.turnStarts,n);
+ const delayed=thread.turns.find((x:any)=>x.id===uncertain?.acceptedTurnId);assert.ok(delayed);
+ delayed.status={type:"completed"};delayed.items.push({type:"agentMessage",text:"late completion"});
+ const recovered=await reconcileSharedTurn({...context,operationId:"turn_uncertain"});
+ assert.equal(recovered?.reply,"late completion");assert.equal(sharedTurnReceipt(stateDir,"ws_test","turn_uncertain")?.state,"COMPLETED");
+ assert.equal((await reconcileSharedTurn({...context,operationId:"turn_uncertain"}))?.turnId,uncertain?.acceptedTurnId,
+   "restart reconciliation is idempotent and uses the accepted turn ID");
  state.slow=false;
  const pair=await Promise.all([sendSharedTurn({...context,operationId:"turn_same",prompt:"once",sandbox:"read-only"}),
    sendSharedTurn({...context,operationId:"turn_same",prompt:"once",sandbox:"read-only"})]);

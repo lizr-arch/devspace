@@ -11,7 +11,8 @@ const dir=mkdtempSync(join(tmpdir(),"app-bridge-mcp-")),root=join(dir,"workspace
 mkdirSync(root);
 const fakeContext=(readOnly:boolean)=>({config:{readOnly,stateDir:join(dir,"state")},
   workspaces:{getWorkspace(id:string){if(id!=="own_workspace")throw Error("WORKSPACE_NOT_AUTHORIZED");return{root};}},
-  coachReviewEvents:{hasInterruptedRun(){return false;}}
+  managedCoachSidecar:{status(){return undefined;}},
+  coachReviewEvents:{hasInterruptedRun(){return false;},getAppTurn(){return undefined;}}
 } as unknown as ServerContext);
 async function pair(readOnly:boolean){
  const server=new McpServer({name:"app-bridge-mcp-test",version:"1.0"});
@@ -31,6 +32,7 @@ try{
  const namesRw=(await rw.client.listTools()).tools.map(t=>t.name);
  for(const name of ["codex_app_thread_bind","codex_app_thread_create","codex_app_thread_send"])
    assert.ok(namesRw.includes(name));
+ assert.ok(namesRw.includes("codex_app_review"));assert.ok(namesRw.includes("codex_app_thread_rework"));
  const unauthorized=await rw.client.callTool({name:"codex_app_thread_send",arguments:{
    workspaceId:"other_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf",operationId:"test",
    prompt:"do not send",sandbox:"read-only"

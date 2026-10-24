@@ -108,6 +108,7 @@ import { CodexWorkerClient, CodexWorkerCoachClient, defaultCodexWorkerKey } from
 import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
 import { registerCodexAgentTools } from "./server/tools-codex-agent.js";
 import { registerSharedCodexAppTools } from "./server/tools-codex-app.js";
+import { reconcileSharedTurn, sharedTurnReceipt, AppBridgeError } from "./coach-app-server-bridge.js";
 import { registerCodexReviewTools } from "./server/tools-codex-review.js";
 import { registerAgentAuditTools } from "./server/tools-agent-audit.js";
 import {
@@ -425,6 +426,30 @@ function createServerWithOwnedState(
   if(!codexWorkerSocket)restoreLocalCoach();
   const sidecarRecoveryTimer=codexWorkerSocket?undefined:setInterval(restoreLocalCoach,5000);
   sidecarRecoveryTimer?.unref();
+  let appRecoveryClosing=false,appRecoveryPending:Promise<void>|undefined;
+  const reconcilePendingAppTurns=()=>{
+    if(appRecoveryClosing||appRecoveryPending)return;
+    appRecoveryPending=(async()=>{
+      for(const turn of coachReviewEvents.listRecoverableAppTurns(50)){
+        if(appRecoveryClosing)break;
+        try{
+          const workspace=workspaces.getWorkspace(turn.workspace_id);
+          if(workspace.root!==turn.workspace_root)continue;
+          const receipt=await reconcileSharedTurn({root:workspace.root,stateDir:config.stateDir,
+            workspaceId:turn.workspace_id,operationId:turn.operation_id,threadId:turn.thread_id});
+          if(receipt)coachReviewEvents.updateAppTurn({workspaceId:turn.workspace_id,operationId:turn.operation_id,state:"COMPLETED",turnId:receipt.turnId});
+          else if(sharedTurnReceipt(config.stateDir,turn.workspace_id,turn.operation_id)?.state==="FAILED")
+            coachReviewEvents.updateAppTurn({workspaceId:turn.workspace_id,operationId:turn.operation_id,state:"FAILED",turnId:turn.turn_id??undefined});
+        }catch(error){
+          if(error instanceof AppBridgeError&&["CODEX_APP_SHARED_SOCKET_UNAVAILABLE","CODEX_APP_SOCKET_ERROR","CODEX_APP_SOCKET_CLOSED","CODEX_APP_HANDSHAKE_TIMEOUT"].includes(error.code))
+            coachReviewEvents.updateAppTurn({workspaceId:turn.workspace_id,operationId:turn.operation_id,state:"BLOCKED_PENDING_CONNECTION",turnId:turn.turn_id??undefined});
+        }
+      }
+    })().finally(()=>{appRecoveryPending=undefined;});
+  };
+  reconcilePendingAppTurns();
+  const appRecoveryTimer=setInterval(reconcilePendingAppTurns,30_000);
+  appRecoveryTimer.unref();
   const toolNames = toolNamesFor(config);
   const widgetMeta = (
     toolName: string,
@@ -493,7 +518,9 @@ function createServerWithOwnedState(
       if (closed) return closePending ?? Promise.resolve();
       closed = true;
       sidecarRecoveryClosing=true;
+      appRecoveryClosing=true;
       if(sidecarRecoveryTimer)clearInterval(sidecarRecoveryTimer);
+      clearInterval(appRecoveryTimer);
       mcpSessions.close();
       resourceMonitor.close();
       jobs.close();
@@ -508,6 +535,7 @@ function createServerWithOwnedState(
       closePending = Promise.allSettled([
         coachRealtime.close(),
         (async()=>{await sidecarRecoveryPending;await managedCoachSidecar.close();})(),
+        (async()=>{await appRecoveryPending;})(),
         nativeCodexRunner?.close(),
       ]).then(() => {
         agentObserver.close();

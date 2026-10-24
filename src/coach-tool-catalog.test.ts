@@ -12,9 +12,11 @@ assert.equal(names.filter(n=>n==="codex_agent_observe").length,1);
 assert.equal(names.filter(n=>n==="codex_task_freeze").length,1);
 assert.equal(requiredCapabilityForTool("codex_task_freeze"),"runner.execute");
 assert.equal(names.filter(n=>n==="codex_agent_update_config").length,1);
-for(const t of ["codex_app_thread_create","codex_app_thread_bind","codex_app_thread_current","codex_app_turn_receipt","codex_app_thread_send","codex_app_thread_read","codex_app_shared_status"]) assert.equal(names.filter(n=>n===t).length,1);
+for(const t of ["codex_app_thread_create","codex_app_thread_bind","codex_app_thread_current","codex_app_turn_receipt","codex_app_thread_send","codex_app_thread_read","codex_app_shared_status","codex_app_review","codex_app_thread_rework"]) assert.equal(names.filter(n=>n===t).length,1);
 assert.equal(requiredCapabilityForTool("codex_app_thread_send"),"runner.execute");
 assert.equal(requiredCapabilityForTool("codex_app_thread_read"),"workspace.read");
+assert.equal(requiredCapabilityForTool("codex_app_review"),"runner.execute");
+assert.equal(requiredCapabilityForTool("codex_app_thread_rework"),"runner.execute");
 for(const tool of ["coach_realtime_status","coach_realtime_register","coach_realtime_pause","coach_realtime_resume","coach_webgpt_claim_browser_route"])
  assert.equal(names.filter(n=>n===tool).length,1);
 for(const tool of ["coach_realtime_register","coach_realtime_pause","coach_realtime_resume","coach_webgpt_claim_browser_route"])
@@ -36,9 +38,11 @@ assert.ok(ro.includes("codex_app_thread_read"));
 assert.ok(ro.includes("codex_app_thread_current"));
 assert.ok(ro.includes("codex_app_turn_receipt"));
 assert.ok(ro.includes("codex_app_shared_status"));
+assert.ok(!ro.includes("codex_app_review"));
+assert.ok(!ro.includes("codex_app_thread_rework"));
 assert.ok(!ro.includes("codex_app_thread_create"));
 assert.ok(!ro.includes("codex_app_thread_bind"));
 assert.ok(!ro.includes("codex_app_thread_send"));
 assert.ok(!ro.includes("codex_task_freeze"));
-assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001\+codex-app-shared-001$/);
+assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001\+codex-app-shared-001\+codex-app-autowake-001$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");

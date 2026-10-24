@@ -32,7 +32,7 @@ type RpcRequestWithCoach=RpcRequest
   | {version:1;token:string;op:"coach_start";input:CoachStartInput}
   | {version:1;token:string;op:"coach_stop";workspaceId:string}
   | {version:1;token:string;op:"coach_status";workspaceId:string}
-  | {version:1;token:string;op:"coach_delivery_receipt";workspaceId:string;eventId:number};
+  | {version:1;token:string;op:"coach_delivery_receipt";workspaceId:string;eventId:number|string};
 type RpcCall=RpcRequestWithCoach extends infer T?T extends RpcRequestWithCoach?Omit<T,"version"|"token">:never:never;
 
 function secretAt(path:string,create:boolean):Buffer {
@@ -364,7 +364,7 @@ export class CodexWorkerClient implements CodexAgentControl {
   coachStart(input:CoachStartInput):Promise<CoachSidecarStartResult>{return this.call({op:"coach_start",input});}
   coachStop(workspaceId:string):Promise<void>{return this.call({op:"coach_stop",workspaceId}).then(()=>{});}
   coachStatus(workspaceId:string):Promise<CoachSidecarStatus|undefined>{return this.call({op:"coach_status",workspaceId});}
-  coachDeliveryReceipt(workspaceId:string,eventId:number):Promise<DeliveryReceipt|undefined>{
+  coachDeliveryReceipt(workspaceId:string,eventId:number|string):Promise<DeliveryReceipt|undefined>{
     return this.call({op:"coach_delivery_receipt",workspaceId,eventId});
   }
 }
@@ -375,7 +375,7 @@ export class CodexWorkerCoachClient implements ManagedCoachSidecarControl {
   start(input:CoachStartInput):Promise<CoachSidecarStartResult>{return this.worker.coachStart(input);}
   stop(workspaceId:string):Promise<void>{return this.worker.coachStop(workspaceId);}
   status(workspaceId:string):Promise<CoachSidecarStatus|undefined>{return this.worker.coachStatus(workspaceId);}
-  getDeliveryReceipt(workspaceId:string,eventId:number):Promise<DeliveryReceipt|undefined>{
+  getDeliveryReceipt(workspaceId:string,eventId:number|string):Promise<DeliveryReceipt|undefined>{
     return this.worker.coachDeliveryReceipt(workspaceId,eventId);
   }
   activeServiceIdsForRoot(root:string):string[]{return this.events.coachFeedWorkspaceIdsForRoot(root);}

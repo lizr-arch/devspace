@@ -61,6 +61,9 @@ export interface ReviewReceipt {
   evidence_sha256: string;
   reviewed_at: string;
 }
+export type AppTurnState="PENDING"|"UNCERTAIN"|"COMPLETED"|"FAILED"|"BLOCKED_PENDING_CONNECTION";
+export interface AppTurnRecord {workspace_id:string;operation_id:string;workspace_root:string;thread_id:string;request_sha256:string;task_id:string;task_sha256:string;state:AppTurnState;turn_id:string|null;event_id:string|null;updated_at:string}
+export interface AppReviewEvent {event_id:string;workspace_id:string;operation_id:string;event_type:"CODEX_APP_READY_FOR_GPT_REVIEW";thread_id:string;turn_id:string;evidence_sha256:string;created_at:string}
 export class CoachReviewEventStore {
   readonly path: string;
   private readonly db: Database.Database;
@@ -152,6 +155,9 @@ export class CoachReviewEventStore {
         }
       }
       this.db.exec("CREATE TABLE IF NOT EXISTS codex_worker_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1),worker_id TEXT NOT NULL,generation INTEGER NOT NULL,pid INTEGER NOT NULL,uid INTEGER NOT NULL,lstart TEXT NOT NULL,heartbeat_at TEXT NOT NULL)");
+      this.db.exec("CREATE TABLE IF NOT EXISTS codex_app_turns (workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,workspace_root TEXT NOT NULL,thread_id TEXT NOT NULL,request_sha256 TEXT NOT NULL,task_id TEXT NOT NULL,task_sha256 TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('PENDING','UNCERTAIN','COMPLETED','FAILED','BLOCKED_PENDING_CONNECTION')),turn_id TEXT,event_id TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(workspace_id,operation_id));"+
+        "CREATE TABLE IF NOT EXISTS codex_app_review_events (event_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,thread_id TEXT NOT NULL,turn_id TEXT NOT NULL,evidence_sha256 TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(workspace_id,operation_id));"+
+        "CREATE TABLE IF NOT EXISTS codex_app_review_decisions (event_id TEXT PRIMARY KEY REFERENCES codex_app_review_events(event_id),decision TEXT NOT NULL CHECK(decision IN ('APPROVED','REWORK','BLOCKED')),evidence_sha256 TEXT NOT NULL,reason TEXT NOT NULL,reviewed_at TEXT NOT NULL);");
       this.db.exec("CREATE TABLE IF NOT EXISTS codex_worker_generation (singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation INTEGER NOT NULL)");
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_worker_review_recommendations (workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,decision TEXT NOT NULL CHECK(decision IN ('APPROVED','REWORK','BLOCKED')),reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(workspace_id,operation_id),FOREIGN KEY(workspace_id,operation_id) REFERENCES coach_agent_runs(workspace_id,operation_id))");
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_feed_config (singleton INTEGER PRIMARY KEY CHECK(singleton=1),workspace_id TEXT NOT NULL,workspace_root TEXT NOT NULL,port INTEGER NOT NULL,paired_extension_id TEXT,observe_all_native_agents INTEGER NOT NULL CHECK(observe_all_native_agents IN (0,1)),updated_at TEXT NOT NULL)");
@@ -270,6 +276,51 @@ export class CoachReviewEventStore {
       const { event_id, workspace_id, operation_id, event_type, created_at } = row;
       return {event_id,workspace_id,operation_id,event_type,created_at};
     }).immediate();
+  }
+  registerAppTurn(input:{workspaceId:string;operationId:string;workspaceRoot:string;threadId:string;requestSha256:string;taskId:string;taskSha256:string}):AppTurnRecord {
+    if(!ID.test(input.workspaceId)||!ID.test(input.operationId)||!SHA.test(input.requestSha256)||!SHA.test(input.taskSha256)||!input.workspaceRoot||!input.threadId||!ID.test(input.taskId))throw new TypeError("CODEX_APP_JOURNAL_INVALID");
+    const now=new Date().toISOString();
+    return this.db.transaction(()=>{
+      this.db.prepare("INSERT OR IGNORE INTO codex_app_turns(workspace_id,operation_id,workspace_root,thread_id,request_sha256,task_id,task_sha256,state,updated_at) VALUES(?,?,?,?,?,?,?,'PENDING',?)").run(input.workspaceId,input.operationId,input.workspaceRoot,input.threadId,input.requestSha256,input.taskId,input.taskSha256,now);
+      const row=this.db.prepare("SELECT * FROM codex_app_turns WHERE workspace_id=? AND operation_id=?").get(input.workspaceId,input.operationId) as AppTurnRecord;
+      const expected:{workspace_root:string;thread_id:string;request_sha256:string;task_id:string;task_sha256:string}={
+        workspace_root:input.workspaceRoot,thread_id:input.threadId,request_sha256:input.requestSha256,
+        task_id:input.taskId,task_sha256:input.taskSha256};
+      for(const k of Object.keys(expected) as Array<keyof typeof expected>)if(row[k]!==expected[k])throw new Error("CODEX_APP_OPERATION_CONFLICT");
+      return row;
+    }).immediate();
+  }
+  updateAppTurn(input:{workspaceId:string;operationId:string;state:AppTurnState;turnId?:string}):AppTurnRecord {
+    if(!ID.test(input.workspaceId)||!ID.test(input.operationId)||!(["PENDING","UNCERTAIN","COMPLETED","FAILED","BLOCKED_PENDING_CONNECTION"] as string[]).includes(input.state))throw new TypeError("CODEX_APP_JOURNAL_INVALID");
+    const now=new Date().toISOString();
+    return this.db.transaction(()=>{
+      const old=this.db.prepare("SELECT * FROM codex_app_turns WHERE workspace_id=? AND operation_id=?").get(input.workspaceId,input.operationId) as AppTurnRecord|undefined;
+      if(!old)throw new Error("CODEX_APP_OPERATION_NOT_FOUND");
+      if(old.state==="COMPLETED"&&input.state!=="COMPLETED")return old;
+      if(old.state==="FAILED"&&input.state!=="FAILED")return old;
+      const turnId=input.turnId??old.turn_id;
+      this.db.prepare("UPDATE codex_app_turns SET state=?,turn_id=?,updated_at=? WHERE workspace_id=? AND operation_id=?").run(input.state,turnId,now,input.workspaceId,input.operationId);
+      let eventId=old.event_id;
+      if(input.state==="COMPLETED"){
+        if(!turnId)throw new Error("CODEX_APP_TURN_ID_REQUIRED");
+        eventId="app:"+createHash("sha256").update(input.workspaceId+"\\0"+input.operationId).digest("hex");
+        const evidenceSha=createHash("sha256").update(JSON.stringify({workspaceId:input.workspaceId,operationId:input.operationId,threadId:old.thread_id,turnId,requestSha256:old.request_sha256,taskId:old.task_id,taskSha256:old.task_sha256})).digest("hex");
+        this.db.prepare("INSERT OR IGNORE INTO codex_app_review_events(event_id,workspace_id,operation_id,thread_id,turn_id,evidence_sha256,created_at) VALUES(?,?,?,?,?,?,?)").run(eventId,input.workspaceId,input.operationId,old.thread_id,turnId,evidenceSha,now);
+        const ev=this.db.prepare("SELECT event_id,thread_id,turn_id,evidence_sha256 FROM codex_app_review_events WHERE workspace_id=? AND operation_id=?").get(input.workspaceId,input.operationId) as {event_id:string;thread_id:string;turn_id:string;evidence_sha256:string};
+        if(ev.event_id!==eventId||ev.thread_id!==old.thread_id||ev.turn_id!==turnId||ev.evidence_sha256!==evidenceSha)throw new Error("CODEX_APP_EVENT_IDENTITY_CONFLICT");
+        this.db.prepare("UPDATE codex_app_turns SET event_id=? WHERE workspace_id=? AND operation_id=?").run(eventId,input.workspaceId,input.operationId);
+      }
+      return this.db.prepare("SELECT * FROM codex_app_turns WHERE workspace_id=? AND operation_id=?").get(input.workspaceId,input.operationId) as AppTurnRecord;
+    }).immediate();
+  }
+  getAppTurn(workspaceId:string,operationId:string):AppTurnRecord|undefined {if(!ID.test(workspaceId)||!ID.test(operationId))throw new TypeError("CODEX_APP_JOURNAL_INVALID");return this.db.prepare("SELECT * FROM codex_app_turns WHERE workspace_id=? AND operation_id=?").get(workspaceId,operationId) as AppTurnRecord|undefined;}
+  listRecoverableAppTurns(limit=50):AppTurnRecord[]{if(!Number.isInteger(limit)||limit<1||limit>50)throw new TypeError("CODEX_APP_JOURNAL_INVALID");return this.db.prepare("SELECT * FROM codex_app_turns WHERE state IN ('PENDING','UNCERTAIN','BLOCKED_PENDING_CONNECTION') AND turn_id IS NOT NULL ORDER BY updated_at LIMIT ?").all(limit) as AppTurnRecord[];}
+  listPendingAppEvents(workspaceId:string,limit=50):AppReviewEvent[]{if(!ID.test(workspaceId)||!Number.isInteger(limit)||limit<1||limit>50)throw new TypeError("CODEX_APP_EVENT_QUERY_INVALID");return this.db.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,'CODEX_APP_READY_FOR_GPT_REVIEW' AS event_type,e.thread_id,e.turn_id,e.evidence_sha256,e.created_at FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id=? AND d.event_id IS NULL ORDER BY e.created_at LIMIT ?").all(workspaceId,limit) as AppReviewEvent[];}
+  getAppEventTask(workspaceId:string,eventId:string):{thread_id:string;task_id:string;task_sha256:string;decision?:Decision}|undefined {if(!ID.test(workspaceId)||!/^app:[a-f0-9]{64}$/.test(eventId))throw new TypeError("CODEX_APP_EVENT_QUERY_INVALID");return this.db.prepare("SELECT e.thread_id,t.task_id,t.task_sha256,d.decision FROM codex_app_review_events e JOIN codex_app_turns t ON t.workspace_id=e.workspace_id AND t.operation_id=e.operation_id LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id=? AND e.event_id=?").get(workspaceId,eventId) as {thread_id:string;task_id:string;task_sha256:string;decision?:Decision}|undefined;}
+  countAppReworks(workspaceId:string,taskId:string,taskSha256:string):number {if(!ID.test(workspaceId)||!ID.test(taskId)||!SHA.test(taskSha256))throw new TypeError("CODEX_APP_EVENT_QUERY_INVALID");const row=this.db.prepare("SELECT count(*) AS n FROM codex_app_review_decisions d JOIN codex_app_review_events e ON e.event_id=d.event_id JOIN codex_app_turns t ON t.workspace_id=e.workspace_id AND t.operation_id=e.operation_id WHERE e.workspace_id=? AND t.task_id=? AND t.task_sha256=? AND d.decision='REWORK'").get(workspaceId,taskId,taskSha256) as {n:number};return row.n;}
+  submitAppReview(input:{workspaceId:string;eventId:string;decision:Decision;evidenceSha256:string;reason:string}):{event_id:string;decision:Decision;evidence_sha256:string;reviewed_at:string}{
+    if(!ID.test(input.workspaceId)||!/^app:[a-f0-9]{64}$/.test(input.eventId)||!SHA.test(input.evidenceSha256)||!input.reason.trim()||input.reason.length>4000||!["APPROVED","REWORK","BLOCKED"].includes(input.decision))throw new TypeError("CODEX_APP_REVIEW_INVALID");
+    return this.db.transaction(()=>{const event=this.db.prepare("SELECT evidence_sha256 FROM codex_app_review_events WHERE event_id=? AND workspace_id=?").get(input.eventId,input.workspaceId) as {evidence_sha256:string}|undefined;if(!event)throw new Error("CODEX_APP_EVENT_NOT_FOUND");if(event.evidence_sha256!==input.evidenceSha256)throw new Error("CODEX_APP_REVIEW_EVIDENCE_MISMATCH");this.db.prepare("INSERT OR IGNORE INTO codex_app_review_decisions(event_id,decision,evidence_sha256,reason,reviewed_at) VALUES(?,?,?,?,?)").run(input.eventId,input.decision,input.evidenceSha256,input.reason.trim(),new Date().toISOString());const receipt=this.db.prepare("SELECT event_id,decision,evidence_sha256,reviewed_at FROM codex_app_review_decisions WHERE event_id=?").get(input.eventId) as {event_id:string;decision:Decision;evidence_sha256:string;reviewed_at:string};if(receipt.decision!==input.decision||receipt.evidence_sha256!==input.evidenceSha256)throw new Error("CODEX_APP_REVIEW_CONFLICT");return receipt;}).immediate();
   }
   /** Atomically persist a trusted Runner evidence packet and its completion event. */
   recordCompletedWithEvidence(input: {workspaceId:string;operationId:string;evidenceSha256:string;packetJson:string}): CoachEvent {

@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { bindSharedThread, boundSharedThread, createSharedThread, readSharedThread, sendSharedTurn, sharedTurnReceipt, sharedAppStatus } from "../coach-app-server-bridge.js";
-import { taskReferenceSchema, verifyTask } from "../coach-task-contract.js";
+import { bindSharedThread, boundSharedThread, assertSharedThreadOwnership, createSharedThread, readSharedThread, sendSharedTurn, sharedTurnReceipt, sharedAppStatus, reconcileSharedTurn, AppBridgeError } from "../coach-app-server-bridge.js";
+import { taskReferenceSchema, verifyTask, sha256 } from "../coach-task-contract.js";
 import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 
@@ -24,13 +24,34 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
     title:"Read durable status of a Codex App turn",
     description:"Read PENDING, UNCERTAIN or COMPLETED evidence by workspace and operation ID after a client or network interruption; never resubmits the message.",
     inputSchema:{workspaceId:id,operationId:id},
-    outputSchema:resultOutputSchema({receipt:z.unknown().optional(),error:z.unknown().optional()}),
+    outputSchema:resultOutputSchema({receipt:z.unknown().optional(),journal:z.unknown().optional(),
+      appConnection:z.string().optional(),sidecarState:z.string().optional(),eventState:z.string().optional(),
+      deliveryReceipt:z.string().optional(),error:z.unknown().optional()}),
     _meta:{},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
   },async({workspaceId,operationId})=>{
     ctx.workspaces.getWorkspace(workspaceId);
-    const receipt=sharedTurnReceipt(ctx.config.stateDir,workspaceId,operationId);
-    return{content:[textBlock(receipt?"Codex App operation status: "+receipt.state:"No Codex App operation record found.")],
-      structuredContent:{result:"Codex App turn receipt",...(receipt?{receipt}:{})}};
+    let journal=ctx.coachReviewEvents.getAppTurn(workspaceId,operationId);
+    let receipt=sharedTurnReceipt(ctx.config.stateDir,workspaceId,operationId);
+    if(journal&&receipt&&receipt.state!=="COMPLETED"&&receipt.state!=="FAILED"&&receipt.acceptedTurnId){
+      try{
+        const recovered=await reconcileSharedTurn({root:ctx.workspaces.getWorkspace(workspaceId).root,stateDir:ctx.config.stateDir,workspaceId,operationId,threadId:journal.thread_id});
+        if(recovered)ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"COMPLETED",turnId:recovered.turnId});
+        else if(sharedTurnReceipt(ctx.config.stateDir,workspaceId,operationId)?.state==="FAILED")ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"FAILED",turnId:receipt.acceptedTurnId});
+      }catch(error){
+        if(error instanceof AppBridgeError&&["CODEX_APP_SHARED_SOCKET_UNAVAILABLE","CODEX_APP_SOCKET_ERROR","CODEX_APP_SOCKET_CLOSED"].includes(error.code))
+          ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"BLOCKED_PENDING_CONNECTION",turnId:receipt.acceptedTurnId});
+      }
+      journal=ctx.coachReviewEvents.getAppTurn(workspaceId,operationId);receipt=sharedTurnReceipt(ctx.config.stateDir,workspaceId,operationId);
+    }
+    const app=await sharedAppStatus();
+    const sidecar=await ctx.managedCoachSidecar.status(workspaceId);
+    const delivery=journal?.event_id?await ctx.managedCoachSidecar.getDeliveryReceipt?.(workspaceId,journal.event_id):undefined;
+    const state=journal?.state??receipt?.state??"NOT_FOUND";
+    return{content:[textBlock("Native App turn "+state+"; event "+(journal?.event_id?"persisted":"pending or absent")+
+      "; browser submission "+(delivery?.result??"not acknowledged")+".")],
+      structuredContent:{result:"Codex App recovery and delivery status",appConnection:app.connected?"CONNECTED":app.error,
+        sidecarState:sidecar?.state??"UNAVAILABLE",eventState:journal?.event_id?"PENDING_REVIEW":"NOT_PUBLISHED",
+        deliveryReceipt:delivery?.result??"NONE",...(receipt?{receipt}:{}),...(journal?{journal:{state:journal.state,eventId:journal.event_id}}:{})}};
   });
   registerAppTool(server,"codex_app_thread_current",{
     title:"Read the pinned Codex App thread for a DevSpace workspace",
@@ -112,11 +133,54 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
         "\nSupplementary Web GPT instruction:\n"+prompt
       : prompt;
     if(effectivePrompt.length>10000)throw new Error("CODEX_APP_TASK_PROMPT_TOO_LONG");
-    const receipt=await sendSharedTurn({
-      workspaceId,root:workspace.root,threadId,operationId,prompt:effectivePrompt,sandbox,
-      stateDir:ctx.config.stateDir,timeoutMs,
-    });
+    assertSharedThreadOwnership(ctx.config.stateDir,workspaceId,workspace.root,threadId);
+    const ref=task;
+    ctx.coachReviewEvents.registerAppTurn({workspaceId,operationId,workspaceRoot:workspace.root,threadId,
+      requestSha256:sha256(effectivePrompt),taskId:ref?.taskId??"read-only",taskSha256:ref?.sha256??sha256("read-only")});
+    let receipt;
+    try{
+      receipt=await sendSharedTurn({workspaceId,root:workspace.root,threadId,operationId,prompt:effectivePrompt,sandbox,
+        stateDir:ctx.config.stateDir,timeoutMs,onAccepted:turnId=>{ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"PENDING",turnId});}});
+      ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"COMPLETED",turnId:receipt.turnId});
+    }catch(error){
+      const bridgeReceipt=sharedTurnReceipt(ctx.config.stateDir,workspaceId,operationId);
+      ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:bridgeReceipt?.state==="PENDING"?"BLOCKED_PENDING_CONNECTION":bridgeReceipt?.state==="FAILED"?"FAILED":"UNCERTAIN"});
+      throw error;
+    }
     return{content:[textBlock("Codex App turn "+receipt.turnId+" completed; inspect receipt for the actual reply.")],
       structuredContent:{result:"App thread completed; not an approved code review",receipt}};
+  });
+  registerAppTool(server,"codex_app_review",{
+    title:"Record an independent Web GPT review of a native App event",
+    description:"Writes a bounded APPROVED, REWORK or BLOCKED receipt for one exact workspace-scoped native ChatGPT App Codex event. Requires Web GPT evidence SHA-256 and reason; completion and browser DOM submission are not approval.",
+    inputSchema:{workspaceId:id,eventId:z.string().regex(/^app:[a-f0-9]{64}$/),decision:z.enum(["APPROVED","REWORK","BLOCKED"]),evidenceSha256:z.string().regex(/^[a-f0-9]{64}$/),reason:z.string().min(1).max(4000)},
+    outputSchema:resultOutputSchema({receipt:z.unknown().optional()}),_meta:{},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  },async({workspaceId,eventId,decision,evidenceSha256,reason})=>{
+    ctx.workspaces.getWorkspace(workspaceId);
+    const receipt=ctx.coachReviewEvents.submitAppReview({workspaceId,eventId,decision,evidenceSha256,reason});
+    return{content:[textBlock("Recorded independent native App event review: "+decision+".")],structuredContent:{result:"Native App review receipt",receipt}};
+  });
+  registerAppTool(server,"codex_app_thread_rework",{
+    title:"Send bounded REWORK to the same native App thread",
+    description:"After an exact native App event has a recorded Web GPT REWORK verdict, sends one new operation to that same pinned thread under the same frozen TASK. Maximum three REWORK cycles per task fingerprint; never starts CLI.",
+    inputSchema:{workspaceId:id,eventId:z.string().regex(/^app:[a-f0-9]{64}$/),operationId:id,prompt:z.string().min(1).max(8000),task:taskReferenceSchema},
+    outputSchema:resultOutputSchema({receipt:z.unknown().optional(),error:z.unknown().optional()}),_meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
+  },async({workspaceId,eventId,operationId,prompt,task})=>{
+    const workspace=ctx.workspaces.getWorkspace(workspaceId);verifyTask(workspace.root,workspaceId,task);
+    const prior=ctx.coachReviewEvents.getAppEventTask(workspaceId,eventId);
+    if(!prior||prior.decision!=="REWORK")throw new Error("CODEX_APP_REWORK_NOT_AUTHORIZED");
+    assertSharedThreadOwnership(ctx.config.stateDir,workspaceId,workspace.root,prior.thread_id);
+    if(prior.task_id!==task.taskId||prior.task_sha256!==task.sha256)throw new Error("CODEX_APP_REWORK_TASK_MISMATCH");
+    if(ctx.coachReviewEvents.countAppReworks(workspaceId,task.taskId,task.sha256)>=3)throw new Error("CODEX_APP_REWORK_LIMIT");
+    const effectivePrompt="Authorized frozen development TASK: "+task.taskPath+"\nExpected SHA-256: "+task.sha256+
+      "\nRead this exact TASK file and comply with its full scope and acceptance criteria. Do not modify .devspace control files.\n"+prompt;
+    ctx.coachReviewEvents.registerAppTurn({workspaceId,operationId,workspaceRoot:workspace.root,threadId:prior.thread_id,
+      requestSha256:sha256(effectivePrompt),taskId:task.taskId,taskSha256:task.sha256});
+    try{
+      const receipt=await sendSharedTurn({workspaceId,root:workspace.root,threadId:prior.thread_id,operationId,prompt:effectivePrompt,
+        sandbox:"workspace-write",stateDir:ctx.config.stateDir,onAccepted:turnId=>{ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"PENDING",turnId});}});
+      ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"COMPLETED",turnId:receipt.turnId});
+      return{content:[textBlock("Native App REWORK turn completed on the pinned thread; independent review is still required.")],structuredContent:{result:"Native App REWORK completed",receipt}};
+    }catch(error){ctx.coachReviewEvents.updateAppTurn({workspaceId,operationId,state:"UNCERTAIN"});throw error;}
   });
 }

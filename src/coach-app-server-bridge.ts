@@ -250,24 +250,67 @@ export function boundSharedThread(stateDir:string,workspaceId:string):string|und
     throw new AppBridgeError("CODEX_APP_BINDING_UNREADABLE");
   }
 }
+export function assertSharedThreadOwnership(stateDir:string,workspaceId:string,root:string,threadId:string):void {
+  if(boundSharedThread(stateDir,workspaceId)!==threadId)throw new AppBridgeError("CODEX_APP_THREAD_NOT_BOUND");
+  const path=join(stateDir,"coach-app-thread-owners",threadId+".json");
+  try{
+    const st=lstatSync(path),canonical=realpathSync(path),stateRoot=realpathSync(stateDir);
+    // The state directory itself may be reached through an alias (macOS /var ->
+    // /private/var), so compare the canonicalized owner path against the
+    // canonical state root. A symlinked owner file or parent still fails.
+    if(st.isSymbolicLink()||!st.isFile()||canonical!==join(stateRoot,"coach-app-thread-owners",threadId+".json"))throw new AppBridgeError("CODEX_APP_THREAD_OWNER_UNSAFE");
+    const owner=JSON.parse(readFileSync(path,"utf8")) as {workspaceId:string;root:string};
+    if(owner.workspaceId!==workspaceId||owner.root!==safeRoot(root))throw new AppBridgeError("CODEX_APP_THREAD_OWNERSHIP_CHANGED");
+  }catch(error){if(error instanceof AppBridgeError)throw error;throw new AppBridgeError("CODEX_APP_THREAD_OWNER_UNAVAILABLE");}
+}
 /** The result of a previously submitted operation, safe to query after a client timeout. */
 export function sharedTurnReceipt(stateDir:string,workspaceId:string,operationId:string):
-  {state:"PENDING"|"UNCERTAIN"|"COMPLETED";receipt?:TurnReceipt}|undefined {
+  {state:"PENDING"|"UNCERTAIN"|"COMPLETED"|"FAILED"|"BLOCKED_PENDING_CONNECTION";receipt?:TurnReceipt;acceptedTurnId?:string}|undefined {
   if(!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(workspaceId)||
     !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(operationId))
     throw new AppBridgeError("CODEX_APP_OPERATION_ID_INVALID");
   const key=createHash("sha256").update(workspaceId+"\0"+operationId).digest("hex");
   try{
     const raw=JSON.parse(readFileSync(join(stateDir,"coach-app-turns",key+".json"),"utf8")) as
-      {workspaceId:string;state:"PENDING"|"UNCERTAIN"|"COMPLETED";receipt?:TurnReceipt};
-    if(raw.workspaceId!==workspaceId||!["PENDING","UNCERTAIN","COMPLETED"].includes(raw.state))
+      {workspaceId:string;state:"PENDING"|"UNCERTAIN"|"COMPLETED"|"FAILED"|"BLOCKED_PENDING_CONNECTION";receipt?:TurnReceipt;acceptedTurnId?:string};
+    if(raw.workspaceId!==workspaceId||!["PENDING","UNCERTAIN","COMPLETED","FAILED","BLOCKED_PENDING_CONNECTION"].includes(raw.state))
       throw new AppBridgeError("CODEX_APP_RECEIPT_INVALID");
-    return {state:raw.state,...(raw.receipt?{receipt:raw.receipt}:{})};
+    return {state:raw.state,...(raw.receipt?{receipt:raw.receipt}:{}),...(typeof raw.acceptedTurnId==="string"?{acceptedTurnId:raw.acceptedTurnId}:{})};
   }catch(e){
     if((e as NodeJS.ErrnoException).code==="ENOENT")return undefined;
     if(e instanceof AppBridgeError)throw e;
     throw new AppBridgeError("CODEX_APP_RECEIPT_UNREADABLE");
   }
+}
+/** Reconcile only the exact turn ID accepted for this operation; never infer from latest assistant text. */
+export async function reconcileSharedTurn(input:{root:string;stateDir:string;workspaceId:string;operationId:string;threadId:string;socketPath?:string}):Promise<TurnReceipt|undefined>{
+  const current=sharedTurnReceipt(input.stateDir,input.workspaceId,input.operationId);
+  if(!current||current.state==="COMPLETED"||current.state==="FAILED"||!current.acceptedTurnId)return current?.receipt;
+  assertSharedThreadOwnership(input.stateDir,input.workspaceId,input.root,input.threadId);
+  const turns=await withConnection(input.socketPath,async c=>{
+    const data=await c.request("thread/read",{threadId:input.threadId,includeTurns:true},20000);
+    assertThread(data?.thread,input.root,input.threadId);
+    return Array.isArray(data.thread.turns)?data.thread.turns:[];
+  });
+  const turn=turns.find((candidate:any)=>candidate?.id===current.acceptedTurnId);
+  if(!turn)return undefined;
+  const status=typeof turn.status==="string"?turn.status:turn.status?.type;
+  if(status==="failed"||status==="error"){
+    persistTurnState(input.stateDir,input.workspaceId,input.operationId,"FAILED",current.acceptedTurnId);
+    return undefined;
+  }
+  if(status!=="completed")return undefined;
+  const reply=(Array.isArray(turn.items)?turn.items:[]).filter((item:any)=>item?.type==="agentMessage").map((item:any)=>String(item.text||"")).join("\n").slice(0,MAX_REPLY);
+  if(!reply)return undefined;
+  const receipt:TurnReceipt={state:"COMPLETED",threadId:input.threadId,operationId:input.operationId,turnId:current.acceptedTurnId,reply,durationMs:0};
+  persistTurnState(input.stateDir,input.workspaceId,input.operationId,"COMPLETED",current.acceptedTurnId,receipt);
+  return receipt;
+}
+function persistTurnState(stateDir:string,workspaceId:string,operationId:string,state:"PENDING"|"UNCERTAIN"|"COMPLETED"|"FAILED",acceptedTurnId?:string,receipt?:TurnReceipt):void{
+  const key=createHash("sha256").update(workspaceId+"\0"+operationId).digest("hex"),store=join(stateDir,"coach-app-turns"),path=join(store,key+".json");
+  const temp=join(store,key+"."+randomBytes(6).toString("hex")+".tmp");
+  const old=JSON.parse(readFileSync(path,"utf8"));
+  writeFileSync(temp,JSON.stringify({...old,state,acceptedTurnId,...(receipt?{receipt}:{})}),{mode:0o600});renameSync(temp,path);
 }
 /** Exact workspace-to-thread pin. Never guesses a ChatGPT tab or silently rebinds. */
 export async function bindSharedThread(input:{workspaceId:string;root:string;threadId:string;stateDir:string;socketPath?:string}):Promise<string> {
@@ -311,7 +354,7 @@ export async function bindSharedThread(input:{workspaceId:string;root:string;thr
 }
 
 export interface SendRequest {
-  root:string;workspaceId:string;threadId:string;operationId:string;prompt:string;
+  root:string;workspaceId:string;threadId:string;operationId:string;prompt:string;onAccepted?:(turnId:string)=>void|Promise<void>;
   sandbox:"read-only"|"workspace-write";stateDir:string;socketPath?:string;timeoutMs?:number;
 }
 export interface TurnReceipt {state:"COMPLETED";threadId:string;operationId:string;turnId:string;reply:string;durationMs:number}
@@ -343,9 +386,10 @@ export async function sendSharedTurn(input:SendRequest):Promise<TurnReceipt>{
     const fd=openSync(path,"wx",0o600);
     try{writeFileSync(fd,JSON.stringify({fingerprint,state:"PENDING",threadId:input.threadId,workspaceId:input.workspaceId}));}
     finally{closeSync(fd);}
+    let acceptedTurnId:string|undefined;
     const save=(state:string,receipt?:TurnReceipt)=>{
       const temp=join(store,key+"."+randomBytes(6).toString("hex")+".tmp");
-      writeFileSync(temp,JSON.stringify({fingerprint,state,threadId:input.threadId,workspaceId:input.workspaceId,receipt}),{mode:0o600});
+      writeFileSync(temp,JSON.stringify({fingerprint,state,threadId:input.threadId,workspaceId:input.workspaceId,acceptedTurnId,...(receipt?{receipt}:{})}),{mode:0o600});
       renameSync(temp,path);
     };
     const start=Date.now();
@@ -384,6 +428,7 @@ export async function sendSharedTurn(input:SendRequest):Promise<TurnReceipt>{
             input:[{type:"text",text:input.prompt}]},20000);
           turnId=res?.turn?.id;
           if(typeof turnId!=="string")throw new AppBridgeError("CODEX_APP_TURN_NOT_ACCEPTED");
+          acceptedTurnId=turnId;save("PENDING");await input.onAccepted?.(turnId);
           await Promise.race([completion,new Promise<void>((_,reject)=>{completionTimer=setTimeout(()=>reject(new AppBridgeError("CODEX_APP_TURN_TIMEOUT")),timeoutMs);})]);
           if(failed||final?.params?.turn?.status!=="completed")throw new AppBridgeError("CODEX_APP_TURN_FAILED");
           const turn=final.params.turn;
@@ -396,7 +441,10 @@ export async function sendSharedTurn(input:SendRequest):Promise<TurnReceipt>{
       });
       save("COMPLETED",receipt);return receipt;
     }catch(e){
-      save("UNCERTAIN");throw e;
+      const code=e instanceof AppBridgeError?e.code:"";
+      if(!acceptedTurnId&&code.startsWith("CODEX_APP_RPC_REJECTED:thread already has an active writer"))save("FAILED");
+      else save("UNCERTAIN");
+      throw e;
     }
   });
 }

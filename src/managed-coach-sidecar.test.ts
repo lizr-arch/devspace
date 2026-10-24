@@ -373,8 +373,25 @@ try {
       durableReceipt?.recorded_at,"duplicate POST must never create a new delivery claim");
     assert.equal(nativeSidecar.getDeliveryReceipt("other-ws",eventA.event_id),undefined);
     native.submitReview({ workspaceId: "native-ws", eventId: eventA.event_id, decision: "APPROVED", evidenceSha256: "a".repeat(64) });
+    native.registerAppTurn({workspaceId:"native-ws",operationId:"app-native-op",workspaceRoot:workspace,
+      threadId:"01a16969-677a-7033-9acd-a77503a7aeaf",requestSha256:"c".repeat(64),taskId:"frozen-task",taskSha256:"d".repeat(64)});
+    const appTurn=native.updateAppTurn({workspaceId:"native-ws",operationId:"app-native-op",state:"COMPLETED",turnId:"turn-app-1"});
     const post = await fetch("http://127.0.0.1:" + nativePort + "/events", { headers });
-    assert.equal((await post.json() as { pending_count:number }).pending_count, 0);
+    const appFeed=await post.json() as {pending_count:number;events:Array<{event_id:string;event_type:string;app_kind:string;thread_id:string;evidence_sha256:string}>};
+    assert.equal(appFeed.pending_count,1);
+    assert.equal(appFeed.events[0]?.event_id,appTurn.event_id);
+    assert.equal(appFeed.events[0]?.event_type,"CODEX_APP_READY_FOR_GPT_REVIEW");
+    assert.equal(appFeed.events[0]?.app_kind,"native_chatgpt_app_codex");
+    assert.equal(appFeed.events[0]?.thread_id,"01a16969-677a-7033-9acd-a77503a7aeaf");
+    const appReceiptPayload={workspace_id:"native-ws",event_id:appTurn.event_id,operation_id:"app-native-op"};
+    const appAck=await fetch(endpoint,{method:"POST",headers:payloadHeaders,body:JSON.stringify(appReceiptPayload)});
+    assert.equal(appAck.status,200);
+    assert.equal((await appAck.json() as {receipt:{result:string;event_id:string}}).receipt.event_id,appTurn.event_id);
+    assert.equal((await fetch("http://127.0.0.1:"+nativePort+"/events",{headers})).status,200,
+      "DOM receipt does not remove the pending review event");
+    const verdict=native.listPendingAppEvents("native-ws")[0]!;
+    native.submitAppReview({workspaceId:"native-ws",eventId:verdict.event_id,decision:"APPROVED",evidenceSha256:verdict.evidence_sha256,reason:"independent scoped review"});
+    assert.equal((await (await fetch("http://127.0.0.1:"+nativePort+"/events",{headers})).json() as {pending_count:number}).pending_count,0);
     // Authorizations are persisted as an exact consent set, never
     // silently widened to all workspaces registered in the event database.
     native.saveCoachFeedConfig({workspaceId:"native-ws",workspaceRoot:workspace,
@@ -402,7 +419,7 @@ try {
     const headers={Authorization:"Bearer "+multi.token};
     const union=await fetch(base+"/events",{headers});
     assert.equal(union.status,200);
-    const body=await union.json() as {pending_count:number;events:{event_id:number;workspace_id:string}[]};
+    const body=await union.json() as {pending_count:number;events:{event_id:number|string;workspace_id:string}[]};
     assert.equal(body.pending_count,1);
     assert.equal(body.events[0]?.workspace_id,"other-ws");
     assert.equal(body.events[0]?.event_id,eventB.event_id);

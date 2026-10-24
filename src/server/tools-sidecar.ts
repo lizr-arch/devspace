@@ -112,7 +112,7 @@ export function registerSidecarTools(
     {
       title: "Inspect Chrome Coach delivery evidence",
       description: "Read one browser-submitted, bearer-authenticated event receipt after exact Sidecar event identity verification. A DOM submission receipt is not proof ChatGPT accepted the message or completed a review.",
-      inputSchema: {workspaceId:workspaceIdSchema,eventId:z.number().int().positive()},
+      inputSchema: {workspaceId:workspaceIdSchema,eventId:z.union([z.number().int().positive(),z.string().regex(/^app:[a-f0-9]{64}$/)])},
       outputSchema: resultOutputSchema({receipt:z.unknown().optional(),error:optionalError}),
       _meta:{},
       annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},

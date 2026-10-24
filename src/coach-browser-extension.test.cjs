@@ -65,6 +65,24 @@ test("manifest narrow localhost plus opt-in ChatGPT content script",()=>{
  assert.equal(manifest.content_scripts[0].js[0],"chatgpt-delivery.js");
  assert.match(code,/importScripts\("auto-worker.js"\)/);
 });
+test("native ChatGPT App Codex event gets a distinct bounded Web GPT review instruction",()=>{
+ const h=harness();
+ const workerSource=fs.readFileSync(path.join(extension,"auto-worker.js"),"utf8");
+ const pure=workerSource.slice(workerSource.indexOf("function autoValid(e)"),workerSource.indexOf("async function autoState()"));
+ vm.runInContext('const AUTO_ID=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;'+pure,h.context);
+ const event={event_id:"app:"+"a".repeat(64),workspace_id:"ws-qa",operation_id:"app-op",event_type:"CODEX_APP_READY_FOR_GPT_REVIEW",
+   app_kind:"native_chatgpt_app_codex",thread_id:"01a16969-677a-7033-9acd-a77503a7aeaf",turn_id:"turn-1",evidence_sha256:"b".repeat(64)};
+ h.context.event=event;
+ assert.equal(vm.runInContext("autoValid(event)",h.context),true);
+ const instruction=vm.runInContext("autoInstruction(event)",h.context);
+ assert.match(instruction,/ChatGPT App 原生 Codex/);
+ assert.match(instruction,/codex_app_review/);
+ assert.match(instruction,/app:[a-f0-9]{64}/);
+ assert.match(instruction,/01a16969-677a-7033-9acd-a77503a7aeaf/);
+ assert.doesNotMatch(instruction,/local Codex CLI/);
+ event.thread_id="another-thread";
+ assert.equal(vm.runInContext("autoValid(event)",h.context),false);
+});
 test("no token means no fetch and explicit pairing required",async()=>{
  const h=harness();
  await vm.runInContext("feedCheck()",h.context);

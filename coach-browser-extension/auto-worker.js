@@ -87,6 +87,12 @@ function autoReconcileStored(ledger) {
   return autoReconcileLegacy(ledger,events);
 }
 function autoValid(e) {
+  if(e?.app_kind==="native_chatgpt_app_codex")return e.event_type==="CODEX_APP_READY_FOR_GPT_REVIEW"&&
+    typeof e.event_id==="string"&&/^app:[a-f0-9]{64}$/.test(e.event_id)&&
+    typeof e.workspace_id==="string"&&AUTO_ID.test(e.workspace_id)&&
+    typeof e.operation_id==="string"&&AUTO_ID.test(e.operation_id)&&
+    typeof e.thread_id==="string"&&/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(e.thread_id)&&
+    typeof e.evidence_sha256==="string"&&/^[a-f0-9]{64}$/.test(e.evidence_sha256);
   // Defend against an older Sidecar forwarding every completion as a review.
   const report=e?.report;
   const valid=report?.schema==="DEVSPACE_CODEX_REPORT_CHECK_V1" && report.valid===true &&
@@ -100,6 +106,12 @@ function autoValid(e) {
     typeof e.operation_id === "string" && AUTO_ID.test(e.operation_id);
 }
 function autoInstruction(e) {
+  if(e.app_kind==="native_chatgpt_app_codex")return "请以 Web GPT 身份独立审核一项由 ChatGPT App 原生 Codex 完成的任务。"+
+    "通过 DevSpace MCP 使用 codex_app_thread_read 读取同一工作区和固定原生线程的真实源码差异与上下文，核对冻结 TASK 及测试；"+
+    "completion 和浏览器提交回执都不是批准。请用 codex_app_review 为该事件写入有依据的 APPROVED / REWORK / BLOCKED 裁决。"+
+    "REWORK 必须针对同一个固定 App 线程并使用新 operationId，不能启动本地 Codex CLI。"+
+    "\n事件 ID："+e.event_id+"\n操作 ID："+e.operation_id+"\n工作区 ID："+e.workspace_id+
+    "\n原生 ChatGPT App Codex 线程："+e.thread_id+"\n事件证据 SHA-256："+e.evidence_sha256;
   if(e.event_type==="PLAN_CONFLICT")return "DevSpace Codex 报告 PLAN_CONFLICT，需要 Web GPT 修订已批准的任务。"+
     "请先查询 coach_realtime_status，并通过 DevSpace MCP 读取本操作不可变证据及绑定 TASK/报告，核对具体反证、影响与建议修订。"+
     "这是计划冲突反馈；请明确处理契约修订，不要提交正式 APPROVED / REWORK 审核裁决，也不要自动重启或继续任务。"+
@@ -373,7 +385,8 @@ async function autoSyncReceipts(pair,ledger) {
     const identity=record.receiptIdentity;
     if(!identity || !AUTO_ID.test(identity.workspace_id) ||
        !AUTO_ID.test(identity.operation_id) ||
-       !Number.isSafeInteger(identity.event_id) || identity.event_id<=0)continue;
+       !(Number.isSafeInteger(identity.event_id)&&identity.event_id>0) &&
+       !(typeof identity.event_id==="string"&&/^app:[a-f0-9]{64}$/.test(identity.event_id)))continue;
     try {
       const response=await fetch("http://127.0.0.1:"+pair.port+"/delivery-receipt",{
         method:"POST",cache:"no-store",
@@ -429,7 +442,7 @@ async function autoPump() {
       if(r?.state==="in_flight")ledger[k]={...r,state:"needs_attention",
         at:new Date().toISOString(),reason:"上次投递结果不确定，禁止自动重发"};
     }
-    const events=body.events.filter(autoValid).sort((a,b)=>a.event_id-b.event_id);
+    const events=body.events.filter(autoValid).sort((a,b)=>String(a.created_at||"").localeCompare(String(b.created_at||"")));
     autoReconcileLegacy(ledger,events);
     for(const e of events) {
       const key=autoKey(e);

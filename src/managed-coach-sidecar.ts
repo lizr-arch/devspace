@@ -16,7 +16,7 @@ const EXTENSION_ID = /^[a-p]{32}$/;
 
 type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string; authorizedWorkspaceIds?:string[] };
 type EventRow = { event_id: string | number; workspace_id?:string; operation_id: string; event_type: string; created_at: string };
-export type DeliveryReceipt = {event_id:number;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
+export type DeliveryReceipt = {event_id:number|string;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
 type Entry = SidecarInput & { token: Buffer; server: Server; database: Database.Database; receiptDb?:Database.Database; jobId: string; startedAt: string; handoffPath?:string };
 
 export interface CoachSidecarStatus { workspaceId: string; serviceName: string; port: number; state: "running"|"stopped"; startedAt?: string; pairedExtensionId?: string; reason?:string; }
@@ -26,7 +26,7 @@ export interface ManagedCoachSidecarControl {
   stop(workspaceId:string):Promise<void>;
   status(workspaceId:string):CoachSidecarStatus|undefined|Promise<CoachSidecarStatus|undefined>;
   activeServiceIdsForRoot(root:string):string[];
-  getDeliveryReceipt?(workspaceId:string,eventId:number):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
+  getDeliveryReceipt?(workspaceId:string,eventId:number|string):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
   close():Promise<void>;
   claimBrowserRoute?(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean;
 }
@@ -145,6 +145,7 @@ export class ManagedCoachSidecar {
         receiptDb.exec("CREATE TABLE IF NOT EXISTS delivery_receipts("+
           "event_id INTEGER PRIMARY KEY,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,"+
           "result TEXT NOT NULL CHECK(result='dom_submitted'),recorded_at TEXT NOT NULL)");
+        receiptDb.exec("CREATE TABLE IF NOT EXISTS app_delivery_receipts(event_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,result TEXT NOT NULL CHECK(result='dom_submitted'),recorded_at TEXT NOT NULL)");
       }
       const token = input.pairingToken?Buffer.from(input.pairingToken,"base64url"):randomBytes(32);
       const entry = await new Promise<Entry>((resolve, reject) => {
@@ -294,9 +295,14 @@ export class ManagedCoachSidecar {
         "e.event_type, substr(cast(e.created_at as text),1,64) as created_at " +
         pendingQuery + " order by e.created_at asc,e.event_id asc limit 50",
       ).all(...(native ? ids : [])) as EventRow[];
+      const hasAppEvents=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='codex_app_review_events'").get());
+      const appPendingCount=hasAppEvents?(entry.database.prepare("SELECT count(*) AS count FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id IN ("+ids.map(()=>"?").join(",")+") AND d.event_id IS NULL").get(...ids) as {count:number}).count:0;
+      const appRows=hasAppEvents?entry.database.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,'CODEX_APP_READY_FOR_GPT_REVIEW' AS event_type,e.thread_id,e.turn_id,e.evidence_sha256,e.created_at FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id IN ("+ids.map(()=>"?").join(",")+") AND d.event_id IS NULL ORDER BY e.created_at LIMIT 50").all(...ids) as Array<EventRow&{thread_id:string;turn_id:string;evidence_sha256:string}>:[];
+      const combined=[...rows.map(row=>({row,app:undefined as undefined|{thread_id:string;turn_id:string;evidence_sha256:string}})),...appRows.map(row=>({row,app:row}))].sort((a,b)=>String(a.row.created_at).localeCompare(String(b.row.created_at))).slice(0,MAX_EVENTS);
       return send(res,200,{
-        pending_count:total.count,
-        events:rows.slice(0,MAX_EVENTS).map(row=>{
+        pending_count:total.count+appPendingCount,
+        events:combined.map(({row,app})=>{
+          if(app)return {...row,event_type:"CODEX_APP_READY_FOR_GPT_REVIEW",app_kind:"native_chatgpt_app_codex",thread_id:app.thread_id,turn_id:app.turn_id,evidence_sha256:app.evidence_sha256};
           const evidence=hasEvidence?entry.database.prepare("SELECT packet_json,evidence_sha256 FROM coach_review_evidence WHERE event_id=?").get(row.event_id) as {packet_json:string;evidence_sha256:string}|undefined:undefined;
           let report;
           let event_type: string="READY_FOR_GPT_REVIEW";
@@ -375,11 +381,19 @@ export class ManagedCoachSidecar {
       const data=JSON.parse(raw) as Record<string,unknown>;
       if(!data || typeof data!=="object" || Array.isArray(data) ||
           Object.keys(data).sort().join(",")!=="event_id,operation_id,workspace_id" ||
-          !Number.isSafeInteger(data.event_id) || Number(data.event_id)<=0 ||
           !(entry.authorizedWorkspaceIds??[entry.workspaceId]).includes(String(data.workspace_id)) ||
           typeof data.operation_id!=="string" ||
           !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(data.operation_id))
         return send(res,400,{error:"invalid receipt identity"},cors);
+      if(typeof data.event_id==="string"&&/^app:[a-f0-9]{64}$/.test(data.event_id)){
+        const event=entry.database.prepare("SELECT operation_id FROM codex_app_review_events WHERE event_id=? AND workspace_id=?").get(data.event_id,data.workspace_id) as {operation_id:string}|undefined;
+        if(!event||event.operation_id!==data.operation_id)return send(res,404,{error:"event identity not found"},cors);
+        entry.receiptDb!.prepare("INSERT OR IGNORE INTO app_delivery_receipts VALUES(?,?,?,?,?)").run(data.event_id,data.workspace_id,data.operation_id,"dom_submitted",new Date().toISOString());
+        const row=entry.receiptDb!.prepare("SELECT event_id,workspace_id,operation_id,result,recorded_at FROM app_delivery_receipts WHERE event_id=? AND workspace_id=?").get(data.event_id,data.workspace_id) as DeliveryReceipt|undefined;
+        if(!row||row.operation_id!==data.operation_id)return send(res,409,{error:"receipt identity conflict"},cors);
+        return send(res,200,{ok:true,receipt:row},cors);
+      }
+      if(!Number.isSafeInteger(data.event_id)||Number(data.event_id)<=0)return send(res,400,{error:"invalid receipt identity"},cors);
       const event=entry.database.prepare("SELECT operation_id FROM coach_review_events WHERE event_id=? AND workspace_id=?")
         .get(data.event_id,data.workspace_id) as {operation_id:string}|undefined;
       if(!event || event.operation_id!==data.operation_id)
@@ -396,10 +410,12 @@ export class ManagedCoachSidecar {
     }
   }
 
-  getDeliveryReceipt(workspaceId:string,eventId:number):DeliveryReceipt|undefined {
+  getDeliveryReceipt(workspaceId:string,eventId:number|string):DeliveryReceipt|undefined {
     const entry=[...this.services.values()].find(e=>
       (e.authorizedWorkspaceIds??[e.workspaceId]).includes(workspaceId));
-    if(!entry?.receiptDb || !Number.isSafeInteger(eventId) || eventId<=0)return undefined;
+    if(!entry?.receiptDb)return undefined;
+    if(typeof eventId==="string"&&/^app:[a-f0-9]{64}$/.test(eventId))return entry.receiptDb.prepare("SELECT event_id,workspace_id,operation_id,result,recorded_at FROM app_delivery_receipts WHERE event_id=? AND workspace_id=?").get(eventId,workspaceId) as DeliveryReceipt|undefined;
+    if(typeof eventId!=="number"||!Number.isSafeInteger(eventId)||eventId<=0)return undefined;
     return entry.receiptDb.prepare("SELECT event_id,workspace_id,operation_id,result,recorded_at FROM delivery_receipts WHERE event_id=? AND workspace_id=?")
       .get(eventId,workspaceId) as DeliveryReceipt|undefined;
   }
