@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { bindSharedThread, boundSharedThread, assertSharedThreadOwnership, createSharedThread, readSharedThread, sendSharedTurn, sharedTurnReceipt, sharedAppStatus, reconcileSharedTurn, AppBridgeError } from "../coach-app-server-bridge.js";
 import { taskReferenceSchema, verifyTask, sha256 } from "../coach-task-contract.js";
-import { readNativeCodexThread, openNativeCodexThread } from "../coach-codex-native-continuity.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
+import { readNativeCodexThread, openNativeCodexThread, verifyThreadWriterOwnership } from "../coach-codex-native-continuity.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
@@ -96,18 +96,14 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
       structuredContent:{result:"Native Codex App navigation requested",navigation}};
   });
   registerAppTool(server,"codex_app_thread_create",{
-    title:"Create an App-visible Codex thread in workspace",
-    description:"Explicit new native vscode-source thread on an already-running private shared App Server. No shell, no model turn, no App restart. Not idempotent: on transport uncertainty read existing threads instead of retrying.",
+    title:"Create Codex thread (suspended: App-native creation required)",
+    description:"DISABLED for safety: external app-server thread/start is not guaranteed to appear in the running ChatGPT App sidebar and would introduce a competing writer. Create the conversation in the desktop App, then bind the exact visible thread. This tool does not create anything.",
     inputSchema:{workspaceId:id},
     outputSchema:resultOutputSchema({thread:z.unknown().optional(),error:z.unknown().optional()}),
     _meta:{},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
   },async({workspaceId})=>{
-    const workspace=ctx.workspaces.getWorkspace(workspaceId);
-    if(boundSharedThread(ctx.config.stateDir,workspaceId))throw new Error("CODEX_APP_WORKSPACE_ALREADY_BOUND");
-    const thread=await createSharedThread({root:workspace.root});
-    await bindSharedThread({workspaceId,root:workspace.root,threadId:thread.threadId,stateDir:ctx.config.stateDir});
-    return{content:[textBlock("Created App-visible Codex thread "+thread.threadId+".")],
-      structuredContent:{result:"App thread created",thread}};
+    ctx.workspaces.getWorkspace(workspaceId);
+    throw new Error("CODEX_APP_NATIVE_THREAD_CREATION_REQUIRED");
   });
   registerAppTool(server,"codex_app_thread_bind",{
     title:"Pin one existing App-visible Codex thread to this workspace",
@@ -135,6 +131,12 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
     _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
   },async({workspaceId,threadId,operationId,prompt,sandbox,task,timeoutMs})=>{
     const workspace=ctx.workspaces.getWorkspace(workspaceId);
+    // Single-writer safety: only the verified App-owned writer may receive a turn.
+    // No App-owned writer => fail closed with a stable, visible reason.
+    let writerHold;
+    try { writerHold = verifyThreadWriterOwnership({ threadId }); }
+    catch { throw new Error("CODEX_APP_SHARED_WRITES_PAUSED_UNTIL_OWNER_VERIFIED"); }
+    if (writerHold.state !== "APP_OWNED") throw new Error("CODEX_APP_SHARED_WRITES_PAUSED_UNTIL_OWNER_VERIFIED");
     if(sandbox==="workspace-write"){
       verifyTask(workspace.root,workspaceId,task);
       if(ctx.coachReviewEvents.hasInterruptedRun(workspaceId))
