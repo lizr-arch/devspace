@@ -178,3 +178,24 @@ bash scripts/ops/devspace-tunnel-watchdog.test.sh -> devspace watchdog tests PAS
 - WS-3/WS-5：`git revert <commit>` → `npm run build` → 维护窗口重启 `com.liz.devspace`。
 - WS-4：还原 `~/.local/share/devspace/bin-backup/cloudflared-2026.7.3` 到 `~/.local/bin/cloudflared` → `launchctl kickstart -k gui/$(id -u)/com.liz.cloudflared-devspace`；回滚前先把 watchdog `AUTORESTART=0`。
 - watchdog：`install` 脚本会在 `~/.local/bin/` 保留 `devspace-tunnel-watchdog.sh.pre-<timestamp>` 备份。
+
+## 9. 2026-10-24 白天补充：IPv6 边缘导致的隧道抖动与修复
+
+升级后 10 小时观察（03:55–13:56）暴露出一个新问题：`cloudflared 2026.10.3`
+默认 `--edge-ip-version auto`，在本机注册到 **IPv6 边缘地址**（`2606:4700:...`）。
+本机 IPv4 边缘连通性正常（`198.41.200.113`，0% 丢包），但 IPv6 默认路由经过
+Clash TUN（`utun0/utun1`），导致边缘连接反复被关闭：
+
+- watchdog 记录 9 次 `tunnel_down`（公网 530、`local http=200`），共 6 次
+  cloudflared 重启（其中 4 次由 `AUTORESTART` 触发），单次恢复耗时 7–18 分钟；
+- cloudflared 日志显示 `connection with edge closed`，IP 均为 IPv6，
+  对照升级前 2026.7.3 使用 IPv4 边缘（`198.41.x.x`）。
+
+**处置**：`~/.local/bin/start-devspace-cloudflared.sh` 增加
+`--edge-ip-version 4`（备份 `start-devspace-cloudflared.sh.pre-edge-ipv4-*`），
+重启后 4 条连接均注册到 IPv4 边缘（`198.41.192/200.*`），
+`ha_connections=4`、公网 healthz 200。
+
+**待观察**：IPv4 固定后 24 h 内 `tunnel_down` 次数应显著低于升级后的
+每小时一次量级；若仍抖动，下一候选是回滚到 2026.7.3 或检查 Clash TUN 的
+IPv6/MTU 配置。自愈阈值（连续 3 次、900 s 冷却）保持不变。

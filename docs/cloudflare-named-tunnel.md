@@ -550,6 +550,27 @@ binary hash against the release-note checksum. Do not proceed if either fails.
 4. Verify four registered connections and a public 200
    (`curl --noproxy '*'`), then restore the watchdog config.
 
+### Edge IP version (IPv4 pin, 2026-10-24)
+
+`2026.10.3` defaults to `--edge-ip-version auto` and, on this Mac, registered all
+four tunnel connections against IPv6 edge addresses (`2606:4700:...`). The host
+reaches the IPv4 edges cleanly (`198.41.200.113`, 0% loss) but its IPv6 path
+goes through Clash TUN default routes; over the following 10 hours the IPv6
+edges dropped repeatedly, producing Cloudflare 530 responses, `connections=0`
+and six `cloudflared` restarts (four of them from watchdog `AUTORESTART`).
+
+The production start script now pins IPv4:
+
+```bash
+cloudflared tunnel --protocol http2 --edge-ip-version 4 --no-autoupdate run ...
+```
+
+After the change all four connections register against `198.41.*` IPv4 edges,
+the metrics endpoint reports `cloudflared_tunnel_ha_connections 4`, and the
+public health check returns 200. Roll back by removing `--edge-ip-version 4`
+from `~/.local/bin/start-devspace-cloudflared.sh` (a timestamped backup is kept
+next to it) and kicking the LaunchAgent.
+
 ### Observing the tunnel
 
 - `~/.local/state/devspace/watchdog.log` — three-layer checks plus
