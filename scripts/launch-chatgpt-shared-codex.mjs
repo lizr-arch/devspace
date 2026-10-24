@@ -28,9 +28,24 @@ const status=()=> {
       socketOk=locationOk&&target.isSocket()&&target.uid===uid&&(target.mode&0o077)===0;
     }
   }catch{}
-  const ps=spawnSync("/bin/ps",["-axo","command="],{encoding:"utf8",timeout:5000,maxBuffer:3000000});
-  const appRunning=ps.status===0&&(ps.stdout||"").split("\n").some(s=>
-    /^\/Applications\/ChatGPT\.app\/Contents\/MacOS\/ChatGPT(?:\s|$)/.test(s.trim()));
+  // Trusted GUI identity: require the process comm (kernel-provided executable
+  // identity) to be the ChatGPT main binary. cua_repl/node_repl/CodexCLI helper
+  // processes merely CONTAIN the app path in argv and must never count as the
+  // GUI being alive. Extra argv heuristics are only a fallback, never a
+  // substring test.
+  const PS_MAIN="/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
+  const ps=spawnSync("/bin/ps",["-axo","comm=,command="],{encoding:"utf8",timeout:5000,maxBuffer:3000000});
+  const appRunning=ps.status===0&&(ps.stdout||"").split("\n").some(line=>{
+    const trimmed=line.trim(); if(!trimmed)return false;
+    const space=trimmed.indexOf(" "); if(space<0)return false;
+    const comm=trimmed.slice(0,space);
+    const command=trimmed.slice(space+1).trim();
+    if(comm===PS_MAIN)return true;
+    // Fallback only when argv[0] is exactly the main binary and it is not a
+    // helper/renderer (those carry --type=... and a Helper path).
+    const argv0=command.split(/\s+/)[0];
+    return argv0===PS_MAIN && !/--type=/.test(command);
+  });
   return {appFound:existsSync(app),socketOk,appRunning};
 };
 if(!["--check","--launch","--help"].includes(action)) {
