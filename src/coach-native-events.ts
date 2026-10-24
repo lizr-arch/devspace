@@ -13,8 +13,10 @@
  *    is involved in that return path.
  *
  * Invariants:
- *  - Only COMPLETED / REPLY_VERIFIED receipts with a real turnId publish an
- *    event; a queue ACCEPTED row or an observed-but-unfinished turn does not.
+ *  - ONLY a REPLY_VERIFIED receipt with a real turnId, non-empty reply text and
+ *    matching replySha256 publishes an event (P1-06). A COMPLETED receipt without
+ *    a verified reply stays PENDING/turn-observed and can publish later when the
+ *    reply arrives; a queue ACCEPTED row or unfinished turn never publishes.
  *  - The event id is deterministic: app:<sha256(workspaceId\\0operationId)>; it must
  *    match CoachReviewEventStore exactly (which hashes the two-character escape).
  *  - Repeated publication is idempotent (INSERT OR IGNORE + identity check in
@@ -23,9 +25,18 @@
  */
 import { createHash } from "node:crypto";
 import type { AppTurnRecord, AppTurnState, CoachReviewEventStore } from "./coach-review-events.js";
-import type { NativeOutboundReceipt, NativeOutboundState } from "./coach-native-outbound-types.js";
+import {
+  TASK_SHA256,
+  sha256Hex,
+  type NativeOutboundReceipt,
+  type NativeOutboundState,
+  type NativeOutboundTaskReference,
+} from "./coach-native-outbound-types.js";
 
 export const NATIVE_EVENT_PREFIX = "app:";
+
+export type { NativeOutboundTaskReference } from "./coach-native-outbound-types.js";
+export { nativeJournalTaskFields } from "./coach-native-outbound-types.js";
 
 /** Minimal event-store surface this module needs (real store or a fake in tests). */
 export interface NativeEventJournal {
@@ -118,21 +129,20 @@ function mapReceiptState(state: NativeOutboundState): AppTurnState {
       return "UNCERTAIN";
     case "BLOCKED":
       return "FAILED";
-    case "COMPLETED":
-    case "REPLY_VERIFIED":
-      return "COMPLETED";
     default:
-      // PRESEND / ACCEPTED / TURN_OBSERVED are not terminal and must not publish.
+      // PRESEND / ACCEPTED / TURN_OBSERVED / COMPLETED are not publishable states.
       return "PENDING";
   }
 }
 
 /**
- * Publish a terminal native receipt into the durable review-event store.
+ * Publish a verified native receipt into the durable review-event store.
  *
- * COMPLETED and REPLY_VERIFIED require a real turnId; otherwise this throws so
- * an unfinished turn can never masquerade as READY_FOR_GPT_REVIEW. UNCERTAIN /
- * BLOCKED update the journal only. Non-terminal states return published:false.
+ * P1-06: exactly ONE state may publish a READY_FOR_GPT_REVIEW event —
+ * REPLY_VERIFIED with a real turnId, non-empty reply and replySha256 equal to
+ * sha256(reply). COMPLETED-without-reply is journaled as PENDING (with the
+ * observed turnId) and can be published later once the reply arrives.
+ * UNCERTAIN / BLOCKED update the journal only; non-terminal states are no-ops.
  */
 export function publishNativeReceipt(
   journal: NativeEventJournal,
@@ -143,10 +153,17 @@ export function publishNativeReceipt(
     throw new Error("CODEX_APP_JOURNAL_INVALID");
   const prior = journal.getAppTurn(input.workspaceId, input.operationId);
   if (!prior) throw new Error("CODEX_APP_OPERATION_NOT_FOUND");
-  const state = mapReceiptState(receipt.state);
-  if (state === "COMPLETED") {
+  const state = receipt.state;
+
+  if (state === "REPLY_VERIFIED") {
     if (typeof receipt.turnId !== "string" || !receipt.turnId)
       throw new Error("CODEX_APP_TURN_ID_REQUIRED");
+    if (typeof receipt.reply !== "string" || !receipt.reply.trim())
+      throw new Error("NATIVE_REPLY_REQUIRED");
+    if (typeof receipt.replySha256 !== "string" || !TASK_SHA256.test(receipt.replySha256))
+      throw new Error("NATIVE_REPLY_SHA_REQUIRED");
+    if (receipt.replySha256 !== sha256Hex(receipt.reply))
+      throw new Error("NATIVE_REPLY_SHA_MISMATCH");
     const updated = journal.updateAppTurn({
       workspaceId: input.workspaceId,
       operationId: input.operationId,
@@ -158,23 +175,121 @@ export function publishNativeReceipt(
       throw new Error("CODEX_APP_EVENT_IDENTITY_CONFLICT");
     return { state: "COMPLETED", published: true, eventId, turnId: receipt.turnId };
   }
+
+  if (state === "COMPLETED") {
+    if (typeof receipt.turnId !== "string" || !receipt.turnId)
+      throw new Error("CODEX_APP_TURN_ID_REQUIRED");
+    // Reply not verified: keep PENDING (turn-observed) so a later
+    // REPLY_VERIFIED can publish monotonically. Never create a READY event.
+    const updated = journal.updateAppTurn({
+      workspaceId: input.workspaceId,
+      operationId: input.operationId,
+      state: "PENDING",
+      turnId: receipt.turnId,
+    });
+    return {
+      state: updated.state,
+      published: false,
+      turnId: receipt.turnId,
+      reason: "NATIVE_REPLY_NOT_VERIFIED",
+    };
+  }
+
+  const journalState = mapReceiptState(state);
   const updated = journal.updateAppTurn({
     workspaceId: input.workspaceId,
     operationId: input.operationId,
-    state,
+    state: journalState,
     ...(typeof receipt.turnId === "string" && receipt.turnId ? { turnId: receipt.turnId } : {}),
   });
   return {
-    state,
+    state: journalState,
     published: false,
     ...(updated.turn_id ? { turnId: updated.turn_id } : {}),
     reason:
-      state === "UNCERTAIN"
+      journalState === "UNCERTAIN"
         ? (receipt.uncertaintyReason ?? "NATIVE_OUTBOUND_UNCERTAIN")
-        : state === "FAILED"
+        : journalState === "FAILED"
           ? (receipt.error ?? "NATIVE_OUTBOUND_BLOCKED")
           : undefined,
   };
+}
+
+export type NativeContinuityReason =
+  | "MATCH"
+  | "NO_JOURNAL"
+  | "TASK_MISMATCH"
+  | "TASK_REFERENCE_INVALID";
+
+export interface NativeTaskContinuity {
+  taskId: string;
+  taskSha256: string;
+  matches: boolean;
+  reason: NativeContinuityReason;
+}
+
+/**
+ * P0-02: validate exact frozen-TASK continuity for an operation journal row.
+ * `native_rework` must use this before queueing: same taskId + same sha256;
+ * a missing task means the explicit read-only/read-only scenario.
+ */
+export function describeNativeTaskContinuity(
+  journal: NativeEventJournal,
+  workspaceId: string,
+  operationId: string,
+  task?: NativeOutboundTaskReference,
+): NativeTaskContinuity {
+  if (task) {
+    const valid =
+      typeof task.taskId === "string" &&
+      task.taskId.length > 0 &&
+      TASK_SHA256.test(task.sha256 ?? "");
+    if (!valid) {
+      return {
+        taskId: typeof task.taskId === "string" ? task.taskId : "",
+        taskSha256: typeof task.sha256 === "string" ? task.sha256 : "",
+        matches: false,
+        reason: "TASK_REFERENCE_INVALID",
+      };
+    }
+  }
+  const prior = journal.getAppTurn(workspaceId, operationId);
+  if (!prior) {
+    return {
+      taskId: task?.taskId ?? "read-only",
+      taskSha256: task?.sha256 ?? sha256Hex("read-only"),
+      matches: false,
+      reason: "NO_JOURNAL",
+    };
+  }
+  if (!task) {
+    const readOnly = prior.task_id === "read-only" && prior.task_sha256 === sha256Hex("read-only");
+    return {
+      taskId: prior.task_id,
+      taskSha256: prior.task_sha256,
+      matches: readOnly,
+      reason: readOnly ? "MATCH" : "TASK_MISMATCH",
+    };
+  }
+  const matches = prior.task_id === task.taskId && prior.task_sha256 === task.sha256;
+  return {
+    taskId: prior.task_id,
+    taskSha256: prior.task_sha256,
+    matches,
+    reason: matches ? "MATCH" : "TASK_MISMATCH",
+  };
+}
+
+/** Fail-closed variant for native_rework wiring (wrong task id/sha must fail). */
+export function assertNativeTaskContinuity(
+  journal: NativeEventJournal,
+  workspaceId: string,
+  operationId: string,
+  task?: NativeOutboundTaskReference,
+): NativeTaskContinuity {
+  const continuity = describeNativeTaskContinuity(journal, workspaceId, operationId, task);
+  if (!continuity.matches) throw new Error("CODEX_APP_REWORK_TASK_MISMATCH");
+  return continuity;
 }
 
 /**

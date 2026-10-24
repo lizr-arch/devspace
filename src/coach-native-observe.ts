@@ -5,6 +5,8 @@
  * pre-send baseline, and correlates the new user item with its turn lifecycle
  * and assistant reply. Multiple projections of the same turn count once.
  */
+import {AppBridgeError} from "./coach-app-server-bridge.js";
+import {parseNativeRollout} from "./coach-codex-native-continuity.js";
 import {
  type NativeOutboundRuntime,
  sha256Hex,
@@ -179,3 +181,48 @@ export function selectReply(observation:ObservedRollout,analysis:DeliveryAnalysi
 }
 
 export type {ObservedRollout,BaselineObservation};
+
+/** Delivery coordinates for a known turn id (durable reconcile path). */
+export function findDeliveryForTurn(
+ observation:ObservedRollout,
+ turnId:string,
+):{turnId:string;userItemId?:string;firstNewIndex:number}|undefined{
+ const matches=observation.deliveries.filter(delivery=>delivery.turnId===turnId);
+ if(!matches.length)return undefined;
+ const event=matches.find(delivery=>delivery.source==="event"&&delivery.itemId);
+ return {turnId,firstNewIndex:Math.min(...matches.map(delivery=>delivery.index)),...(event?.itemId?{userItemId:event.itemId}:{})};
+}
+
+/**
+ * Read-only thread identity re-verification for the durable reconciler.
+ * Never requires the ChatGPT GUI or the writer lock, and never resumes/sends.
+ */
+export function verifyRolloutIdentity(
+ runtime:NativeOutboundRuntime,
+ input:{threadId:string;root?:string;codexHome:string},
+):{ok:boolean;reason?:string}{
+ let raw:string;
+ try{
+  const path=runtime.findRollout(input.threadId,input.codexHome);
+  raw=runtime.readRolloutText(path);
+ }catch(error){
+  return {ok:false,reason:error instanceof AppBridgeError?error.code:"ROLLOUT_UNAVAILABLE"};
+ }
+ let meta:Record<string,unknown>;
+ try{
+  const first=raw.split("\n").find(line=>line.trim());
+  const parsed=JSON.parse(first??"{}") as {type?:string;payload?:Record<string,unknown>};
+  if(parsed.type!=="session_meta"||!parsed.payload)return {ok:false,reason:"ROLLOUT_IDENTITY_INVALID"};
+  meta=parsed.payload;
+ }catch{
+  return {ok:false,reason:"ROLLOUT_IDENTITY_INVALID"};
+ }
+ if(meta.id!==input.threadId||meta.source!=="vscode")return {ok:false,reason:"ROLLOUT_IDENTITY_MISMATCH"};
+ if(meta.session_id!==undefined&&meta.session_id!==input.threadId)return {ok:false,reason:"ROLLOUT_IDENTITY_MISMATCH"};
+ if(input.root){
+  try{parseNativeRollout(raw,input.threadId,input.root);}catch(error){
+   return {ok:false,reason:error instanceof AppBridgeError?error.code:"ROLLOUT_IDENTITY_INVALID"};
+  }
+ }
+ return {ok:true};
+}

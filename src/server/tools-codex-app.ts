@@ -4,7 +4,8 @@ import { bindSharedThread, boundSharedThread, assertSharedThreadOwnership, creat
 import { taskReferenceSchema, verifyTask, sha256 } from "../coach-task-contract.js";
 import { readNativeCodexThread, openNativeCodexThread, verifyThreadWriterOwnership } from "../coach-codex-native-continuity.js";
 import { readNativeOutboundReceipt, sendNativeOutbound, verifyNativeAppOwnership } from "../coach-native-outbound.js";
-import { beginNativeJournal, publishNativeReceipt, readNativeReviewEvent } from "../coach-native-events.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
+import { beginNativeJournal, publishNativeReceipt, readNativeReviewEvent, assertNativeTaskContinuity, nativeJournalTaskFields } from "../coach-native-events.js";
+import { reconcileNativeOperation } from "../coach-native-reconcile.js";import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 
 const id=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
@@ -92,6 +93,18 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
     _meta:{},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
   },async({workspaceId,operationId})=>{
     ctx.workspaces.getWorkspace(workspaceId);
+    // P0-01: if the bounded send observation ended before the real turn
+    // completed, promote/publish now from the durable ledger (single publisher,
+    // never re-sends). Unknown/incomplete states stay unchanged and report why.
+    try{
+      await reconcileNativeOperation({workspaceId,operationId,stateDir:ctx.config.stateDir,
+        deps:{publish:async receipt=>{
+          const published=publishNativeReceipt(ctx.coachReviewEvents,{workspaceId,operationId,receipt});
+          return {published:published.published,...(published.eventId?{eventId:published.eventId}:{})};
+        }}});
+    }catch(error){
+      if(!(error instanceof Error&&/RECONCILE_OPERATION_NOT_FOUND/.test(error.message)))throw error;
+    }
     const receipt=readNativeOutboundReceipt(ctx.config.stateDir,workspaceId,operationId);
     const reviewEvent=readNativeReviewEvent(ctx.coachReviewEvents,workspaceId,operationId);
     return{content:[textBlock("Native outbound "+((receipt&&receipt.state)||"NOT_FOUND")+
@@ -199,12 +212,17 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
   registerAppTool(server,"codex_app_thread_rework",{
     title:"Send bounded REWORK to the same native App thread",
     description:"After an exact native App event has a recorded Web GPT REWORK verdict, sends one new operation to that same pinned thread under the same frozen TASK. Maximum three REWORK cycles per task fingerprint; never starts CLI.",
-    inputSchema:{workspaceId:id,eventId:z.string().regex(/^app:[a-f0-9]{64}$/),operationId:id,prompt:z.string().min(1).max(8000),task:taskReferenceSchema},
+    inputSchema:{workspaceId:id,eventId:z.string().regex(/^app:[a-f0-9]{64}$/),operationId:id,prompt:z.string().min(1).max(8000),task:taskReferenceSchema,
+      priorOperationId:id.optional()},
     outputSchema:resultOutputSchema({receipt:z.unknown().optional(),error:z.unknown().optional()}),_meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
-  },async({workspaceId,eventId,operationId,prompt,task})=>{
+  },async({workspaceId,eventId,operationId,prompt,task,priorOperationId})=>{
     const workspace=ctx.workspaces.getWorkspace(workspaceId);verifyTask(workspace.root,workspaceId,task);
     const prior=ctx.coachReviewEvents.getAppEventTask(workspaceId,eventId);
     if(!prior||prior.decision!=="REWORK")throw new Error("CODEX_APP_REWORK_NOT_AUTHORIZED");
+    // P0-02: the reviewed turn's journal must carry the exact same frozen task
+    // identity; a wrong/missing task SHA fails closed. priorOperationId is the
+    // operationId Web GPT used for the reviewed native_send.
+    if(priorOperationId)assertNativeTaskContinuity(ctx.coachReviewEvents,workspaceId,priorOperationId,task);
     assertSharedThreadOwnership(ctx.config.stateDir,workspaceId,workspace.root,prior.thread_id);
     if(prior.task_id!==task.taskId||prior.task_sha256!==task.sha256)throw new Error("CODEX_APP_REWORK_TASK_MISMATCH");
     if(ctx.coachReviewEvents.countAppReworks(workspaceId,task.taskId,task.sha256)>=3)throw new Error("CODEX_APP_REWORK_LIMIT");
@@ -223,19 +241,25 @@ export function registerSharedCodexAppTools(server:McpServer,ctx:ServerContext):
   registerAppTool(server,"codex_app_native_send",{
     title:"Queue one message to an App-owned native Codex thread",
     description:"Explicit exact threadId + unique operationId required. Preconditions: pinned workspace binding, App GUI present, writer held by the one managed daemon, exact canonical socket. Uses ONLY `codex queue --remote unix://<canonical>`; exit 0 records ACCEPTED, not completion. Cross-process ledger makes duplicate operationIds impossible. Never launches/kills App or daemon; UNCERTAIN is never retried.",
-    inputSchema:{workspaceId:id,threadId,operationId:id,prompt:z.string().min(1).max(10000),timeoutMs:z.number().int().min(3000).max(3600000).optional()},
+    inputSchema:{workspaceId:id,threadId,operationId:id,prompt:z.string().min(1).max(10000),
+      sandbox:z.enum(["read-only","workspace-write"]).default("read-only"),
+      task:taskReferenceSchema.optional(),
+      timeoutMs:z.number().int().min(3000).max(3600000).optional()},
     outputSchema:resultOutputSchema({receipt:z.unknown().optional(),error:z.unknown().optional()}),
     _meta:{},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:true},
-  },async({workspaceId,threadId,operationId,prompt,timeoutMs})=>{
+  },async({workspaceId,threadId,operationId,prompt,sandbox,task,timeoutMs})=>{
     const workspace=ctx.workspaces.getWorkspace(workspaceId);
     assertSharedThreadOwnership(ctx.config.stateDir,workspaceId,workspace.root,threadId);
+    if(task)verifyTask(workspace.root,workspaceId,task);
+    if(sandbox==="workspace-write"&&!task)throw new Error("CODEX_APP_TASK_REQUIRED_FOR_WORKSPACE_WRITE");
     verifyNativeAppOwnership({threadId,root:workspace.root});
+    const taskFields=nativeJournalTaskFields(task);
     beginNativeJournal(ctx.coachReviewEvents,{workspaceId,operationId,workspaceRoot:workspace.root,threadId,
-      promptSha256:sha256(prompt),taskId:"read-only",taskSha256:sha256("read-only")});
+      promptSha256:sha256(prompt),...taskFields});
     let receipt;
     try{
       receipt=await sendNativeOutbound({workspaceId,root:workspace.root,threadId,operationId,prompt,
-        stateDir:ctx.config.stateDir,...(timeoutMs?{timeoutMs}:{})});
+        stateDir:ctx.config.stateDir,...(task?{task}:{}),sandbox,...(timeoutMs?{timeoutMs}:{})});
     }catch(error){
       const prior=readNativeOutboundReceipt(ctx.config.stateDir,workspaceId,operationId);
       if(prior)publishNativeReceipt(ctx.coachReviewEvents,{workspaceId,operationId,receipt:prior});

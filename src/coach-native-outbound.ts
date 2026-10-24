@@ -24,11 +24,15 @@ import {
  NativeOutboundError,
  RANK,
  type LedgerRecord,
+ type NativeOutboundSandbox,
+ type NativeOutboundTaskReference,
  type ManagedDaemonIdentity,
  type NativeOutboundDeps,
  type NativeOutboundReceipt,
  type QueueRunResult,
+ assertValidNativeTask,
  assertValidOperation,
+ assertValidSandbox,
  assertValidThread,
  defaultCodexHome,
  fail,
@@ -68,10 +72,18 @@ export type {
  NativeOutboundReceipt,
  NativeOutboundRuntime,
  NativeOutboundState,
+ NativeOutboundSandbox,
+ NativeOutboundTaskReference,
  FileStatLike,
  QueueRunResult,
 } from "./coach-native-outbound-types.js";
-export {NativeOutboundError,sha256Hex} from "./coach-native-outbound-types.js";
+export {
+ NativeOutboundError,
+ assertValidNativeTask,
+ assertValidSandbox,
+ nativeJournalTaskFields,
+ sha256Hex,
+} from "./coach-native-outbound-types.js";
 export {
  assertQueueArgv,
  buildNativeOutboundQueueCommand,
@@ -95,18 +107,26 @@ export async function sendNativeOutbound(input:{
  socketPath?:string;
  timeoutMs?:number;
  observeTimeoutMs?:number;
+ /** Optional frozen TASK identity (P0-02); absent => explicit read-only/read-only. */
+ task?:NativeOutboundTaskReference;
+ sandbox?:NativeOutboundSandbox;
  deps?:NativeOutboundDeps;
 }):Promise<NativeOutboundReceipt>{
  assertValidOperation(input.workspaceId,input.operationId);
  assertValidThread(input.threadId);
  if(typeof input.prompt!=="string"||!input.prompt.trim())fail("PROMPT_INVALID","prompt must be non-empty");
  if(input.prompt.length>MAX_PROMPT)fail("PROMPT_TOO_LONG","prompt exceeds "+MAX_PROMPT+" characters");
+ const sandbox:NativeOutboundSandbox=input.sandbox??"read-only";
+ assertValidSandbox(sandbox);
+ if(input.task)assertValidNativeTask(input.task);
+ if(sandbox==="workspace-write"&&!input.task)fail("TASK_REQUIRED_FOR_WORKSPACE_WRITE","workspace-write native send requires a frozen task reference");
  const deps=input.deps??{};
  const runtime=resolveRuntime(depsRuntime(deps));
  const codexHome=resolve(input.codexHome??deps.codexHome??defaultCodexHome());
  const root=realpathOrThrow(runtime,input.root,"ROOT_UNRESOLVABLE");
  const payloadSha256=sha256Hex(input.prompt);
- const fingerprint=sha256Hex(JSON.stringify({v:1,workspaceId:input.workspaceId,root,threadId:input.threadId,payloadSha256}));
+ const fingerprint=sha256Hex(JSON.stringify({v:1,workspaceId:input.workspaceId,root,threadId:input.threadId,payloadSha256,
+  ...(input.task?{taskId:input.task.taskId,taskSha256:input.task.sha256,sandbox}:{})}));
  const timeoutMs=Math.min(Math.max(input.timeoutMs??deps.timeoutMs??120_000,1_000),600_000);
  const observeTimeoutMs=Math.min(Math.max(input.observeTimeoutMs??deps.observeTimeoutMs??30_000,0),600_000);
  const pollMs=Math.min(Math.max(deps.pollMs??100,10),5_000);
@@ -127,7 +147,7 @@ export async function sendNativeOutbound(input:{
   current=merged as NativeOutboundReceipt;
   return merged as NativeOutboundReceipt;
  };
- persist({state:"PRESEND"});
+ persist({state:"PRESEND",workspaceRoot:root,sandbox});
 
  try{
   const inspect=async():Promise<ManagedDaemonIdentity>=>{
@@ -167,31 +187,35 @@ export async function sendNativeOutbound(input:{
 
   const baselineObservation=observeRollout(runtime,{threadId:input.threadId,codexHome,payloadSha256});
   const baseline=baselineOf(baselineObservation);
+  const baselineFields={
+   preObservedTurnIds:[...baseline.deliveryTurnIds],
+   preObservedItemIds:[...baseline.deliveryItemIds],
+  };
 
   // Exactly one CLI invocation. No retry on any outcome.
   let run:QueueRunResult;
   try{run=runtime.runQueue({codexBin:command.codexBin,argv:command.argv,env:command.env,timeoutMs});}
   catch(error){
-   persist({state:"UNCERTAIN",uncertaintyReason:"CLI_SPAWN_UNCERTAIN",error:error instanceof Error?error.message:String(error)});
+   persist({state:"UNCERTAIN",uncertaintyReason:"CLI_SPAWN_UNCERTAIN",error:error instanceof Error?error.message:String(error),...baselineFields});
    return current;
   }
   if(run.error==="TIMEOUT"||run.code===null){
-   persist({state:"UNCERTAIN",uncertaintyReason:run.error==="TIMEOUT"?"CLI_TIMEOUT":"CLI_UNCERTAIN",queueExitCode:run.code??undefined,error:run.stderr.slice(0,2000)});
+   persist({state:"UNCERTAIN",uncertaintyReason:run.error==="TIMEOUT"?"CLI_TIMEOUT":"CLI_UNCERTAIN",queueExitCode:run.code??undefined,error:run.stderr.slice(0,2000),...baselineFields});
    return current;
   }
   if(run.code!==0){
-   persist({state:"BLOCKED",queueExitCode:run.code,error:(run.stderr||run.stdout||"queue exited "+run.code).slice(0,4000)});
+   persist({state:"BLOCKED",queueExitCode:run.code,error:(run.stderr||run.stdout||"queue exited "+run.code).slice(0,4000),...baselineFields});
    fail("QUEUE_EXIT_NONZERO","queue exited "+run.code+": "+run.stderr.trim().slice(0,500));
   }
   const queued=parseQueuedMessage(run.stdout);
   if(!queued){
    // Exit 0 with unparseable stdout can still have persisted a row; never retry.
-   persist({state:"ACCEPTED",queueExitCode:0,uncertaintyReason:"QUEUE_ACCEPTED_UNPARSED"});
+   persist({state:"ACCEPTED",queueExitCode:0,uncertaintyReason:"QUEUE_ACCEPTED_UNPARSED",...baselineFields});
   }else if(queued.threadId!==input.threadId){
-   persist({state:"UNCERTAIN",queueMessageId:queued.messageId,queueExitCode:0,uncertaintyReason:"QUEUE_THREAD_MISMATCH"});
+   persist({state:"UNCERTAIN",queueMessageId:queued.messageId,queueExitCode:0,uncertaintyReason:"QUEUE_THREAD_MISMATCH",...baselineFields});
    fail("QUEUE_THREAD_MISMATCH","CLI queued to a different thread: "+queued.threadId);
   }else{
-   persist({state:"ACCEPTED",queueMessageId:queued.messageId,queueExitCode:0});
+   persist({state:"ACCEPTED",queueMessageId:queued.messageId,queueExitCode:0,...baselineFields});
   }
 
   // G6/G10: bounded, read-only observation of the exact native rollout.

@@ -33,6 +33,40 @@ export interface NativeOutboundReceipt {
  replySha256?:string;
  error?:string;
  uncertaintyReason?:string;
+ /** Pre-send baseline of deliveries matching payloadSha256 (for durable reconcile). */
+ preObservedTurnIds?:string[];
+ preObservedItemIds?:string[];
+ /** Exact rollout root persisted at send time, so read-only reconcile can re-verify cwd. */
+ workspaceRoot?:string;
+ sandbox?:NativeOutboundSandbox;
+ /** Coach review event id once a REPLY_VERIFIED receipt was published (idempotency). */
+ reviewEventId?:string;
+}
+
+/** Frozen TASK reference accepted by native_send/native_rework continuity. */
+export interface NativeOutboundTaskReference {
+ taskPath:string;
+ taskId:string;
+ sha256:string;
+ version?:number;
+ workspaceId?:string;
+}
+export type NativeOutboundSandbox="read-only"|"workspace-write";
+export const TASK_SHA256=/^[a-f0-9]{64}$/;
+export function assertValidNativeTask(task:NativeOutboundTaskReference):void{
+ if(!task||typeof task!=="object")fail("TASK_REFERENCE_INVALID","task reference must be an object");
+ if(typeof task.taskPath!=="string"||!task.taskPath.trim())fail("TASK_REFERENCE_INVALID","task.taskPath is required");
+ if(typeof task.taskId!=="string"||!WORKSPACE_ID.test(task.taskId))fail("TASK_REFERENCE_INVALID","task.taskId is invalid");
+ if(typeof task.sha256!=="string"||!TASK_SHA256.test(task.sha256))fail("TASK_REFERENCE_INVALID","task.sha256 must be 64 lowercase hex");
+}
+export function assertValidSandbox(sandbox:unknown):asserts sandbox is NativeOutboundSandbox{
+ if(sandbox!=="read-only"&&sandbox!=="workspace-write")fail("SANDBOX_INVALID","sandbox must be read-only or workspace-write");
+}
+/** Journal task identity: real frozen TASK when provided, explicit read-only otherwise. */
+export function nativeJournalTaskFields(task?:NativeOutboundTaskReference):{taskId:string;taskSha256:string}{
+ if(!task)return {taskId:"read-only",taskSha256:sha256Hex("read-only")};
+ assertValidNativeTask(task);
+ return {taskId:task.taskId,taskSha256:task.sha256};
 }
 
 export class NativeOutboundError extends Error {

@@ -6,7 +6,7 @@
  * `claimed:false` and the existing receipt instead.
  */
 import {randomBytes} from "node:crypto";
-import {closeSync,existsSync,mkdirSync,openSync,renameSync,writeFileSync} from "node:fs";
+import {closeSync,existsSync,mkdirSync,openSync,readdirSync,readFileSync,renameSync,writeFileSync} from "node:fs";
 import {dirname,join} from "node:path";
 import {
  type LedgerRecord,
@@ -141,6 +141,26 @@ function writeLedger(stateDir:string,workspaceId:string,operationId:string,patch
  writeFileSync(temp,JSON.stringify(merged),{mode:0o600});
  renameSync(temp,path);
  return merged;
+}
+
+/** List every persisted native outbound receipt (ledger is the durable cursor). */
+export function listNativeOutboundReceipts(stateDir:string):NativeOutboundReceipt[]{
+ const directory=join(stateDir,"native-outbound");
+ let names:string[];
+ try{names=readdirSync(directory);}catch(error){
+  if(errnoCode(error)==="ENOENT")return [];
+  fail("LEDGER_UNREADABLE","ledger directory unreadable");
+ }
+ const receipts:NativeOutboundReceipt[]=[];
+ for(const name of names.filter(entry=>entry.endsWith(".json")&&!entry.endsWith(".tmp"))){
+  let parsed:unknown;
+  try{parsed=JSON.parse(readFileSync(join(directory,name),"utf8"));}catch{continue;}
+  if(!parsed||typeof parsed!=="object")continue;
+  const candidate=parsed as Record<string,unknown>;
+  if(typeof candidate.workspaceId!=="string"||typeof candidate.operationId!=="string"||typeof candidate.state!=="string")continue;
+  receipts.push(parsed as NativeOutboundReceipt);
+ }
+ return receipts;
 }
 
 export {readLedgerRecord,writeLedger};

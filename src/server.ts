@@ -109,6 +109,9 @@ import { DevSpaceInstanceLock } from "./devspace-instance-lock.js";
 import { registerCodexAgentTools } from "./server/tools-codex-agent.js";
 import { registerSharedCodexAppTools } from "./server/tools-codex-app.js";
 import { reconcileSharedTurn, sharedTurnReceipt, AppBridgeError } from "./coach-app-server-bridge.js";
+import { startNativeOutboundReconciler } from "./coach-native-reconcile.js";
+import { startNativeEventSnapshotRefresher } from "./coach-native-snapshot.js";
+import { publishNativeReceipt } from "./coach-native-events.js";
 import { registerCodexReviewTools } from "./server/tools-codex-review.js";
 import { registerAgentAuditTools } from "./server/tools-agent-audit.js";
 import {
@@ -338,6 +341,30 @@ function createServerWithOwnedState(
   // Native stateDir event persistence; the workspace-local COACH005 database
   // remains an isolated legacy fixture, never a production event source.
   const coachReviewEvents = new CoachReviewEventStore(config.stateDir);
+  // P0-01: durable out-of-band completion reconciliation for native queue
+  // deliveries. Ledger-only cursor, single-flight, stop on shutdown.
+  const nativeOutboundReconciler =
+    process.env.DEVSPACE_NATIVE_RECONCILE_DISABLED === "1"
+      ? undefined
+      : startNativeOutboundReconciler({
+          stateDir: config.stateDir,
+          intervalMs: 5000,
+          onReceipt: async (receipt) =>
+            publishNativeReceipt(coachReviewEvents, {
+              workspaceId: receipt.workspaceId,
+              operationId: receipt.operationId,
+              receipt,
+            }),
+        });
+  // P0-03: optional read-only refresh of the isolated wake-sidecar snapshot.
+  const nativeEventSnapshotPath = process.env.DEVSPACE_NATIVE_EVENT_SNAPSHOT_PATH;
+  const nativeEventSnapshotRefresher = nativeEventSnapshotPath
+    ? startNativeEventSnapshotRefresher({
+        sourcePath: coachReviewEvents.path,
+        snapshotPath: nativeEventSnapshotPath,
+        intervalMs: 3000,
+      })
+    : undefined;
   // On a controlled fresh server start, quarantine unknown old runs. No
   // process auto-replay, signal, PID-based kill or invented success status.
   const codexWorkerSocket=process.env.DEVSPACE_CODEX_WORKER_SOCKET;
@@ -519,6 +546,8 @@ function createServerWithOwnedState(
       closed = true;
       sidecarRecoveryClosing=true;
       appRecoveryClosing=true;
+      nativeOutboundReconciler?.stop();
+      nativeEventSnapshotRefresher?.stop();
       if(sidecarRecoveryTimer)clearInterval(sidecarRecoveryTimer);
       clearInterval(appRecoveryTimer);
       mcpSessions.close();
