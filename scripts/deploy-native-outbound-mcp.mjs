@@ -68,11 +68,40 @@ function ensurePlistEnv(key, value, backupPath) {
     if (insert.status !== 0) throw new Error("failed to set LaunchAgent environment");
   }
 }
+function waitLive(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const r = run("/usr/bin/curl", ["-sS", "-m", "2", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:7676/healthz"], { timeout: 5000 });
+    last = r.out.trim();
+    if (last === "200") {
+      const svc = serviceState();
+      if (svc.state === "running" && Number.isInteger(svc.pid)) return { ok: true, health: 200, service: svc };
+    }
+    spawnSync("/bin/sleep", ["1"]);
+  }
+  return { ok: false, health: last, service: serviceState() };
+}
 function restartService() {
   // bootout/bootstrap re-reads the plist (kickstart alone keeps cached env).
   run("/bin/launchctl", ["bootout", `gui/${process.getuid()}/${LABEL}`], { timeout: 20_000 });
-  const boot = run("/bin/launchctl", ["bootstrap", `gui/${process.getuid()}`, plistPath()], { timeout: 30_000 });
-  return boot;
+  // Wait for the old process to disappear before bootstrapping; bootstrapping
+  // while launchd still tears the job down can fail transiently.
+  for (let i = 0; i < 20; i++) {
+    const svc = serviceState();
+    if (!Number.isInteger(svc.pid)) break;
+    spawnSync("/bin/sleep", ["1"]);
+  }
+  let last = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const boot = run("/bin/launchctl", ["bootstrap", `gui/${process.getuid()}`, plistPath()], { timeout: 30_000 });
+    last = boot;
+    if (boot.status === 0) break;
+    spawnSync("/bin/sleep", ["2"]);
+  }
+  if (!last || last.status !== 0) return { status: last?.status ?? null, err: last?.err ?? "bootstrap failed" };
+  const live = waitLive();
+  return { status: live.ok ? 0 : 1, err: live.ok ? "" : `service did not become healthy (health=${live.health})` };
 }
 
 function distInfo(root) {
@@ -134,7 +163,10 @@ function promote(stagedDir) {
     renameSync(join(PROD, "dist"), join(stagedDir, "rejected-dist"));
     renameSync(backup, join(PROD, "dist"));
     if (existsSync(plistBackup)) cpSync(plistBackup, plistPath());
-    restartService();
+    const rollback = restartService();
+    if (!rollback || rollback.status !== 0) {
+      throw new Error("service restart failed AND rollback restart failed: " + (rollback?.err ?? "unknown"));
+    }
     throw new Error("service restart failed; rolled back dist and plist env");
   }
   return { backup, plistBackup };
@@ -146,7 +178,7 @@ function verifyLive() {
   checks.push({ name: "dist has all three native tools", ok: Object.values(dist.nativeTools).every(Boolean) });
   let health = null;
   for (let i = 0; i < 30; i++) {
-    const r = run("/usr/bin/curl", ["-sS", "-m", "2", "-o", "-", "-w", "\n%{http_code}", "http://127.0.0.1:7676/health"], { timeout: 5000 });
+    const r = run("/usr/bin/curl", ["-sS", "-m", "2", "-o", "-", "-w", "\n%{http_code}", "http://127.0.0.1:7676/healthz"], { timeout: 5000 });
     const code = r.out.trim().split("\n").pop();
     if (code === "200") { health = 200; break; }
     spawnSync("/bin/sleep", ["1"]);
