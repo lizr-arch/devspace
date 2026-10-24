@@ -60,6 +60,7 @@ import {
  observeRollout,
  parseQueuedMessage,
  selectReply,
+ selectVerifiedReply,
  type ObservedRollout,
 } from "./coach-native-observe.js";
 
@@ -238,7 +239,8 @@ export async function sendNativeOutbound(input:{
     const startedNow=turnId?observation.started.has(turnId):false;
     const completedNow=turnId?observation.completed.has(turnId):false;
     if(startedNow&&completedNow)lastSeen=persist({state:"COMPLETED",...(turnId?{turnId}:{})});
-    const reply=selectReply(observation,analysis);
+    // P0-1: assistant text before task_complete is not a completed reply.
+    const reply=selectVerifiedReply(observation,analysis);
     if(reply){
      lastSeen=persist({state:"REPLY_VERIFIED",reply:reply.slice(0,16_384),replySha256:sha256Hex(reply),...(turnId?{turnId}:{})});
      return current;

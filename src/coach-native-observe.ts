@@ -180,6 +180,18 @@ export function selectReply(observation:ObservedRollout,analysis:DeliveryAnalysi
  return reply?.text.trim()?reply.text:undefined;
 }
 
+/**
+ * Reply that is safe to treat as a completed Codex answer: the exact turn must
+ * have seen BOTH task_started and task_complete, and the reply must belong to
+ * that same turn. An assistant message that appears before task_complete is a
+ * partial/streaming observation and must not be promoted or published.
+ */
+export function selectVerifiedReply(observation:ObservedRollout,analysis:DeliveryAnalysis):string|undefined{
+ if(!analysis.turnId)return undefined;
+ if(!observation.started.has(analysis.turnId)||!observation.completed.has(analysis.turnId))return undefined;
+ return selectReply(observation,analysis);
+}
+
 export type {ObservedRollout,BaselineObservation};
 
 /** Delivery coordinates for a known turn id (durable reconcile path). */

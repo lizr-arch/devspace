@@ -39,6 +39,7 @@ import {
  findDeliveryForTurn,
  observeRollout,
  selectReply,
+ selectVerifiedReply,
  verifyRolloutIdentity,
  type BaselineObservation,
 } from "./coach-native-observe.js";
@@ -127,18 +128,26 @@ export async function reconcileNativeOperation(
  if(!observation.available)return unchanged(receipt,"ROLLOUT_UNAVAILABLE");
 
  // Locate the exact logical delivery for this operation (projection-deduped).
+ // P0-2: ALWAYS run the baseline-relative global analysis, including when a
+ // turnId is already persisted. A later second delivery of the same payload can
+ // arrive in a different turn; that is a duplicate and must fail closed rather
+ // than being promoted/published through the known-turn shortcut.
+ const baseline:BaselineObservation={
+  deliveryTurnIds:new Set(receipt.preObservedTurnIds??[]),
+  deliveryItemIds:new Set(receipt.preObservedItemIds??[]),
+  started:new Set(),completed:new Set(),size:0,
+ };
+ const globalAnalysis=analyzeDeliveries(observation,baseline);
  let analysis:{logicalDeliveries:number;turnId?:string;userItemId?:string;firstNewIndex:number};
  if(receipt.turnId){
   const known=findDeliveryForTurn(observation,receipt.turnId);
   if(!known)return unchanged(receipt,"TURN_NOT_OBSERVED");
-  analysis={logicalDeliveries:1,turnId:known.turnId,firstNewIndex:known.firstNewIndex,...(known.userItemId?{userItemId:known.userItemId}:{})};
+  if(globalAnalysis.logicalDeliveries>1)return unchanged(receipt,"DOUBLE_DELIVERY");
+  if(globalAnalysis.logicalDeliveries===1&&globalAnalysis.turnId!==receipt.turnId)
+   return unchanged(receipt,"DOUBLE_DELIVERY");
+  analysis={logicalDeliveries:globalAnalysis.logicalDeliveries,turnId:receipt.turnId,firstNewIndex:known.firstNewIndex,...(known.userItemId?{userItemId:known.userItemId}:{})};
  }else{
-  const baseline:BaselineObservation={
-   deliveryTurnIds:new Set(receipt.preObservedTurnIds??[]),
-   deliveryItemIds:new Set(receipt.preObservedItemIds??[]),
-   started:new Set(),completed:new Set(),size:0,
-  };
-  analysis=analyzeDeliveries(observation,baseline);
+  analysis=globalAnalysis;
   if(analysis.logicalDeliveries===0)return unchanged(receipt,"DELIVERY_NOT_OBSERVED");
   if(analysis.logicalDeliveries>1)return unchanged(receipt,"DOUBLE_DELIVERY");
  }
@@ -155,10 +164,13 @@ export async function reconcileNativeOperation(
  if(turnId&&started&&completed&&rankOf(receipt)<RANK.COMPLETED){
   receipt=write({state:"COMPLETED",turnId});
  }
- const reply=turnId?selectReply(observation,{
+ // P0-1: only a reply for a turn that has BOTH task_started and task_complete
+ // may become REPLY_VERIFIED/publishable. An assistant message seen before the
+ // completion event stays at TURN_OBSERVED until a later reconcile.
+ const reply=turnId?selectVerifiedReply(observation,{
   logicalDeliveries:1,turnId,firstNewIndex:analysis.firstNewIndex,
  }):undefined;
- if(turnId&&reply&&reply.trim()&&rankOf(receipt)<RANK.REPLY_VERIFIED){
+ if(turnId&&started&&completed&&reply&&reply.trim()&&rankOf(receipt)<RANK.REPLY_VERIFIED){
   receipt=write({state:"REPLY_VERIFIED",turnId,reply:reply.slice(0,16_384),replySha256:sha256Hex(reply)});
  }
 

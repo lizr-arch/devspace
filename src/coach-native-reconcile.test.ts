@@ -160,7 +160,7 @@ function makePublisher():Publisher{
  };
 }
 
-type Mode="never"|"incomplete"|"completed-no-reply"|"reply";
+type Mode="never"|"incomplete"|"completed-no-reply"|"reply"|"reply-before-complete";
 async function createOperation(harness:SendHarness,mode:Mode,options:{operationId?:string;threadId?:string;prompt?:string;task?:Parameters<typeof sendNativeOutbound>[0]["task"];sandbox?:Parameters<typeof sendNativeOutbound>[0]["sandbox"]}={}):Promise<{operationId:string;threadId:string;prompt:string;receipt:NativeOutboundReceipt}>{
  const operationId=options.operationId??"op-"+randomUUID();
  const threadId=options.threadId??randomUUID();
@@ -175,6 +175,7 @@ async function createOperation(harness:SendHarness,mode:Mode,options:{operationI
    if(mode==="incomplete")appendRecords(threadId,[taskStarted(turnId),userItem(turnId,"u-"+turnId,prompt)]);
    else if(mode==="completed-no-reply")appendRecords(threadId,[taskStarted(turnId),userItem(turnId,"u-"+turnId,prompt),taskComplete(turnId)]);
    else if(mode==="reply")appendRecords(threadId,[taskStarted(turnId),userItem(turnId,"u-"+turnId,prompt),assistantItem(turnId,"a-"+turnId,"reply "+turnId),taskComplete(turnId)]);
+   else if(mode==="reply-before-complete")appendRecords(threadId,[taskStarted(turnId),userItem(turnId,"u-"+turnId,prompt),assistantItem(turnId,"a-"+turnId,"early reply "+turnId)]);
    return {code:0,stdout:"Queued message "+randomUUID()+" for thread "+threadId+".\n",stderr:""};
   },
  });
@@ -442,6 +443,100 @@ async function main():Promise<void>{
    reconciler2.stop();
    assert.ok(processed>=0);
    assert.equal(existsSync(brokenPath),true);
+  });
+
+
+  /* ---------------- P0-1 / P0-2 regression (independent review) ---------------- */
+
+  await checkAsync("P0-1 bounded send: assistant before task_complete stays TURN_OBSERVED, never REPLY_VERIFIED",async()=>{
+   const publisherEarly=makePublisher();
+   const early=await createOperation(harness,"reply-before-complete",{prompt:"EARLY ASSISTANT PROOF"});
+   assert.notEqual(early.receipt.state,"REPLY_VERIFIED");
+   assert.equal(early.receipt.state,"TURN_OBSERVED");
+   assert.equal(early.receipt.reply,undefined);
+   const direct=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:early.operationId,stateDir:STATE,codexHome:HOME,deps:{publish:publisherEarly.publish}});
+   assert.equal(direct.published,false);
+   assert.equal(direct.receipt.state,"TURN_OBSERVED");
+   assert.equal(publisherEarly.events.size,0);
+   // completion arrives later: same turn now has started+completed+reply => publish once
+   const turnId=direct.receipt.turnId!;
+   appendRecords(early.threadId,[taskComplete(turnId)]);
+   const after=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:early.operationId,stateDir:STATE,codexHome:HOME,deps:{publish:publisherEarly.publish}});
+   assert.equal(after.receipt.state,"REPLY_VERIFIED");
+   assert.equal(after.published,true);
+   assert.equal(publisherEarly.events.size,1);
+   assert.equal(after.receipt.replySha256,sha256Hex(after.receipt.reply!));
+  });
+
+  await checkAsync("P0-1 durable reconcile path: assistant before task_complete must not publish",async()=>{
+   const publisherEarly2=makePublisher();
+   const op="op-early-"+randomUUID();
+   const threadId=randomUUID();
+   initThread(threadId);
+   const turnId="turn-"+randomUUID();
+   const prompt="DURABLE EARLY ASSISTANT PROOF";
+   const sent=await harness.send({operationId:op,threadId,prompt});
+   assert.equal(sent.state,"UNCERTAIN");
+   appendRecords(threadId,[taskStarted(turnId),userItem(turnId,"u-"+turnId,prompt),assistantItem(turnId,"a-"+turnId,"early durable reply")]);
+   const first=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:op,stateDir:STATE,codexHome:HOME,deps:{publish:publisherEarly2.publish}});
+   assert.equal(first.published,false);
+   assert.equal(first.receipt.state,"TURN_OBSERVED");
+   assert.equal(publisherEarly2.events.size,0);
+   appendRecords(threadId,[taskComplete(turnId)]);
+   const second=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:op,stateDir:STATE,codexHome:HOME,deps:{publish:publisherEarly2.publish}});
+   assert.equal(second.published,true);
+   assert.equal(second.receipt.state,"REPLY_VERIFIED");
+   assert.equal(publisherEarly2.events.size,1);
+  });
+
+  await checkAsync("P0-2 known-turn path: later second logical delivery is DOUBLE_DELIVERY and publishes nothing",async()=>{
+   const publisherDup=makePublisher();
+   const op="op-dup-"+randomUUID();
+   const threadId=randomUUID();
+   initThread(threadId);
+   const prompt="SECOND DELIVERY PROOF";
+   const turnA="turn-A-"+randomUUID();
+   const sent=await harness.send({operationId:op,threadId,prompt});
+   assert.equal(sent.state,"UNCERTAIN");
+   // first turn observed but NOT complete: assistant early
+   appendRecords(threadId,[taskStarted(turnA),userItem(turnA,"u-"+turnA,prompt),assistantItem(turnA,"a-"+turnA,"first early reply")]);
+   const first=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:op,stateDir:STATE,codexHome:HOME,deps:{publish:publisherDup.publish}});
+   assert.equal(first.receipt.state,"TURN_OBSERVED");
+   assert.equal(first.published,false);
+   // a second delivery of the same payload arrives in a NEW turn while first is unfinished
+   const turnB="turn-B-"+randomUUID();
+   appendRecords(threadId,[taskStarted(turnB),userItem(turnB,"u-"+turnB,prompt),assistantItem(turnB,"a-"+turnB,"second early reply")]);
+   const dup=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:op,stateDir:STATE,codexHome:HOME,deps:{publish:publisherDup.publish}});
+   assert.equal(dup.published,false);
+   assert.match(dup.reason,/DOUBLE_DELIVERY/);
+   assert.equal(publisherDup.events.size,0,"duplicate delivery must never publish READY");
+   // even if the first turn later completes, the duplicate window must stay fail-closed
+   appendRecords(threadId,[taskComplete(turnA)]);
+   const still=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:op,stateDir:STATE,codexHome:HOME,deps:{publish:publisherDup.publish}});
+   assert.equal(still.published,false);
+   assert.match(still.reason,/DOUBLE_DELIVERY/);
+   assert.equal(publisherDup.events.size,0);
+  });
+
+  await checkAsync("P0-2 after publication, a later duplicate delivery adds no second event",async()=>{
+   const publisherDone=makePublisher();
+   const op="op-done-"+randomUUID();
+   const threadId=randomUUID();
+   initThread(threadId);
+   const prompt="PUBLISHED THEN DUPLICATE PROOF";
+   const turnA="turn-D-"+randomUUID();
+   const sent=await harness.send({operationId:op,threadId,prompt});
+   assert.equal(sent.state,"UNCERTAIN");
+   appendRecords(threadId,[taskStarted(turnA),userItem(turnA,"u-"+turnA,prompt),assistantItem(turnA,"a-"+turnA,"done reply"),taskComplete(turnA)]);
+   const done=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:op,stateDir:STATE,codexHome:HOME,deps:{publish:publisherDone.publish}});
+   assert.equal(done.published,true);
+   const eventsAfterFirst=publisherDone.events.size;
+   assert.equal(eventsAfterFirst,1);
+   const turnB="turn-E-"+randomUUID();
+   appendRecords(threadId,[taskStarted(turnB),userItem(turnB,"u-"+turnB,prompt),assistantItem(turnB,"a-"+turnB,"second reply"),taskComplete(turnB)]);
+   const again=await reconcileNativeOperation({workspaceId:"ws-recon",operationId:op,stateDir:STATE,codexHome:HOME,deps:{publish:publisherDone.publish}});
+   assert.equal(again.published,false);
+   assert.equal(publisherDone.events.size,eventsAfterFirst,"no second review event for a duplicate delivery");
   });
 
   process.stdout.write("NATIVE_RECONCILE_TEST_PASS "+passed+"\n");
