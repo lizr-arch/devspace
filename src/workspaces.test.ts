@@ -17,9 +17,49 @@ import { loadConfig } from "./config.js";
 import { databasePath } from "./db/client.js";
 import { GitWorktreeError } from "./git-worktrees.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
-import { WorkspaceRegistry } from "./workspaces.js";
+import { WorkspaceRegistry, discoverAvailableAgentsFiles } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
+
+// Bounded AGENTS.md discovery: depth limit, build/cache dir skips and a hard
+// entry budget keep resume_workspace fast on broad workspaces such as
+// /Users/liz/agy (unbounded scans previously took 20-110 s).
+{
+  const discoveryRoot = await mkdtemp(
+    join(tmpdir(), "devspace-agents-discovery-test-"),
+  );
+  try {
+    await writeFile(join(discoveryRoot, "AGENTS.md"), "root\n");
+    await mkdir(join(discoveryRoot, "nested", "deeper"), { recursive: true });
+    await writeFile(join(discoveryRoot, "nested", "AGENTS.md"), "nested\n");
+    await writeFile(
+      join(discoveryRoot, "nested", "deeper", "AGENTS.md"),
+      "deep\n",
+    );
+    await mkdir(join(discoveryRoot, "node_modules", "pkg"), { recursive: true });
+    await writeFile(
+      join(discoveryRoot, "node_modules", "pkg", "AGENTS.md"),
+      "skip\n",
+    );
+    await mkdir(join(discoveryRoot, "dist.backup-1"), { recursive: true });
+    await writeFile(
+      join(discoveryRoot, "dist.backup-1", "AGENTS.md"),
+      "skip\n",
+    );
+
+    const discovered = await discoverAvailableAgentsFiles(
+      discoveryRoot,
+      [{ path: join(discoveryRoot, "AGENTS.md") }],
+      { maxDepth: 1, maxEntries: 10_000 },
+    );
+    assert.deepEqual(
+      discovered.map((file) => file.path),
+      [join(discoveryRoot, "nested", "AGENTS.md")],
+    );
+  } finally {
+    await rm(discoveryRoot, { recursive: true, force: true });
+  }
+}
 const root = await mkdtemp(join(tmpdir(), "devspace-workspace-test-"));
 
 try {

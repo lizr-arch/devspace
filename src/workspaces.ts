@@ -206,6 +206,15 @@ export class WorkspaceRegistry {
    * a close racing an open) cannot interleave their checks and writes.
    */
   private readonly lifecycleTails = new Map<string, Promise<void>>();
+  /**
+   * Workspace-wide AGENTS.md discovery is bounded but still walks a large tree.
+   * ChatGPT calls resume_workspace repeatedly, so cache the discovery result
+   * briefly instead of re-walking the whole workspace each time.
+   */
+  private readonly agentsDiscoveryCache = new Map<
+    string,
+    { at: number; files: AvailableAgentsFile[] }
+  >();
 
   constructor(
     private readonly config: ServerConfig,
@@ -2034,18 +2043,20 @@ export class WorkspaceRegistry {
     root: string,
     loadedFiles: LoadedAgentsFile[],
   ): Promise<AvailableAgentsFile[]> {
+    const now = Date.now();
+    const cached = this.agentsDiscoveryCache.get(root);
+    let files: AvailableAgentsFile[];
+    if (cached && now - cached.at < AGENTS_DISCOVERY_CACHE_MS) {
+      files = cached.files;
+    } else {
+      files = await discoverAvailableAgentsFiles(root, []);
+      this.agentsDiscoveryCache.set(root, { at: now, files });
+    }
+
     const loadedPaths = new Set(loadedFiles.map((file) => resolve(file.path)));
-    const discovered: AvailableAgentsFile[] = [];
-
-    await walkWorkspace(root, async (path, entry) => {
-      if (!entry.isFile()) return;
-      if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
-      if (loadedPaths.has(path)) return;
-
-      discovered.push({ path });
-    });
-
-    return discovered.sort((a, b) => a.path.localeCompare(b.path));
+    return files
+      .filter((file) => !loadedPaths.has(file.path))
+      .map((file) => ({ path: file.path }));
   }
 
   // -----------------------------------------------------------------------
@@ -2123,7 +2134,84 @@ const SKIPPED_CONTEXT_DIRS = new Set([
   ".next",
   ".turbo",
   ".cache",
+  // Build outputs, package caches and OS/editor metadata cannot contain
+  // project instructions. A broad macOS workspace such as /Users/liz/agy
+  // otherwise spends minutes scanning hundreds of thousands of files.
+  "artifacts",
+  "Saved",
+  "Intermediate",
+  "DerivedData",
+  "Library",
+  "obj",
+  "bin",
+  "target",
+  "Pods",
+  ".godot",
+  "venv",
+  ".venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "coverage",
+  ".nyc_output",
+  ".parcel-cache",
+  ".svelte-kit",
+  ".output",
+  ".nuxt",
+  ".angular",
+  "out",
+  "tmp",
+  ".tmp",
+  ".gradle",
+  ".idea",
+  "logs",
 ]);
+const SKIPPED_CONTEXT_DIR_PREFIXES = ["dist.", "build."];
+
+function shouldSkipContextDirectory(name: string): boolean {
+  if (SKIPPED_CONTEXT_DIRS.has(name)) return true;
+  return SKIPPED_CONTEXT_DIR_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+const AGENTS_DISCOVERY_MAX_DEPTH = 8;
+const AGENTS_DISCOVERY_MAX_ENTRIES = 60_000;
+const AGENTS_DISCOVERY_CACHE_MS = 60_000;
+
+/**
+ * Discover AGENTS/CLAUDE files that were not loaded into the initial context.
+ *
+ * The walk is bounded (depth and entry budget) because workspaces such as
+ * `/Users/liz/agy` contain tens of thousands of files across many projects;
+ * an unbounded walk previously took 20-110 s per resume_workspace call, which
+ * left the ChatGPT tool stream idle long enough to be reported as
+ * "Connection interrupted. Waiting for the complete answer".
+ */
+export async function discoverAvailableAgentsFiles(
+  root: string,
+  loadedFiles: Pick<LoadedAgentsFile, "path">[],
+  limits: { maxDepth?: number; maxEntries?: number } = {},
+): Promise<AvailableAgentsFile[]> {
+  const loadedPaths = new Set(loadedFiles.map((file) => resolve(file.path)));
+  const discovered: AvailableAgentsFile[] = [];
+
+  await walkWorkspace(
+    root,
+    async (path, entry) => {
+      if (!entry.isFile()) return;
+      if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
+      if (loadedPaths.has(path)) return;
+
+      discovered.push({ path });
+    },
+    {
+      maxDepth: limits.maxDepth ?? AGENTS_DISCOVERY_MAX_DEPTH,
+      maxEntries: limits.maxEntries ?? AGENTS_DISCOVERY_MAX_ENTRIES,
+    },
+  );
+
+  return discovered.sort((a, b) => a.path.localeCompare(b.path));
+}
 
 export function formatAgentsPath(
   path: string,
@@ -2150,23 +2238,37 @@ async function walkWorkspace(
     path: string,
     entry: { name: string; isFile(): boolean; isDirectory(): boolean },
   ) => Promise<void> | void,
+  options: { maxDepth?: number; maxEntries?: number } = {},
 ): Promise<void> {
-  let entries;
-  try {
-    entries = await opendir(directory);
-  } catch {
-    return;
-  }
+  const maxDepth = options.maxDepth ?? Number.POSITIVE_INFINITY;
+  let remaining =
+    options.maxEntries === undefined
+      ? Number.POSITIVE_INFINITY
+      : options.maxEntries;
 
-  for await (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) {
-        await walkWorkspace(path, visit);
-      }
-      continue;
+  async function walk(current: string, depth: number): Promise<void> {
+    if (remaining <= 0) return;
+    let entries;
+    try {
+      entries = await opendir(current);
+    } catch {
+      return;
     }
 
-    await visit(path, entry);
+    for await (const entry of entries) {
+      if (remaining <= 0) return;
+      remaining -= 1;
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (depth < maxDepth && !shouldSkipContextDirectory(entry.name)) {
+          await walk(path, depth + 1);
+        }
+        continue;
+      }
+
+      await visit(path, entry);
+    }
   }
+
+  await walk(directory, 0);
 }

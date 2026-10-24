@@ -199,3 +199,14 @@ Clash TUN（`utun0/utun1`），导致边缘连接反复被关闭：
 **待观察**：IPv4 固定后 24 h 内 `tunnel_down` 次数应显著低于升级后的
 每小时一次量级；若仍抖动，下一候选是回滚到 2026.7.3 或检查 Clash TUN 的
 IPv6/MTU 配置。自愈阈值（连续 3 次、900 s 冷却）保持不变。
+
+## 10. 补充（15:40）：ChatGPT「Connection interrupted. Waiting for the complete answer」根因
+
+用户侧反复出现的该提示不是省电或客户端随机故障，而是 **DevSpace 工具调用过慢把 ChatGPT 的响应流拖到超时**：
+
+- `resume_workspace` / `open_workspace` 每次都会递归扫描**整个工作区树**寻找 AGENTS.md/CLAUDE.md；
+- 在 `/Users/liz/agy`（数十个项目、大量 artifacts/备份/worktree）单次耗时 **24–109 s**（历史峰值 318 s）；`open_workspace` 在 TriaRegna worktree 上 31–41 s；
+- 工具执行期间 ChatGPT 的回合流处于空闲，连接层（Cloudflare/客户端）判定 interrupted，UI 显示该文案并保持 "waiting"；
+- 同期 cloudflared 记录 origin `broken pipe`/`connection reset`，服务端最终仍返回 200，说明问题在长空闲窗口而非工具报错。
+
+**修复**：AGENTS 发现改为有界+缓存 —— 深度上限 8、条目预算 60 000、跳过 build/缓存/备份目录（`dist.*`、`build.*`、`artifacts`、`node_modules` 等）、同 root 60 s 缓存。基准：`/Users/liz/agy` 从 24–109 s 降到 **618 ms**；TriaRegna worktree 98 ms。已构建并重启部署（bootId `65757f7a-682b-42bd-8050-82ac3ade5ca6`），ChatGPT 连接器随后 32 次工具调用时延 14–79 ms。
