@@ -164,6 +164,8 @@ export class CoachReviewEventStore {
       // Explicitly authorized additional workspaces. Never infer access from
       // all existing workspace sessions or a broad observer permission.
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_feed_authorized_workspaces (workspace_id TEXT PRIMARY KEY)");
+      this.db.exec("CREATE TABLE IF NOT EXISTS coach_browser_route_claims (workspace_id TEXT PRIMARY KEY,nonce TEXT NOT NULL UNIQUE,url TEXT NOT NULL,claimed_at TEXT NOT NULL);"+
+        "CREATE TABLE IF NOT EXISTS coach_webgpt_turn_acks (event_id INTEGER PRIMARY KEY,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,evidence_sha256 TEXT NOT NULL,delivery_workspace_id TEXT NOT NULL,acknowledged_at TEXT NOT NULL);");
       this.db.exec(
         "CREATE TABLE IF NOT EXISTS coach_agent_model_configs ("+
         "workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL,"+
@@ -638,4 +640,35 @@ export class CoachReviewEventStore {
     }).immediate();
   }
   close():void {this.db.close();}
+
+  /** Only the successful browser challenge + MCP claim path calls this. It
+   * grants delivery, never execution or review under a different workspace. */
+  recordBrowserRouteClaim(workspaceId:string,nonce:string,url:string):void {
+    if(!ID.test(workspaceId)||!/^[a-f0-9]{32}$/.test(nonce)||
+       !/^https:\/\/chatgpt\.com\/(?:g\/[^/?#]+\/)?c\/[A-Za-z0-9_-]{8,128}$/.test(url))
+      throw new Error("COACH_DELIVERY_ROUTE_INVALID");
+    this.db.prepare("INSERT INTO coach_browser_route_claims VALUES(?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET nonce=excluded.nonce,url=excluded.url,claimed_at=excluded.claimed_at")
+      .run(workspaceId,nonce,url,new Date().toISOString());
+  }
+  browserRouteClaim(workspaceId:string):{nonce:string;url:string}|undefined {
+    return this.db.prepare("SELECT nonce,url FROM coach_browser_route_claims WHERE workspace_id=?").get(workspaceId) as {nonce:string;url:string}|undefined;
+  }
+  assertDeliveryRoute(delivery:{workspaceId:string;nonce:string}):void {
+    if(!delivery||!ID.test(delivery.workspaceId)||!/^[a-f0-9]{32}$/.test(delivery.nonce)||
+       this.browserRouteClaim(delivery.workspaceId)?.nonce!==delivery.nonce)
+      throw new Error("COACH_DELIVERY_ROUTE_NOT_CLAIMED");
+  }
+  recordWebGptTurnAck(input:{workspaceId:string;operationId:string;eventId:number;evidenceSha256:string}):unknown {
+    const packet=this.getEvidenceByEvent(input.workspaceId,input.eventId) as
+      {operationId:string;evidenceSha256:string;delivery?:{workspaceId:string;nonce:string}}|undefined;
+    if(!packet?.delivery||packet.operationId!==input.operationId||packet.evidenceSha256!==input.evidenceSha256)
+      throw new Error("COACH_TURN_ACK_SCOPE_MISMATCH");
+    this.assertDeliveryRoute(packet.delivery);
+    this.db.prepare("INSERT OR IGNORE INTO coach_webgpt_turn_acks VALUES(?,?,?,?,?,?)")
+      .run(input.eventId,input.workspaceId,input.operationId,input.evidenceSha256,packet.delivery.workspaceId,new Date().toISOString());
+    return this.webGptTurnAck(input.workspaceId,input.eventId);
+  }
+  webGptTurnAck(workspaceId:string,eventId:number):unknown {
+    return this.db.prepare("SELECT * FROM coach_webgpt_turn_acks WHERE workspace_id=? AND event_id=?").get(workspaceId,eventId);
+  }
 }

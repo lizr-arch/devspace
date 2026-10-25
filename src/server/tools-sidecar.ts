@@ -113,7 +113,7 @@ export function registerSidecarTools(
       title: "Inspect Chrome Coach delivery evidence",
       description: "Read one browser-submitted, bearer-authenticated event receipt after exact Sidecar event identity verification. A DOM submission receipt is not proof ChatGPT accepted the message or completed a review.",
       inputSchema: {workspaceId:workspaceIdSchema,eventId:z.union([z.number().int().positive(),z.string().regex(/^app:[a-f0-9]{64}$/)])},
-      outputSchema: resultOutputSchema({receipt:z.unknown().optional(),error:optionalError}),
+      outputSchema: resultOutputSchema({receipt:z.unknown().optional(),turnAcknowledgment:z.unknown().optional(),error:optionalError}),
       _meta:{},
       annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
     },
@@ -122,7 +122,8 @@ export function registerSidecarTools(
       if(!managedCoachSidecar.getDeliveryReceipt)throw new Error("COACH_RECEIPT_READER_NOT_SUPPORTED");
       const receipt=await managedCoachSidecar.getDeliveryReceipt(workspaceId,eventId);
       const result=receipt?"Browser DOM submission receipt found.":"No verified browser receipt exists for this event.";
-      return {content:[textBlock(result)],structuredContent:{result,...(receipt?{receipt}:{})}};
+      const turnAcknowledgment=typeof eventId==="number"?ctx.coachReviewEvents.webGptTurnAck(workspaceId,eventId):undefined;
+      return {content:[textBlock(result)],structuredContent:{result,...(receipt?{receipt}:{}),...(turnAcknowledgment?{turnAcknowledgment}:{})}};
     }
   );
 
@@ -144,17 +145,33 @@ export function registerSidecarTools(
     async ({workspaceId,nonce,url})=>{
       workspaces.getWorkspace(workspaceId);
       if(!managedCoachSidecar.claimBrowserRoute)throw new Error("COACH_BIND_NOT_SUPPORTED");
-      const claimed=managedCoachSidecar.claimBrowserRoute(workspaceId,nonce,url,(nextScope)=>{
+      const claimed=await managedCoachSidecar.claimBrowserRoute(workspaceId,nonce,url,(nextScope)=>{
         const saved=ctx.coachReviewEvents.coachFeedConfig();
         if(!saved || !nextScope.includes(saved.workspaceId) ||
            nextScope.length>8 || new Set(nextScope).size!==nextScope.length)
           throw new Error("COACH_BIND_SCOPE_PERSISTENCE_DENIED");
         ctx.coachReviewEvents.saveCoachFeedConfig({...saved,authorizedWorkspaceIds:nextScope});
       });
+      if(claimed)ctx.coachReviewEvents.recordBrowserRouteClaim(workspaceId,nonce,url);
       const result=claimed?"Exact browser route claimed; browser may finish the one-click authorization.":"Binding request expired, mismatched, duplicated, or unauthorized.";
       return {content:[textBlock(result)],structuredContent:{result,claimed}};
     },
   );
+
+  registerAppTool(server,"coach_webgpt_acknowledge_turn",{
+    title:"Acknowledge receipt in a new Web GPT review turn",
+    description:"Web GPT calls this ONLY in the new turn caused by the exact browser notification, after independently fetching its original immutable packet. Requires a bearer-authenticated DOM receipt. Records a reviewer MCP acknowledgment separately from DOM submission; it is not platform attestation or an approval. Never call from the implementing CLI to simulate a Web GPT turn.",
+    inputSchema:{workspaceId:workspaceIdSchema,operationId:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/),eventId:z.number().int().positive(),evidenceSha256:z.string().regex(/^[a-f0-9]{64}$/)},
+    outputSchema:resultOutputSchema({acknowledgment:z.unknown().optional(),error:optionalError}),
+    _meta:{},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  },async(input)=>{
+    workspaces.getWorkspace(input.workspaceId);
+    const receipt=await managedCoachSidecar.getDeliveryReceipt?.(input.workspaceId,input.eventId);
+    if(!receipt||receipt.workspace_id!==input.workspaceId||receipt.operation_id!==input.operationId||receipt.result!=="dom_submitted")
+      throw new Error("COACH_WEBGPT_DOM_RECEIPT_REQUIRED");
+    const acknowledgment=ctx.coachReviewEvents.recordWebGptTurnAck(input);
+    return {content:[textBlock("Reviewer MCP turn acknowledged; independent review still required.")],structuredContent:{result:"acknowledged",acknowledgment}};
+  });
 
   }
 

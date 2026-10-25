@@ -422,6 +422,7 @@ export class CoachRealtimeEngine {
     this.transition(this.get(planId)!,"DISPATCHING",null,nextOp,newStage,newCount);
     verifyTask(p.workspaceRoot,p.workspaceId,next.task);
     const input:RunnerInput={task:next.task,stageId:next.stageId,workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,
+      delivery:packet.delivery as RunnerInput["delivery"],
       operationId:nextOp,prompt,model:selection.model,reasoningEffort:selection.reasoningEffort,
       sandbox:next.sandbox,timeoutMs:3600000,
       sessionId:String(packet.threadId),parentOperationId:p.currentOperationId,
@@ -443,6 +444,7 @@ export class CoachRealtimeEngine {
     }).immediate();
     const selection=this.d.events.getRunConfig(p.workspaceId,p.currentOperationId)?.next??next;
     await this.d.runner().start({workspaceId:p.workspaceId,workspaceRoot:p.workspaceRoot,operationId:nextOp,
+      delivery:packet.delivery as RunnerInput["delivery"],
       task:next.task,stageId:next.stageId,prompt:reason+". Read prior operation report "+p.currentOperationId+"; preserve it and write a new operation report. "+next.prompt,
       model:selection.model,reasoningEffort:selection.reasoningEffort,sandbox:next.sandbox,
       sessionId:String(packet.threadId),parentOperationId:p.currentOperationId,expectedFingerprint:String(packet.finalFingerprint)});

@@ -1,5 +1,6 @@
 import { verifyTask } from "./coach-task-contract.js";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { JobResourceLocks, sharedResourceLocks } from "./job-resource-locks.js";
 import { captureCodexFingerprint } from "./codex-agent-runner.js";
 import type { CoachReviewEventStore } from "./coach-review-events.js";
@@ -27,6 +28,8 @@ export class CoachReviewGate {
 
   async verifyTest(input: { workspaceId: string; workspaceRoot: string; eventId: number; taskId: string; }): Promise<VerifiedTestProof> {
     const packet = this.packet(input.workspaceId, input.eventId);
+    if(packet.sourceRoot && realpathSync(input.workspaceRoot)!==packet.sourceRoot)
+      throw new Error("COACH_REVIEW_SOURCE_ROOT_MISMATCH");
     if (packet.workspaceId !== input.workspaceId) throw new Error("COACH_REVIEW_WORKSPACE_MISMATCH");
     const previous = this.options.events.getVerifiedTest(input.eventId);
     if (previous) {
@@ -57,6 +60,16 @@ export class CoachReviewGate {
     this.locks.acquire({ jobId: lease, runner: "sidecar", workspaceRoot: input.workspaceRoot, requests: [{ kind: "workspace", value: input.workspaceRoot }] });
     try {
       const packet = this.packet(input.workspaceId, input.eventId);
+      if(packet.sourceRoot && realpathSync(input.workspaceRoot)!==packet.sourceRoot)
+        throw new Error("COACH_REVIEW_SOURCE_ROOT_MISMATCH");
+      if(packet.delivery){
+        this.options.events.assertDeliveryRoute(packet.delivery);
+        const run=this.options.events.getAgentRun(input.workspaceId,input.operationId);
+        if(run?.state!=="COMPLETED"||run.eventId!==input.eventId||run.threadId!==packet.threadId)
+          throw new Error("COACH_REVIEW_MANAGED_RUN_REQUIRED");
+        if(input.decision!=="BLOCKED" && !this.options.events.webGptTurnAck(input.workspaceId,input.eventId))
+          throw new Error("COACH_REVIEW_WEBGPT_TURN_ACK_REQUIRED");
+      }
       if (packet.operationId !== input.operationId || packet.evidenceSha256 !== input.evidenceSha256) throw new Error("COACH_REVIEW_EVIDENCE_MISMATCH");
       if ((await this.fingerprint(input.workspaceRoot)).sha !== packet.finalFingerprint) throw new Error("COACH_REVIEW_STALE_EVIDENCE");
       if(packet.task)verifyTask(input.workspaceRoot,input.workspaceId,packet.task);

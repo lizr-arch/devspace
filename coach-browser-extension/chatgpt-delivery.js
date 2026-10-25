@@ -85,7 +85,7 @@
     if(!editor)return {ok:false,notSubmitted:true,reason:"找不到唯一的 ChatGPT 编辑器（旧版或带标签的新版输入框）"};
     if(hasDraft(editor))
       return {ok:false,notSubmitted:true,reason:"用户已有草稿，未覆盖"};
-    if(busy())return {ok:false,notSubmitted:true,reason:"Web GPT 正在生成"};
+    if(busy())return {ok:false,notSubmitted:true,busy:true,reason:"Web GPT 正在生成"};
     if(!editor.isConnected)return {ok:false,notSubmitted:true,reason:"编辑器已变化"};
     sending=true;
     try {

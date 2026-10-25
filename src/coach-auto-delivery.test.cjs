@@ -23,7 +23,7 @@ function workerHarness(overrides={}) {
   const tab={id:42,url:URL_OK};let tabs=[tab],startup=[],removed=[];
   let challenge=null,nonceCounter=0;
   const challenges=new Map();
-  let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
+  let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null,pages=null;
   let contentReady=true,injectionFailure=false,pingProtocol=5;
   const chrome={
     storage:{
@@ -52,7 +52,7 @@ function workerHarness(overrides={}) {
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
   const fetch=async(url,options)=>{
-    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events|delivery-receipt|bind\/start|bind\/status\?nonce=[a-f0-9]{32})$/);
+    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events(?:\?cursor=[A-Za-z0-9_-]+)?|delivery-receipt|bind\/start|bind\/status\?nonce=[a-f0-9]{32})$/);
     assert.match(options.headers.Authorization,/^Bearer A{43}$/);
     if(url.endsWith("/bind/start")) {
       challenge=JSON.parse(options.body);
@@ -73,7 +73,7 @@ function workerHarness(overrides={}) {
         ok:true,receipt:{...identity,result:"dom_submitted",recorded_at:"2026-10-19T00:00:00Z"}
       })};
     }
-    return {ok:true,json:async()=>({pending_count:pendingCount??events.length,events})};
+    return {ok:true,json:async()=>pages?pages[new URL(url).searchParams.get("cursor")||"first"]:({pending_count:pendingCount??events.length,events})};
   };
   const context=vm.createContext({chrome,fetch,URL,Date,Number,Object,Array,
     String,RegExp,Error,Math,Promise,console,
@@ -87,7 +87,7 @@ function workerHarness(overrides={}) {
   async function drain(){for(let i=0;i<5;i++)await tick();}
   return {session,local,tab,messages,injections,receipts,msg,drain,tabUpdates,tabRemovals,
     setReceiptFailure:x=>{receiptFailure=x;},
-    setEvents:x=>{events=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
+    setEvents:x=>{events=x;},setPages:x=>{pages=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
     setContentReady:x=>{contentReady=x;},setPingProtocol:x=>{pingProtocol=x;},
     setInjectionFailure:x=>{injectionFailure=x;},setTabs:x=>{tabs=x;},startup,
     claimWorkspace:(x,nonce=challenge?.nonce)=>{challenges.get(nonce).workspaceId=x;},
@@ -716,6 +716,81 @@ test("one click requests an MCP challenge, then exact claimed workspace is enabl
  assert.equal(h.messages[1].id,42);
  assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"sent");
  assert.equal(JSON.stringify(h.local).includes("A".repeat(43)),false);
+});
+
+test("explicit delivery grant routes to claimed workspace without rewriting execution identity",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ assert.equal((await h.msg("COACH_AUTO_ONE_CLICK")).ok,true);
+ h.claimWorkspace("delivery-ws");await h.msg("COACH_AUTO_BIND_CHECK");
+ const nonce=h.getChallenge().nonce;
+ const event={...EVENT,workspace_id:"execution-ws",delivery_workspace_id:"delivery-ws",delivery_nonce:nonce};
+ h.setEvents([event]);await h.poll();
+ assert.equal(h.messages.length,2);
+ assert.equal(h.messages[1].id,42);
+ assert.match(h.messages[1].m.instruction,/execution-ws/);
+ assert.match(h.messages[1].m.instruction,/coach_webgpt_acknowledge_turn/);
+ assert.equal(h.receipts[0].workspace_id,"execution-ws");
+ assert.equal(h.receipts[0].operation_id,EVENT.operation_id);
+ await h.poll();assert.equal(h.messages.length,2,"receipt retry never resends a chat");
+});
+
+test("old browser nonce and malformed delivery scope cannot route a completion",async()=>{
+ for(const fields of [
+   {delivery_workspace_id:"delivery-ws",delivery_nonce:"a".repeat(32)},
+   {delivery_workspace_id:"delivery-ws"},
+   {delivery_nonce:"a".repeat(32)}
+ ]){
+   const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+   h.setEvents([]);await h.msg("COACH_AUTO_ONE_CLICK");
+   h.claimWorkspace("delivery-ws");await h.msg("COACH_AUTO_BIND_CHECK");
+   h.setEvents([{...EVENT,workspace_id:"execution-ws",...fields}]);
+   await h.poll();assert.equal(h.messages.length,1);assert.equal(h.receipts.length,0);
+ }
+});
+
+test("primary feed pagination delivers a bound event beyond the first fifty",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
+ const first=Array.from({length:50},(_,i)=>({...EVENT,event_id:i+100,workspace_id:"unbound-ws",operation_id:"op-"+i}));
+ h.setPages({first:{pending_count:51,events:first,has_more:true,next_cursor:"next_page"},next_page:{pending_count:51,events:[EVENT],has_more:false,next_cursor:null}});
+ await h.poll();assert.equal(h.messages.length,1);assert.equal(h.receipts[0].event_id,12);
+});
+
+test("duplicate pagination cursor and changing queue totals fail closed",async()=>{
+ for(const second of [
+   {pending_count:2,events:[{...EVENT,event_id:13}],has_more:true,next_cursor:"repeat"},
+   {pending_count:3,events:[{...EVENT,event_id:13}],has_more:false,next_cursor:null}
+ ]){
+   const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+   h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+   await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
+   h.setPages({first:{pending_count:2,events:[EVENT],has_more:true,next_cursor:"repeat"},repeat:second});
+   await h.poll();assert.equal(h.messages.length,0);assert.equal(h.receipts.length,0);
+ }
+});
+
+test("uncertain delivery blocks other execution workspaces sharing its browser route",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_ONE_CLICK");
+ h.claimWorkspace("delivery-ws");await h.msg("COACH_AUTO_BIND_CHECK");
+ h.local.coachAutoLedger={"old-source:old-op:9":{state:"needs_attention",deliveryWorkspaceId:"delivery-ws"}};
+ h.setEvents([{...EVENT,workspace_id:"execution-ws",delivery_workspace_id:"delivery-ws",delivery_nonce:h.getChallenge().nonce}]);
+ await h.poll();assert.equal(h.messages.length,1);assert.equal(h.receipts.length,0);
+});
+
+test("busy chat backs off its route while another authorized conversation proceeds",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ const urlB=URL_OK.replace("12345678","87654321");
+ h.setTabs([{id:42,url:URL_OK},{id:43,url:urlB}]);
+ h.local.coachAutoRoutes={"ws-qa":{url:URL_OK,tabId:42,enabled:true},"ws-b":{url:urlB,tabId:43,enabled:true}};
+ h.setEvents([EVENT,{...EVENT,event_id:13,workspace_id:"ws-b",operation_id:"other"}]);
+ h.setDelivery(id=>id===42?{ok:false,notSubmitted:true,busy:true,reason:"Web GPT 正在生成"}:{ok:true,submitted:true});
+ await h.poll();await h.poll();await h.poll();
+ assert.equal(h.messages.filter(m=>m.id===42).length,1);
+ assert.equal(h.messages.filter(m=>m.id===43).length,1);
+ assert.equal(h.receipts.length,1);assert.equal(h.receipts[0].workspace_id,"ws-b");
 });
 test("three one-click binding requests coexist and finish independently",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};

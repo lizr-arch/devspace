@@ -25,6 +25,8 @@ for(const tool of ["coach_realtime_status","coach_realtime_register","coach_real
 for(const tool of ["coach_realtime_register","coach_realtime_pause","coach_realtime_resume","coach_webgpt_claim_browser_route"])
  assert.equal(requiredCapabilityForTool(tool),"runner.execute");
 assert.equal(requiredCapabilityForTool("coach_realtime_status"),"workspace.read");
+assert.equal(names.filter(n=>n==="coach_webgpt_acknowledge_turn").length,1);
+assert.equal(requiredCapabilityForTool("coach_webgpt_acknowledge_turn"),"runner.execute");
 assert.equal(requiredCapabilityForTool("codex_agent_update_config"),"runner.execute");
 assert.equal(requiredCapabilityForTool("codex_agent_observe"),"workspace.read");
 const readOnly=config(true);
@@ -35,6 +37,7 @@ assert.ok(!ro.includes("coach_realtime_register"));
 assert.ok(!ro.includes("coach_realtime_pause"));
 assert.ok(!ro.includes("coach_realtime_resume"));
 assert.ok(!ro.includes("coach_webgpt_claim_browser_route"));
+assert.ok(!ro.includes("coach_webgpt_acknowledge_turn"));
 assert.ok(!ro.includes("codex_agent_update_config"));
 assert.ok(!ro.includes("codex_agent_start"));
 assert.ok(ro.includes("codex_app_thread_read"));
@@ -51,5 +54,5 @@ assert.ok(ro.includes("codex_app_native_receipt"));
 assert.ok(!ro.includes("codex_app_native_send"));
 assert.ok(!ro.includes("codex_app_native_rework"));
 assert.ok(!ro.includes("codex_task_freeze"));
-assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001\+codex-app-shared-001\+codex-app-autowake-001\+native-outbound-001$/);
+assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001\+codex-app-shared-001\+codex-app-autowake-001\+native-outbound-001\+cli-delivery-scope-v1$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");
