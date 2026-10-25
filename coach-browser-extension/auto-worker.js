@@ -10,6 +10,24 @@ const AUTO_ALARM = "coach-auto-delivery";
 let autoRouteMutationEpoch=0;
 const AUTO_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const AUTO_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const AUTO_WAKE_ID = /^dsh:[1-9][0-9]{0,18}$/;
+// Opaque wake identity produced by the bridge; never mailbox body text.
+const AUTO_MESSAGE_ID = /^[a-z0-9-]{16,64}$/;
+// Strict per-event instruction. Only the validated opaque messageId is
+// embedded; Web GPT must read MAILBOX.md, verify the block's contentSha256,
+// and treat peer text as peer content, never as human authorization.
+const DSH_WAKE_PREFIX = "请以 Web GPT Coach 身份独立审核。请读取共享信箱 MAILBOX.md 中 messageId=";
+const DSH_WAKE_SUFFIX = " 的 DSH wake 块，核对 contentSha256 后按 topic 处理。";
+
+// Deployment glue for the isolated DSH wake sidecar. Only the explicitly
+// authorized DSH workspace is routed to this second loopback sidecar; every
+// other workspace keeps using the paired production sidecar port. No
+// credential is hard-coded here: the existing session bearer is reused.
+const DSH_WAKE_SIDECAR_PORT = 8788;
+const DSH_WAKE_WORKSPACE = "ws_325cba3d-8620-47a7-ba60-0d65f9be1908";
+// 40 pages x 50 = 2000 events, below the 2048-entry delivery ledger cap, so
+// a bounded enumeration can never deadlock against the ledger safety limit.
+const AUTO_MAX_PAGES = 40;
 let autoBusy = false;
 const AUTO_LAST_CHECK = "coachAutoLastCheck";
 const AUTO_BIND_PENDING = "coachAutoPendingBinds";
@@ -91,6 +109,13 @@ function autoValid(e) {
   if(e?.delivery_workspace_id!==undefined &&
     (!AUTO_ID.test(e.delivery_workspace_id)||typeof e.delivery_nonce!=="string"||!/^[a-f0-9]{32}$/.test(e.delivery_nonce)))return false;
   if(e?.delivery_nonce!==undefined && e.delivery_workspace_id===undefined)return false;
+  // DSH mailbox wakes carry a string identity and no review report. They are
+  // delivered only to the explicitly bound workspace conversation.
+  if(e && e.event_type === "DSH_MAILBOX_WAKE")
+    return typeof e.event_id === "string" && /^dsh:[1-9][0-9]{0,18}$/.test(e.event_id) &&
+      typeof e.workspace_id === "string" && AUTO_ID.test(e.workspace_id) &&
+      typeof e.operation_id === "string" && AUTO_MESSAGE_ID.test(e.operation_id) &&
+      typeof e.created_at === "string" && e.created_at.length <= 64;
   if(e?.app_kind==="native_chatgpt_app_codex")return e.event_type==="CODEX_APP_READY_FOR_GPT_REVIEW"&&
     typeof e.event_id==="string"&&/^app:[a-f0-9]{64}$/.test(e.event_id)&&
     typeof e.workspace_id==="string"&&AUTO_ID.test(e.workspace_id)&&
@@ -116,6 +141,9 @@ function autoInstruction(e) {
     "REWORK 必须针对同一个固定 App 线程并使用新 operationId，不能启动本地 Codex CLI。"+
     "\n事件 ID："+e.event_id+"\n操作 ID："+e.operation_id+"\n工作区 ID："+e.workspace_id+
     "\n原生 ChatGPT App Codex 线程："+e.thread_id+"\n事件证据 SHA-256："+e.evidence_sha256;
+  // Exactly one validated opaque messageId, no mailbox body or content hash.
+  if(e.event_type==="DSH_MAILBOX_WAKE")
+    return DSH_WAKE_PREFIX + e.operation_id + DSH_WAKE_SUFFIX;
   if(e.event_type==="PLAN_CONFLICT")return "DevSpace Codex 报告 PLAN_CONFLICT，需要 Web GPT 修订已批准的任务。"+
     "请先查询 coach_realtime_status，并通过 DevSpace MCP 读取本操作不可变证据及绑定 TASK/报告，核对具体反证、影响与建议修订。"+
     "这是计划冲突反馈；请明确处理契约修订，不要提交正式 APPROVED / REWORK 审核裁决，也不要自动重启或继续任务。"+
@@ -144,7 +172,7 @@ async function autoState() {
     .map(([key,x])=>({key,state:x.state,at:x.at||"",reason:x.reason||""}));
   return {enabled:entries.some(([,route])=>!!route?.enabled), bound:entries.length>0,
     url:entries.length===1?entries[0][1]?.url||"":entries.length?entries.length+" 个工作区对话已绑定":"",
-    routes:entries.map(([workspaceId,route])=>({workspaceId,url:route?.url||"",enabled:!!route?.enabled,tabReady:Number.isSafeInteger(route?.tabId)})),
+    routes:entries.map(([workspaceId,route])=>({workspaceId,url:route?.url||"",enabled:!!route?.enabled,tabReady:Number.isSafeInteger(route?.tabId),grantVerified:typeof route?.nonce==="string" && /^[a-f0-9]{32}$/.test(route.nonce)})),
     version:autoVersion(),lastCheck,
     pendingBinding:Object.values((await chrome.storage.session.get(AUTO_BIND_PENDING))[AUTO_BIND_PENDING]||{}),
     blocking:summary.needs_attention>0 ?
@@ -168,6 +196,25 @@ async function autoBind(workspaceId) {
   await chrome.storage.local.set({[AUTO_SESSION]:routes,[AUTO_REVOKED]:false});
   return {ok:true,state:await autoState()};
 }
+// One explicit user click binds the CURRENT ChatGPT conversation to the fixed
+// DSH workspace and enables auto-delivery. No nonce/claim call: this is the
+// already-supported local manual bind path consolidated into a single user
+// gesture; the active-tab canonical URL is required and nothing is guessed.
+async function autoDshOneClick() {
+  let pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
+  if(!pair || !AUTO_TOKEN.test(pair.token)) {
+    const paired=await requestNativePairing(true);
+    if(!paired?.ok)return {ok:false,error:"本机安全配对失败："+(paired?.message||"unknown")};
+    pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
+  }
+  if(!pair || !AUTO_TOKEN.test(pair.token))return {ok:false,error:"没有有效的 Sidecar 配对"};
+  const bound=await autoBind(DSH_WAKE_WORKSPACE);
+  if(!bound?.ok)return {ok:false,error:bound?.error||"绑定失败"};
+  const enabled=await autoToggle(true,DSH_WAKE_WORKSPACE);
+  if(!enabled?.ok)return {ok:false,error:enabled?.error||"启用失败"};
+  void autoPump();
+  return {ok:true,message:"已一键绑定并启用当前 ChatGPT 对话（DSH 工作区）",state:await autoState()};
+}
 async function autoToggle(enabled,requestedWorkspaceId) {
   const routes=await autoTarget(),workspaceId=requestedWorkspaceId|| (Object.keys(routes).length===1?Object.keys(routes)[0]:null);
   const t=workspaceId?routes[workspaceId]:null;
@@ -188,8 +235,12 @@ async function autoOneClick() {
   const tab=tabs?.[0],url=autoCanonical(tab?.url);
   if(!Number.isSafeInteger(tab?.id)||!url)return {ok:false,error:"请在具体的 ChatGPT 对话中点击一键启用"};
   const existing=await autoTarget();
-  if(Object.values(existing).some(route=>autoCanonical(route?.url)===url))
-    return {ok:false,error:"此对话已经绑定工作区，请查看现有状态，不要重复绑定"};
+  const currentRoutes=Object.entries(existing).filter(([,route])=>autoCanonical(route?.url)===url);
+  // One explicit click can upgrade one legacy route lacking a scoped nonce.
+  // Never create parallel claims for an already verified route or ambiguous scopes.
+  if(currentRoutes.length>1 || currentRoutes.some(([,route])=>
+      typeof route?.nonce==="string" && /^[a-f0-9]{32}$/.test(route.nonce)))
+    return {ok:false,error:"此对话已经完成授权，不能重复绑定"};
   const pendingMap=(await chrome.storage.session.get(AUTO_BIND_PENDING))[AUTO_BIND_PENDING]||{};
   if(Object.values(pendingMap).some(p=>p?.url===url))
     return {ok:false,error:"此对话已有绑定请求等待确认，不得重复发送"};
@@ -343,8 +394,8 @@ async function autoResolveRoutes(){
 async function autoReady(tabId,url) {
   const ping=async()=>{
     try {
-      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING_V5"});
-      return ready?.ok===true && ready.protocol===5 && ready.url===url;
+      const ready=await chrome.tabs.sendMessage(tabId,{type:"COACH_AUTO_PING_V6"});
+      return ready?.ok===true && ready.protocol===6 && ready.url===url;
     } catch { return false; }
   };
   if(await ping())return {ok:true};
@@ -388,12 +439,16 @@ async function autoSyncReceipts(pair,ledger) {
     if(record?.state!=="sent" || record.receiptState!=="pending")continue;
     if(++attempts>5)break;
     const identity=record.receiptIdentity;
+    const eventId=identity?.event_id;
+    // Numeric Coach review ids and durable DSH wake ids both carry a real
+    // DOM-submitted receipt identity. Anything else is never fabricated.
+    const eventIdOk=(Number.isSafeInteger(eventId)&&eventId>0) ||
+      (typeof eventId==="string"&&(AUTO_WAKE_ID.test(eventId)||/^app:[a-f0-9]{64}$/.test(eventId)));
     if(!identity || !AUTO_ID.test(identity.workspace_id) ||
-       !AUTO_ID.test(identity.operation_id) ||
-       !(Number.isSafeInteger(identity.event_id)&&identity.event_id>0) &&
-       !(typeof identity.event_id==="string"&&/^app:[a-f0-9]{64}$/.test(identity.event_id)))continue;
+       !AUTO_ID.test(identity.operation_id) || !eventIdOk)continue;
     try {
-      const response=await fetch("http://127.0.0.1:"+pair.port+"/delivery-receipt",{
+      const receiptPort=typeof eventId==="string"&&AUTO_WAKE_ID.test(eventId)?DSH_WAKE_SIDECAR_PORT:pair.port;
+      const response=await fetch("http://127.0.0.1:"+receiptPort+"/delivery-receipt",{
         method:"POST",cache:"no-store",
         headers:{Authorization:"Bearer "+pair.token,"Content-Type":"application/json"},
         body:JSON.stringify(identity)
@@ -410,30 +465,51 @@ async function autoSyncReceipts(pair,ledger) {
     } catch { /* Keep durable pending receipt. Never re-submit the chat. */ }
   }
 }
-// Bounded, fail-closed pagination on the primary paired feed. Never infer
-// completeness from a single HTTP 200 or repeatedly visit the same cursor.
-async function autoQueue(pair) {
-  const events=[],cursors=new Set(),keys=new Set();let cursor=null,total=null;
-  for(let page=0;page<8;page++){
-    const response=await fetch("http://127.0.0.1:"+pair.port+"/events"+
-      (cursor?"?cursor="+encodeURIComponent(cursor):""),{
-      method:"GET",cache:"no-store",headers:{Authorization:"Bearer "+pair.token}
-    });
-    if(!response.ok)return {http:response.status};
-    const body=await response.json();
-    if(!Array.isArray(body.events)||body.events.length>50||!Number.isSafeInteger(body.pending_count)||
-       body.pending_count<0||body.pending_count>400 || total!==null&&total!==body.pending_count)return {invalid:true};
-    total=body.pending_count;
-    for(const event of body.events){
-      if(autoValid(event)){const key=autoKey(event);if(keys.has(key))return {invalid:true};keys.add(key);}
-      events.push(event);
+// Bounded, identity-verified pagination. One inconsistent page (wrong count,
+// duplicate identity, malformed cursor envelope) fails the whole feed closed:
+// the extension never treats a truncated queue as fully delivered.
+async function autoFetchFeed(pair,portOverride,workspaceFilter) {
+  const events=[],seen=new Set(),seenCursors=new Set();
+  let cursor=null,expected=null,pages=0,hasMore=true;
+  const port=Number.isInteger(portOverride)?portOverride:pair.port;
+  const scope=workspaceFilter?"&workspaceId="+encodeURIComponent(workspaceFilter):"";
+  while(hasMore) {
+    if(++pages>AUTO_MAX_PAGES)return {ok:false,code:"invalid_feed",detail:"max pages"};
+    const base="http://127.0.0.1:"+port+"/events?limit=50"+scope;
+    const url=cursor===null?base:base+"&cursor="+encodeURIComponent(cursor);
+    const response=await fetch(url,{method:"GET",cache:"no-store",
+      headers:{Authorization:"Bearer "+pair.token}});
+    if(!response.ok)return {ok:false,code:"sidecar_http",status:response.status};
+    const body=await response.json().catch(()=>null);
+    if(!body||!Array.isArray(body.events)||body.events.length>50||
+       !Number.isSafeInteger(body.pending_count)||body.pending_count<0||
+       typeof body.has_more!=="boolean"||
+       (body.has_more&&typeof body.next_cursor!=="string")||
+       (!body.has_more&&body.next_cursor!==null))
+      return {ok:false,code:"invalid_feed",detail:"envelope"};
+    if(expected===null)expected=body.pending_count;
+    else if(body.pending_count!==expected)
+      return {ok:false,code:"invalid_feed",detail:"pending_count drifted"};
+    for(const event of body.events) {
+      if(!event||typeof event!=="object"||
+         !((typeof event.event_id==="number")||(typeof event.event_id==="string")))
+        return {ok:false,code:"invalid_feed",detail:"identity"};
+      const identity=typeof event.event_id+":"+event.event_id;
+      if(seen.has(identity))return {ok:false,code:"invalid_feed",detail:"duplicate"};
+      seen.add(identity);events.push(event);
     }
-    if(body.has_more!==true)return events.length===total?{events}:{invalid:true};
-    if(body.events.length===0||typeof body.next_cursor!=="string"||
-       !/^[A-Za-z0-9_-]{1,1024}$/.test(body.next_cursor)||cursors.has(body.next_cursor))return {invalid:true};
-    cursor=body.next_cursor;cursors.add(cursor);
+    if(events.length>expected)return {ok:false,code:"invalid_feed",detail:"over count"};
+    if(body.has_more&&body.events.length===0)
+      return {ok:false,code:"invalid_feed",detail:"empty page"};
+    hasMore=body.has_more;cursor=body.next_cursor;
+    if(hasMore) {
+      if(seenCursors.has(cursor))return {ok:false,code:"invalid_feed",detail:"cursor loop"};
+      seenCursors.add(cursor);
+    }
   }
-  return {invalid:true};
+  if(events.length!==expected)
+    return {ok:false,code:"invalid_feed",detail:"incomplete accumulation"};
+  return {ok:true,events,pending_count:expected,pages};
 }
 async function autoPump() {
   if(autoBusy)return;
@@ -452,20 +528,37 @@ async function autoPump() {
        !AUTO_TOKEN.test(pair.token)) {
       code="not_paired";message="未配对有效的 Sidecar 会话";return;
     }
-    const queue=await autoQueue(pair);
-    if(queue.http) {
-      code="sidecar_http";message="Sidecar 请求未通过（HTTP "+queue.http+"）";return;
-    }
-    if(queue.invalid || !queue.events) {
+    const feed=await autoFetchFeed(pair);
+    if(!feed.ok) {
+      if(feed.code==="sidecar_http") {
+        code="sidecar_http";message="Sidecar 请求未通过（HTTP "+feed.status+"）";return;
+      }
       code="invalid_feed";message="Sidecar 队列不完整或格式不匹配，停止发送";return;
     }
+    // The isolated DSH wake sidecar is a second loopback feed. It is optional
+    // during rollout: an unreachable override sidecar must never block or
+    // invalidate the production Coach feed.
+    let dshWakeEvents=[];
+    try {
+      const dshFeed=await autoFetchFeed(pair,DSH_WAKE_SIDECAR_PORT,DSH_WAKE_WORKSPACE);
+      if(dshFeed.ok)dshWakeEvents=dshFeed.events;
+    } catch { /* Override sidecar not running (yet). */ }
     const ledger=await autoLedger();
     // In-flight from a prior service-worker lifetime is an unknown outcome.
     for(const [k,r] of Object.entries(ledger)) {
       if(r?.state==="in_flight")ledger[k]={...r,state:"needs_attention",
         at:new Date().toISOString(),reason:"上次投递结果不确定，禁止自动重发"};
     }
-    const events=queue.events.filter(autoValid).sort((a,b)=>String(a.created_at||"").localeCompare(String(b.created_at||"")));
+    // The feed is already in the Sidecar's stable merged order; filter only
+    // after the complete-page count/identity verification above.
+    const merged=[...feed.events,...dshWakeEvents];
+    const seenMerged=new Set();
+    const events=merged.filter(e=>{
+      const id=typeof e?.event_id+":"+e?.event_id;
+      if(seenMerged.has(id))return false;
+      seenMerged.add(id);
+      return autoValid(e);
+    });
     autoReconcileLegacy(ledger,events);
     for(const e of events) {
       const key=autoKey(e);
@@ -539,7 +632,7 @@ async function autoPump() {
     let result=null;
     try {
       result=await chrome.tabs.sendMessage(target.tabId,{
-        type:"COACH_AUTO_DELIVER_V5",url:target.url,instruction:autoInstruction(candidate)
+        type:"COACH_AUTO_DELIVER_V6",url:target.url,instruction:autoInstruction(candidate)
       });
     }catch{result={ok:false,uncertain:true,reason:"内容脚本不可达"};}
     // Re-read durable state: user may have disabled/unbound while DOM action ran.
@@ -547,12 +640,18 @@ async function autoPump() {
     if(current[key]?.state!=="in_flight")return;
     const submitted=result?.ok===true && result?.submitted===true;
     const definitelyNotSent=result?.ok===false && result?.notSubmitted===true;
+    // A receipt exists only for a real DOM-submitted send. Numeric Coach review
+    // ids and DSH wake ids (dsh:<rowid>) are both acknowledged by exact
+    // identity; the ledger key keeps workspace:messageId:dsh:N.
+    const receiptEventId=Number.isSafeInteger(candidate.event_id)&&candidate.event_id>0
+      ?candidate.event_id:(typeof candidate.event_id==="string"&&AUTO_WAKE_ID.test(candidate.event_id)
+        ?candidate.event_id:(typeof candidate.event_id==="string"&&/^app:[a-f0-9]{64}$/.test(candidate.event_id)?candidate.event_id:null));
     current[key]={state:submitted?"sent":definitelyNotSent?"pending":"needs_attention",
       deliveryWorkspaceId:deliveryWorkspace,
       ...(definitelyNotSent && result.busy===true?{retryAfter:Date.now()+60_000}:{}),
       at:new Date().toISOString(),
-      ...(submitted?{receiptState:"pending",
-        receiptIdentity:{event_id:candidate.event_id,workspace_id:candidate.workspace_id,
+      ...(submitted&&receiptEventId!==null?{receiptState:"pending",
+        receiptIdentity:{event_id:receiptEventId,workspace_id:candidate.workspace_id,
           operation_id:candidate.operation_id}}:{}),
       reason:submitted ? "DOM 已提交（尚不代表 Web GPT 审核完成）" :
       String(result?.reason||"DOM 结果不确定，需人工检查").slice(0,120)};
@@ -596,6 +695,7 @@ chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
     COACH_AUTO_BIND:()=>autoWithBindLock(()=>autoBind(msg.workspaceId)),
     COACH_AUTO_BIND_CANCEL:()=>autoWithBindLock(autoCancelPendingForCurrentTab),
     COACH_AUTO_ONE_CLICK:()=>autoWithBindLock(autoOneClick),
+    COACH_AUTO_DSH_ONE_CLICK:()=>autoWithBindLock(autoDshOneClick),
     COACH_AUTO_BIND_CHECK:()=>autoWithBindLock(autoBindPoll),
     COACH_AUTO_ENABLE:()=>autoToggle(true,msg.workspaceId),
     COACH_AUTO_PAUSE:()=>autoToggle(false,msg.workspaceId),

@@ -13,7 +13,8 @@ function render(value){
     "已连接 · 待处理 "+latest.pending+" 项" :
     (latest.paired ? "已配对但服务不可用" : "尚未配对");
   el("tasks").textContent=latest.events.length ?
-    latest.events.map(e=>"#"+e.event_id+" · "+(e.event_type==="PLAN_CONFLICT"?"计划冲突 · ":"")+e.operation_id).join("\n") : "无待处理事件";
+    latest.events.map(e=>"#"+e.event_id+" · "+(e.event_type==="PLAN_CONFLICT"?"计划冲突 · ":
+      e.event_type==="DSH_MAILBOX_WAKE"?"信箱唤醒 · ":"")+e.operation_id).join("\n") : "无待处理事件";
   el("copy").disabled=!latest.online || !latest.events.length;
 }
 async function reload(){
@@ -42,16 +43,26 @@ el("pair-native").addEventListener("click",async()=>{
   catch{el("feedback").textContent="本机配对主机不可用；可继续手动配对。";}
   await reload();
 });
+el("auto-dsh-one-click").addEventListener("click",async()=>{
+  try{
+    const result=await message({type:"COACH_AUTO_DSH_ONE_CLICK"});
+    el("feedback").textContent=result?.ok ? result.message : ("一键绑定失败："+(result?.error||"未知错误"));
+  }catch{el("feedback").textContent="扩展后台尚未就绪";}
+  await reload();
+});
 el("refresh").addEventListener("click",async()=>{
   try{render(await message({type:"COACH_REFRESH"}));}
   catch{el("feedback").textContent="刷新失败";}
 });
 el("copy").addEventListener("click",async()=>{
-  const reviews=latest.events.filter(e=>e.event_type!=="PLAN_CONFLICT").map(e=>e.operation_id).join(", ");
+  const reviews=latest.events.filter(e=>e.event_type==="READY_FOR_GPT_REVIEW").map(e=>e.operation_id).join(", ");
   const conflicts=latest.events.filter(e=>e.event_type==="PLAN_CONFLICT").map(e=>e.operation_id).join(", ");
+  const wakeIds=latest.events.filter(e=>e.event_type==="DSH_MAILBOX_WAKE").map(e=>e.operation_id);
   const instruction="请先查询 DevSpace MCP coach_realtime_status 并读取对应不可变证据，不要重复运行已完成的 Agent。"+
     (reviews?"独立审核以下任务的真实源码、Git 差异与测试证据并写回有证据的裁决："+reviews+"。":"")+
-    (conflicts?"以下任务报告 PLAN_CONFLICT，请核对反证并明确修订契约，不要提交正式审核裁决或自动继续："+conflicts+"。":"");
+    (conflicts?"以下任务报告 PLAN_CONFLICT，请核对反证并明确修订契约，不要提交正式审核裁决或自动继续："+conflicts+"。":"")+
+    (wakeIds.length?"另请读取共享信箱 MAILBOX.md 中 messageId="+wakeIds.join(" / ")+
+      " 的 DSH wake 块，核对 contentSha256 后按 topic 处理。":"");
   try{await navigator.clipboard.writeText(instruction);el("feedback").textContent="已复制，请自行发送到 ChatGPT。";}
   catch{el("feedback").textContent="复制失败，请手动记录事件 ID。";}
 });
