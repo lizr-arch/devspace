@@ -25,7 +25,8 @@ function autoConnectionUI(state,url) {
   const routes=Array.isArray(state.routes)?state.routes:[];
   const pending=Array.isArray(state.pendingBinding)?state.pendingBinding:[];
   const current=url?routes.find(r=>autoPopupChatUrl(r?.url)===url):null;
-  const waiting=url?pending.some(r=>autoPopupChatUrl(r?.url)===url):false;
+  const waitingFor=url?pending.find(r=>autoPopupChatUrl(r?.url)===url):null;
+  const waiting=!!waitingFor;
   dot.dataset.state="neutral";
   cancel.hidden=!waiting;
   button.dataset.action="connect";
@@ -36,10 +37,14 @@ function autoConnectionUI(state,url) {
     hint.textContent="观察面板只显示任务记录，不负责绑定。";
     button.textContent="连接当前对话";button.disabled=true;
   } else if(waiting) {
-    label.textContent="正在等待 Web GPT 确认";
-    desc.textContent="绑定请求已发送到当前对话；每次连接只提交一次，避免重复消息。";
-    hint.textContent="绑定确认后会自动启用通知，无需再点其他按钮。";
-    button.textContent="等待确认中";button.disabled=true;
+    label.textContent=waitingFor.submitted===true?"正在等待 Web GPT 确认":"绑定消息的发送状态待核实";
+    desc.textContent=waitingFor.submitted===true?
+      "绑定请求已提交到当前对话，正在等待 Web GPT 确认。":
+      "无法确认绑定请求是否已经发送；请先查看目标对话或输入框，防止重复发送。";
+    hint.textContent=waitingFor.submitted===true?
+      "确认后会自动启用通知，无需再点其他按钮。":
+      "如确认既没有消息也没有草稿，可先取消此次待核实请求，再重新连接。";
+    button.textContent=waitingFor.submitted===true?"等待确认中":"发送状态待核实";button.disabled=true;
     dot.dataset.state="pending";
   } else if(current?.enabled && current.grantVerified===true) {
     label.textContent="当前对话已授权";

@@ -266,10 +266,19 @@ async function autoOneClick() {
   autoRouteMutationEpoch++;
   await chrome.storage.local.set({[AUTO_REVOKED]:false});
   await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
+  // Failure to load the binding listener occurs before any chat submission:
+  // it is definitely unsent and can safely be retried after permissions change.
+  try {
+    await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:false},files:["chatgpt-binding.js"]});
+  } catch {
+    delete pendingMap[nonce];
+    await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
+    return {ok:false,code:"BIND_SCRIPT_UNAVAILABLE",safeRetry:true,
+      error:"绑定请求确定未发送：无法加载 ChatGPT 绑定脚本。请检查扩展的 chatgpt.com 网站权限，重新加载扩展后再连接。"};
+  }
   // Fresh isolated-world binding handler. Old audit content scripts cannot
   // answer this protocol. No chat history is inspected.
   try {
-    await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:false},files:["chatgpt-binding.js"]});
     const prompt="DevSpace Coach 一键绑定请求（由当前对话中的用户点击扩展发起）。"+
       "请使用 DevSpaceMac MCP，先确定你正在管理的精确 workspaceId，"+
       "然后调用 coach_webgpt_claim_browser_route 工具：nonce="+nonce+
@@ -279,15 +288,27 @@ async function autoOneClick() {
       type:"COACH_BIND_REQUEST_V1",url,instruction:prompt
     });
     if(delivered?.ok!==true||delivered.submitted!==true) {
+      // Only a positive notSubmitted=true confirms that the content script did
+      // not press Send. Unknown outcomes retain their challenge and must never
+      // automatically retry, because the browser may have sent the message.
+      const reason=typeof delivered?.reason==="string"?
+        delivered.reason.slice(0,180):"浏览器没有返回具体原因";
       if(delivered?.notSubmitted===true){
         delete pendingMap[nonce];
         await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
+        return {ok:false,code:"BIND_NOT_SUBMITTED",safeRetry:true,
+          error:"绑定请求确定未发送："+reason+"。解决后可再次点击连接。"};
       }
-      return {ok:false,error:"绑定请求未确认提交；请先检查目标对话，不会自动重发"};
+      return {ok:false,code:"BIND_SEND_UNCERTAIN",safeRetry:false,
+        error:"绑定消息发送状态不确定："+reason+"。请先检查目标对话及输入框，禁止直接重发。"};
     }
+    // Distinguish a verified DOM send from a challenge that was only created.
+    pendingMap[nonce]={...pendingMap[nonce],submitted:true};
+    await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
     return {ok:true,message:"已向当前对话发送绑定请求，等待 Web GPT 独立确认",pending:true};
   } catch {
-    return {ok:false,error:"绑定消息投递结果不确定；请检查对话，禁止自动重试"};
+    return {ok:false,code:"BIND_SEND_UNCERTAIN",safeRetry:false,
+      error:"绑定消息发送结果未知，可能已经提交。请先检查对话或草稿，禁止直接重发。"};
   }
 }
 async function autoBindPoll() {

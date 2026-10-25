@@ -49,9 +49,13 @@ test("connection shows correct status for unbound, pending, claimed, paused and 
  m.run({routes:[],pendingBinding:[]});
  assert.equal(get("auto-one-click").textContent,"连接当前对话");
  assert.equal(get("auto-one-click").disabled,false);
- m.run({routes:[],pendingBinding:[{url}]});
+ m.run({routes:[],pendingBinding:[{url,submitted:true}]});
  assert.equal(get("auto-one-click").disabled,true);
  assert.equal(get("auto-cancel-pending").hidden,false);
+ assert.match(get("auto-current-chat-note").textContent,/已提交/);
+ m.run({routes:[],pendingBinding:[{url}]});
+ assert.equal(get("auto-one-click").textContent,"发送状态待核实");
+ assert.match(get("auto-current-chat-note").textContent,/无法确认/);
  m.run({routes:[realRoute],pendingBinding:[]});
  assert.equal(get("auto-one-click").disabled,true);
  assert.equal(get("auto-one-click").textContent,"当前对话已连接");
