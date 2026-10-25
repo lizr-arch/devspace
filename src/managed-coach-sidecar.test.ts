@@ -318,7 +318,7 @@ try {
   await readonlyClient.connect(roc);
   try {
     const advertised = (await readonlyClient.listTools()).tools.map((tool) => tool.name);
-    assert.deepEqual(advertised, ["coach_delivery_receipt","coach_sidecar_status"]);
+    assert.deepEqual(advertised, ["coach_delivery_receipt","coach_route_state","coach_sidecar_status"]);
   } finally {
     await readonlyClient.close();
     await readonlyServer.close();

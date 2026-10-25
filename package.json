@@ -53,6 +53,7 @@
     ,"test:mcp-diagnostics": "tsx src/mcp-diagnostics.test.ts"
     ,"test:codex-worker": "node --import tsx src/codex-worker-lifecycle.test.ts && node --import tsx src/agent-observer.test.ts && node --import tsx src/coach-agent-os-migration.test.ts"
     ,"test:doctor-diagnostics": "node --import tsx src/doctor-http-diagnostics.test.ts"
+    ,"test:coach:multiroute": "tsx src/coach-multiroute.test.ts && tsx src/coach-multiroute.integration.test.ts && node --test src/coach-multiroute-extension.test.cjs"
   },
   "keywords": [],
   "author": "",

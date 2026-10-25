@@ -13,6 +13,13 @@ const AUTO_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 let autoBusy = false;
 const AUTO_LAST_CHECK = "coachAutoLastCheck";
 const AUTO_BIND_PENDING = "coachAutoPendingBinds";
+// Exact multi-route compatibility layer (TR-DSH-MULTIROUTE-AND-NAVAL-001, I1).
+// Additive only: records live under a NEW key so every legacy workspace-only
+// record keeps its old semantics until an explicit migration. Absent gate
+// (old harnesses) => this whole layer is inert and the legacy flow is intact.
+const AUTO_MULTI = "coachMultiRoutes";
+const AUTO_MULTI_PENDING = "coachMultiPendingBinds";
+const ROUTE_GATE = (typeof DevSpaceRouteGate === "object" && DevSpaceRouteGate) ? DevSpaceRouteGate : null;
 const autoVersion = () => chrome.runtime.getManifest?.()?.version || "unknown";
 async function autoRecordCheck(code,message) {
   await chrome.storage.session.set({[AUTO_LAST_CHECK]:{
@@ -40,6 +47,142 @@ async function autoLedger() {
 }
 async function autoSaveLedger(ledger) {
   await chrome.storage.local.set({[AUTO_LEDGER]: ledger});
+}
+async function autoMultiRoutes() {
+  const value = (await chrome.storage.local.get(AUTO_MULTI))[AUTO_MULTI];
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+async function autoSaveMultiRoutes(routes) {
+  await chrome.storage.local.set({[AUTO_MULTI]: routes});
+}
+async function autoMultiPending() {
+  const value = (await chrome.storage.session.get(AUTO_MULTI_PENDING))[AUTO_MULTI_PENDING];
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+async function autoSaveMultiPending(pending) {
+  await chrome.storage.session.set({[AUTO_MULTI_PENDING]: pending});
+}
+function autoMultiCheck(record) {
+  if (!ROUTE_GATE) return {ok: false};
+  const check = ROUTE_GATE.validateRoute(record);
+  return check.ok ? check : {ok: false};
+}
+function autoMultiLedgerKey(routeId, messageId) {return "route:" + routeId + ":" + messageId;}
+async function autoMultiRevoke(routeId) {
+  const pair = (await chrome.storage.session.get("coachPairing")).coachPairing;
+  const routes = await autoMultiRoutes();
+  const route = routes[routeId];
+  if (!pair || !AUTO_TOKEN.test(pair.token)) return;
+  const consentRevision = Number.isSafeInteger(route?.consentRevision) ? route.consentRevision : undefined;
+  try {
+    await fetch("http://127.0.0.1:" + pair.port + "/routes/" + routeId + "/revoke", {
+      method: "POST", cache: "no-store",
+      headers: {Authorization: "Bearer " + pair.token, "Content-Type": "application/json"},
+      body: JSON.stringify({...(consentRevision !== undefined ? {expectedConsentRevision: consentRevision} : {}), reason: "user unbind"}),
+    });
+  } catch { /* Local storage revoke below is authoritative even if Sidecar is offline. */ }
+}
+async function autoMultiAck(pair, routeId, message, outcome, reason) {
+  const allowed = ["dom_submitted", "manual_sent", "acked", "not_submitted", "uncertain", "timeout", "existing_draft", "page_busy", "navigation_mismatch"];
+  if (!allowed.includes(outcome)) outcome = "uncertain";
+  try {
+    await fetch("http://127.0.0.1:" + pair.port + "/routes/" + routeId + "/ack", {
+      method: "POST", cache: "no-store",
+      headers: {Authorization: "Bearer " + pair.token, "Content-Type": "application/json"},
+      body: JSON.stringify({messageId: message.messageId, seq: message.seq,
+        contentSha256: message.contentSha256, outcome,
+        ...(reason ? {reason: String(reason).slice(0, 160)} : {})}),
+    });
+  } catch { /* ACK retry is safe: the same identity is idempotent server-side. */ }
+}
+// One fixed review wake at a time, route-scoped. Never a second chat send for a
+// messageId already settled; dom_submitted remains "unverified" by contract.
+async function autoMultiPump(pair) {
+  const routes = await autoMultiRoutes();
+  for (const [routeId, record] of Object.entries(routes)) {
+    const check = autoMultiCheck(record);
+    if (!check.ok || !check.route.enabled) continue;
+    const tab = await chrome.tabs.get(check.route.tabId).catch(() => null);
+    let response = null;
+    try {
+      response = await fetch("http://127.0.0.1:" + pair.port + "/routes/" + routeId + "/next?origination=dsh&limit=1", {
+        method: "GET", cache: "no-store", headers: {Authorization: "Bearer " + pair.token},
+      });
+    } catch { return {ok: false, code: "sidecar_unreachable"}; }
+    if (!response?.ok) return {ok: false, code: "sidecar_http_" + response?.status};
+    const body = await response.json().catch(() => null);
+    const message = Array.isArray(body?.messages) ? body.messages[0] : null;
+    if (!message) continue;
+    const ledger = await autoLedger();
+    const key = autoMultiLedgerKey(routeId, message.messageId);
+    const decision = ROUTE_GATE.decideDelivery({
+      route: check.route, wake: message, tab: {id: tab?.id, url: tab?.url},
+      editor: {present: true, draft: false}, busy: false,
+      lastState: ledger[key]?.state || "queued",
+    });
+    if (decision.action !== "submit") {
+      ledger[key] = {state: "needs_attention", code: decision.code, at: new Date().toISOString()};
+      await autoSaveLedger(ledger);
+      await autoMultiAck(pair, routeId, message, "uncertain", decision.code);
+      return {ok: true, code: decision.code};
+    }
+    // Readiness/injection is repeatable and never edits a message by itself.
+    const prepared = await autoReady(check.route.tabId, check.route.url);
+    if (!prepared.ok) {
+      await autoMultiAck(pair, routeId, message, "not_submitted", prepared.reason);
+      return {ok: true, code: "content_unreachable", message: prepared.reason};
+    }
+    ledger[key] = {state: "in_flight", at: new Date().toISOString()};
+    await autoSaveLedger(ledger); // durable before any DOM action
+    let result = null;
+    try { result = await chrome.tabs.sendMessage(check.route.tabId, decision.command); }
+    catch { result = {ok: false, uncertain: true, reason: "内容脚本不可达"}; }
+    const outcome = ROUTE_GATE.classifyOutcome(result);
+    ledger[key] = {state: outcome.state, code: outcome.code, reason: outcome.reason || "",
+      at: new Date().toISOString()};
+    await autoSaveLedger(ledger);
+    await autoMultiAck(pair, routeId, message,
+      outcome.state === "dom_submitted_unverified" ? "dom_submitted" : "uncertain", outcome.reason);
+    return {ok: true, code: outcome.code};
+  }
+  return {ok: true, code: "no_candidate"};
+}
+// Bind one exact route only after its Sidecar pending challenge is active AND
+// the browser's pinned tab still shows the same canonical conversation.
+async function autoMultiBindPoll(pair, epoch) {
+  const pending = await autoMultiPending();
+  const entries = Object.entries(pending);
+  if (!entries.length) return {changed: false, claimed: 0};
+  const routes = await autoMultiRoutes();
+  let changed = false, claimed = 0;
+  for (const [routeId, request] of entries) {
+    if (Date.now() - request.createdAt > 600_000) { delete pending[routeId]; changed = true; continue; }
+    if (pair.port !== request.port) continue;
+    const response = await fetch("http://127.0.0.1:" + pair.port + "/route/status?routeId=" + routeId, {
+      method: "GET", cache: "no-store", headers: {Authorization: "Bearer " + pair.token},
+    }).catch(() => null);
+    if (!response?.ok) continue;
+    const data = await response.json().catch(() => null);
+    if (data?.state !== "active" || !data.route) continue;
+    const check = ROUTE_GATE.validateRoute({...data.route, url: data.route.canonicalChatUrl,
+      tabId: data.route.exactTabId});
+    if (!check.ok || check.route.routeId !== routeId || check.route.url !== request.url) continue;
+    const tab = await chrome.tabs.get(request.tabId).catch(() => null);
+    if (ROUTE_GATE.canonicalChatUrl(tab?.url) !== request.url) continue;
+    routes[routeId] = {
+      routeId, workspaceId: check.route.workspaceId, dshSessionId: check.route.dshSessionId,
+      url: request.url, tabId: request.tabId, enabled: true,
+      consentRevision: check.route.consentRevision,
+    };
+    delete pending[routeId];
+    changed = true; claimed++;
+  }
+  if (epoch !== autoRouteMutationEpoch) return {changed: false, claimed: 0};
+  if (changed) {
+    await autoSaveMultiRoutes(routes);
+    await autoSaveMultiPending(pending);
+  }
+  return {changed, claimed};
 }
 function autoKey(e) {return (e.workspace_id||"unknown") + ":" + e.operation_id + ":" + e.event_id;}
 // The legacy Sidecar omitted workspace_id. Reconcile identities only after a
@@ -115,6 +258,11 @@ function autoInstruction(e) {
 }
 async function autoState() {
   const routes=await autoTarget(), entries=Object.entries(routes), ledger=await autoLedger();
+  const multiRaw=ROUTE_GATE?await autoMultiRoutes():{};
+  const multi=Object.entries(multiRaw).filter(([,record])=>autoMultiCheck(record).ok)
+    .map(([routeId,record])=>({routeId,workspaceId:record.workspaceId,dshSessionId:record.dshSessionId,
+      url:record.url,tabId:record.tabId,enabled:!!record.enabled,consentRevision:record.consentRevision}));
+  const multiEnabled=multi.some(route=>route.enabled);
   if(autoReconcileStored(ledger))await autoSaveLedger(ledger);
   const lastCheck=(await chrome.storage.session.get(AUTO_LAST_CHECK))[AUTO_LAST_CHECK]||null;
   const summary={pending:0,sent:0,needs_attention:0,in_flight:0,receipt_pending:0};
@@ -125,7 +273,10 @@ async function autoState() {
   const recent=Object.entries(ledger).filter(([,x])=>x?.state!=="merged")
     .slice(-10).reverse()
     .map(([key,x])=>({key,state:x.state,at:x.at||"",reason:x.reason||""}));
-  return {enabled:entries.some(([,route])=>!!route?.enabled), bound:entries.length>0,
+  return {enabled:entries.some(([,route])=>!!route?.enabled)||multiEnabled,
+    bound:entries.length>0||multi.length>0,
+    multiRoutes:multi, multiEnabled,
+    pendingRouteBinding:ROUTE_GATE?Object.values(await autoMultiPending()):[],
     url:entries.length===1?entries[0][1]?.url||"":entries.length?entries.length+" 个工作区对话已绑定":"",
     routes:entries.map(([workspaceId,route])=>({workspaceId,url:route?.url||"",enabled:!!route?.enabled,tabReady:Number.isSafeInteger(route?.tabId)})),
     version:autoVersion(),lastCheck,
@@ -164,6 +315,54 @@ async function autoToggle(enabled,requestedWorkspaceId) {
   if(enabled) void autoPump();
   return {ok:true,state:await autoState()};
 }
+// Exact multi-route one-click: the Sidecar mints an unguessable routeId and
+// the Web GPT conversation must claim it over MCP with its exact DSH session.
+async function autoOneClickExact(tab,pair) {
+  if(!ROUTE_GATE)return null;
+  const routes=await autoMultiRoutes();
+  if(Object.values(routes).some(route=>route?.url===url))return {ok:false,error:"此对话已绑定精确路由，请查看现有状态"};
+  const pending=await autoMultiPending();
+  if(Object.keys(pending).length>=8)return {ok:false,error:"已有八条精确绑定请求在等待确认，请稍后再试"};
+  const bytes=crypto.getRandomValues(new Uint8Array(16));
+  const nonce=[...bytes].map(n=>n.toString(16).padStart(2,"0")).join("");
+  let response=null;
+  try{
+    response=await fetch("http://127.0.0.1:"+pair.port+"/route/propose",{
+      method:"POST",cache:"no-store",
+      headers:{Authorization:"Bearer "+pair.token,"Content-Type":"application/json"},
+      body:JSON.stringify({nonce,url,tabId:tab.id})
+    });
+  }catch{return null;}
+  if(!response?.ok)return null; // Sidecar without multi-route support: legacy flow.
+  const data=await response.json().catch(()=>null);
+  if(typeof data?.routeId!=="string"||!ROUTE_GATE.ROUTE_ID.test(data.routeId))
+    return {ok:false,error:"Sidecar 返回了无效的精确路由标识"};
+  pending[data.routeId]={routeId:data.routeId,nonce,url,tabId:tab.id,createdAt:Date.now(),port:pair.port};
+  autoRouteMutationEpoch++;
+  await chrome.storage.local.set({[AUTO_REVOKED]:false});
+  await autoSaveMultiPending(pending);
+  try{
+    await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:false},files:["chatgpt-binding.js"]});
+    const prompt="DevSpace Coach 精确多会话绑定请求（由当前对话中的用户点击扩展发起）。"+
+      "请使用 DevSpace MCP 调用 coach_webgpt_claim_browser_route_exact 工具：routeId="+data.routeId+
+      "；dshSessionId=你当前真实的 DSH sessionId；nonce="+nonce+"；url="+url+
+      "；workspaceId=你正在管理的精确工作区。仅当本对话确实授权该工作区与该 DSH 会话时才执行，"+
+      "不要猜测、不要使用其他对话的工作区或会话。工具返回 claimed=true 后告知用户绑定确认。";
+    const delivered=await chrome.tabs.sendMessage(tab.id,{
+      type:"COACH_BIND_REQUEST_V1",url,instruction:prompt
+    });
+    if(delivered?.ok!==true||delivered?.submitted!==true){
+      if(delivered?.notSubmitted===true){
+        delete pending[data.routeId];
+        await autoSaveMultiPending(pending);
+      }
+      return {ok:false,error:"精确绑定请求未确认提交；请先检查目标对话，不会自动重发"};
+    }
+    return {ok:true,message:"已发送精确多会话绑定请求，等待 Web GPT 独立确认",pending:true,routeId:data.routeId};
+  }catch{
+    return {ok:false,error:"精确绑定消息投递结果不确定；请检查对话，禁止自动重试"};
+  }
+}
 // Exactly one user click starts a challenge; the extension cannot infer a
 // DevSpace workspace from the ChatGPT tab. Web GPT must claim it over MCP.
 async function autoOneClick() {
@@ -185,6 +384,10 @@ async function autoOneClick() {
     pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
   }
   if(!pair||!AUTO_TOKEN.test(pair.token))return {ok:false,error:"没有有效的 Sidecar 配对"};
+  // Exact multi-route path when the running Sidecar advertises it. Any
+  // failure (old Sidecar / older harness) falls through to the legacy flow.
+  const exact=await autoOneClickExact(tab,pair);
+  if(exact)return exact;
   const bytes=crypto.getRandomValues(new Uint8Array(16));
   const nonce=[...bytes].map(n=>n.toString(16).padStart(2,"0")).join("");
   const response=await fetch("http://127.0.0.1:"+pair.port+"/bind/start",{
@@ -261,7 +464,15 @@ async function autoBindPoll() {
     await chrome.storage.local.set({[AUTO_SESSION]:routes,[AUTO_REVOKED]:false});
   }
   if(changedPending)await chrome.storage.session.set({[AUTO_BIND_PENDING]:pendingMap});
-  return {ok:true,state:claimedCount?"bound":"pending",claimedCount};
+  // Exact multi-route challenges independently confirm through /route/status.
+  let exactClaimed=0;
+  if(ROUTE_GATE){
+    const multi=await autoMultiBindPoll(pair,epoch);
+    exactClaimed=multi.claimed;
+    if(multi.changed)autoRouteMutationEpoch++;
+  }
+  const total=claimedCount+exactClaimed;
+  return {ok:true,state:total?"bound":"pending",claimedCount:total};
 }
 async function autoCancelPendingByUrl(url) {
   const requests=(await chrome.storage.session.get(AUTO_BIND_PENDING))[AUTO_BIND_PENDING]||{};
@@ -288,7 +499,18 @@ function autoWithBindLock(fn){
   autoBindingQueue=turn.catch(()=>{});
   return turn;
 }
-async function autoUnbind(requestedWorkspaceId) {
+async function autoUnbind(requestedWorkspaceId,requestedRouteId) {
+  if(requestedRouteId&&ROUTE_GATE){
+    if(!ROUTE_GATE.ROUTE_ID.test(requestedRouteId))return {ok:false,error:"routeId 无效"};
+    const multi=await autoMultiRoutes();
+    if(!multi[requestedRouteId])return {ok:false,error:"未找到该精确路由"};
+    autoRouteMutationEpoch++;
+    await autoMultiRevoke(requestedRouteId);
+    delete multi[requestedRouteId];
+    await autoSaveMultiRoutes(multi);
+    if(!Object.keys(multi).length)await chrome.storage.local.set({[AUTO_REVOKED]:true});
+    return {ok:true,state:await autoState()};
+  }
   const routes=await autoTarget();
   const workspaceId=requestedWorkspaceId||
     (Object.keys(routes).length===1?Object.keys(routes)[0]:null);
@@ -306,6 +528,16 @@ async function autoUnbind(requestedWorkspaceId) {
 }
 async function autoResolveRoutes(){
   const epoch=autoRouteMutationEpoch;
+  if(ROUTE_GATE){
+    const multi=await autoMultiRoutes();let multiChanged=false;
+    for(const [routeId,record] of Object.entries(multi)){
+      const tab=await chrome.tabs.get(record.tabId).catch(()=>null);
+      if(ROUTE_GATE.canonicalChatUrl(tab?.url)!==record.url){
+        multi[routeId]={...record,tabId:null,enabled:false};multiChanged=true;
+      }
+    }
+    if(multiChanged&&epoch===autoRouteMutationEpoch)await autoSaveMultiRoutes(multi);
+  }
   const routes=await autoTarget();let changed=false;
   for(const [workspaceId,target] of Object.entries(routes)){
     if(!target?.url||!autoCanonical(target.url))continue;
@@ -401,13 +633,24 @@ async function autoPump() {
     await autoResolveRoutes();
     await autoWithBindLock(autoBindPoll);
     const routes=await autoTarget();
-    if(!Object.values(routes).some(t=>t?.enabled)) {
+    const multi=ROUTE_GATE?await autoMultiRoutes():{};
+    const multiEnabled=Object.entries(multi).some(([,record])=>autoMultiCheck(record).ok&&record.enabled);
+    if(!Object.values(routes).some(t=>t?.enabled)&&!multiEnabled) {
       code="not_enabled";message="未绑定或自动发送已暂停";return;
     }
     const pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
     if(!pair || !Number.isInteger(pair.port) || pair.port<1 || pair.port>65535 ||
        !AUTO_TOKEN.test(pair.token)) {
       code="not_paired";message="未配对有效的 Sidecar 会话";return;
+    }
+    if(multiEnabled){
+      const exact=await autoMultiPump(pair);
+      if(exact.code!=="no_candidate"){
+        code=exact.code;message=exact.message||("精确路由投递："+exact.code);return;
+      }
+    }
+    if(!Object.values(routes).some(t=>t?.enabled)) {
+      code="no_candidate";message="已同步精确路由，没有新的待投递事件";return;
     }
     const response=await fetch("http://127.0.0.1:"+pair.port+"/events",{
       method:"GET",cache:"no-store",headers:{Authorization:"Bearer "+pair.token}
@@ -523,6 +766,24 @@ async function autoPump() {
     autoBusy=false;
   }
 }
+// Exact route enable/pause: never moves tabs and never rebinds implicitly.
+async function autoToggleMulti(enabled,routeId) {
+  if(!ROUTE_GATE||!ROUTE_GATE.ROUTE_ID.test(String(routeId)))
+    return {ok:false,error:"routeId 无效"};
+  const multi=await autoMultiRoutes();
+  const record=multi[routeId];
+  if(!record)return {ok:false,error:"未找到该精确路由"};
+  if(enabled){
+    const tab=await chrome.tabs.get(record.tabId).catch(()=>null);
+    if(ROUTE_GATE.canonicalChatUrl(tab?.url)!==record.url)
+      return {ok:false,error:"原对话标签页已关闭或导航，请重新显式绑定"};
+  }
+  autoRouteMutationEpoch++;
+  multi[routeId]={...record,enabled:!!enabled};
+  await autoSaveMultiRoutes(multi);
+  if(enabled)void autoPump();
+  return {ok:true,state:await autoState()};
+}
 chrome.runtime.onInstalled.addListener(()=>{chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5});void autoResolveRoutes();});
 chrome.runtime.onStartup.addListener(()=>{chrome.alarms.create(AUTO_ALARM,{periodInMinutes:0.5});void autoResolveRoutes();});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name===AUTO_ALARM)void autoPump();});
@@ -530,6 +791,14 @@ chrome.alarms.onAlarm.addListener(a=>{if(a.name===AUTO_ALARM)void autoPump();});
 chrome.tabs.onUpdated.addListener((tabId,change)=>{
   if(!change.url)return;
   const epoch=autoRouteMutationEpoch;
+  if(ROUTE_GATE)void autoMultiRoutes().then(multi=>{
+    let changed=false;
+    for(const [routeId,record] of Object.entries(multi))
+      if(record?.tabId===tabId&&ROUTE_GATE.canonicalChatUrl(change.url)!==record.url){
+        multi[routeId]={...record,tabId:null,enabled:false};changed=true;
+      }
+    if(changed&&epoch===autoRouteMutationEpoch)return autoSaveMultiRoutes(multi);
+  });
   void autoTarget().then(routes=>{
     let changed=false;for(const [id,t] of Object.entries(routes))if(t?.tabId===tabId&&autoCanonical(change.url)!==t.url){routes[id]={...t,tabId:null,enabled:false};changed=true;}
     if(changed && epoch===autoRouteMutationEpoch)
@@ -538,6 +807,12 @@ chrome.tabs.onUpdated.addListener((tabId,change)=>{
 });
 chrome.tabs.onRemoved.addListener(tabId=>{
   const epoch=autoRouteMutationEpoch;
+  if(ROUTE_GATE)void autoMultiRoutes().then(multi=>{
+    let changed=false;
+    for(const [routeId,record] of Object.entries(multi))
+      if(record?.tabId===tabId){multi[routeId]={...record,tabId:null,enabled:false};changed=true;}
+    if(changed&&epoch===autoRouteMutationEpoch)return autoSaveMultiRoutes(multi);
+  });
   void autoTarget().then(routes=>{
     let changed=false;for(const [id,t] of Object.entries(routes))if(t?.tabId===tabId){routes[id]={...t,tabId:null};changed=true;}
     if(changed && epoch===autoRouteMutationEpoch)
@@ -551,9 +826,10 @@ chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
     COACH_AUTO_BIND_CANCEL:()=>autoWithBindLock(autoCancelPendingForCurrentTab),
     COACH_AUTO_ONE_CLICK:()=>autoWithBindLock(autoOneClick),
     COACH_AUTO_BIND_CHECK:()=>autoWithBindLock(autoBindPoll),
-    COACH_AUTO_ENABLE:()=>autoToggle(true,msg.workspaceId),
-    COACH_AUTO_PAUSE:()=>autoToggle(false,msg.workspaceId),
-    COACH_AUTO_UNBIND:()=>autoUnbind(msg.workspaceId),
+    COACH_AUTO_ENABLE:()=>msg.routeId?autoToggleMulti(true,msg.routeId):autoToggle(true,msg.workspaceId),
+    COACH_AUTO_PAUSE:()=>msg.routeId?autoToggleMulti(false,msg.routeId):autoToggle(false,msg.workspaceId),
+    COACH_AUTO_UNBIND:()=>autoUnbind(msg.workspaceId,msg.routeId),
+    COACH_AUTO_MULTI_STATUS:()=>autoState().then(state=>({ok:true,state})),
     COACH_AUTO_PUMP:async()=>{await autoPump();return {ok:true,state:await autoState()};},
     COACH_AUTO_RESOLVE:()=>autoResolve(msg.key,msg.action)
   };

@@ -6,6 +6,18 @@ import { registerAppTool, textBlock } from "./server-helpers.js";
 const workspaceIdSchema = z.string().min(1);
 const portSchema = z.number().int().min(1).max(65535);
 const extensionIdSchema = z.string().regex(/^[a-p]{32}$/).optional();
+/** Unguessable exact route identity: never derivable from workspace/tab/session. */
+const routeIdSchema = z.string().regex(/^rt_[A-Za-z0-9_-]{43}$/);
+const dshSessionIdSchema = z.string().regex(/^session-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+const routeNonceSchema = z.string().regex(/^[a-f0-9]{32}$/);
+const routeMessageIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
+const routeSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+const legacyRouteIdSchema = z.string().regex(/^legacy-[a-f0-9]{24}$/);
+const routeOriginationSchema = z.enum(["dsh", "webgpt"]);
+const routeOutcomeSchema = z.enum([
+  "dom_submitted", "manual_sent", "acked", "not_submitted", "uncertain", "timeout",
+  "existing_draft", "page_busy", "navigation_mismatch",
+]);
 
 // The shared tool wrapper returns {result,error} on rejection. Every output
 // schema must accept that envelope so a denied request remains a readable MCP
@@ -35,6 +47,10 @@ export function registerSidecarTools(
           // Explicit, bounded event scope. Never discover or authorize all
           // registered worktrees automatically.
           authorizedWorkspaceIds: z.array(workspaceIdSchema).min(1).max(8).optional(),
+          // Explicit per-start consent for exact multi-route DSH sessions.
+          // Never persisted implicitly; a Sidecar restart without it fails exact
+          // claims closed while already-bound routes keep their durable queues.
+          authorizedDshSessionIds: z.array(dshSessionIdSchema).min(1).max(8).optional(),
         },
         outputSchema: resultOutputSchema({
           sidecar: z.unknown().optional(),
@@ -49,7 +65,7 @@ export function registerSidecarTools(
           openWorldHint: false,
         },
       },
-      async ({ workspaceId, port, pairedExtensionId, adminObserverScope,authorizedWorkspaceIds }) => {
+      async ({ workspaceId, port, pairedExtensionId, adminObserverScope,authorizedWorkspaceIds,authorizedDshSessionIds }) => {
         const workspace = workspaces.getWorkspace(workspaceId);
         const ids=authorizedWorkspaceIds??[workspaceId];
         if(!ids.includes(workspaceId)||new Set(ids).size!==ids.length)
@@ -59,7 +75,8 @@ export function registerSidecarTools(
         for(const id of ids)workspaces.getWorkspace(id);
         const consent={workspaceId,workspaceRoot:workspace.root,port,pairedExtensionId,
           observeAllNativeAgents:adminObserverScope==="all_native_worktrees",
-          authorizedWorkspaceIds:ids};
+          authorizedWorkspaceIds:ids,
+          ...(authorizedDshSessionIds?{authorizedDshSessionIds}:{})};
         const started = await managedCoachSidecar.start(consent);
         try{ctx.coachReviewEvents.saveCoachFeedConfig(consent);}
         catch(error){await managedCoachSidecar.stop(workspaceId);throw error;}
@@ -126,6 +143,68 @@ export function registerSidecarTools(
     }
   );
 
+  // Read-only exact-route state. Legacy workspace-only routes are reported as
+  // UNROUTABLE with an explicit migration hint; this tool never mutates routing.
+  registerAppTool(
+    server,
+    "coach_route_state",
+    {
+      title: "Inspect exact Coach multi-route state",
+      description:
+        "Read exact per-route queue/cursor/ACK state. action=snapshot lists exact routes, legacy UNROUTABLE routes and pending review wakes (a DOM submission is NOT a completed GPT review); action=inbox lists route messages for one exact route; action=classify_legacy marks an old workspace-only record UNROUTABLE and never guesses a target.",
+      inputSchema: {
+        action: z.enum(["snapshot", "inbox", "classify_legacy"]),
+        workspaceId: workspaceIdSchema.optional(),
+        routeId: routeIdSchema.optional(),
+        origination: routeOriginationSchema.optional(),
+        afterSeq: z.number().int().min(0).optional(),
+        limit: z.number().int().min(1).max(50).optional(),
+        legacyId: legacyRouteIdSchema.optional(),
+        messageId: routeMessageIdSchema.optional(),
+      },
+      outputSchema: resultOutputSchema({ snapshot: z.unknown().optional(), messages: z.unknown().optional(), classification: z.unknown().optional(), pendingReviews: z.unknown().optional(), error: optionalError }),
+      _meta: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ action, workspaceId, routeId, origination, afterSeq, limit, legacyId, messageId }) => {
+      if (!managedCoachSidecar.routeSnapshot) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+      const snapshot = managedCoachSidecar.routeSnapshot();
+      const requireRoute = () => {
+        if (!routeId) throw new Error("ROUTE_INVALID_INPUT: routeId is required");
+        const route = snapshot.routes.find((item) => item.routeId === routeId);
+        if (!route) throw new Error("ROUTE_NOT_FOUND");
+        if (workspaceId && route.workspaceId !== workspaceId) throw new Error("ROUTE_WORKSPACE_MISMATCH");
+        return route;
+      };
+      if (action === "snapshot") {
+        const routes = workspaceId ? snapshot.routes.filter((route) => route.workspaceId === workspaceId) : snapshot.routes;
+        const pendingReviews = (managedCoachSidecar.pendingReviewWakes?.() ?? []).filter((wake) => !workspaceId || wake.workspaceId === workspaceId);
+        const result = "Exact routes=" + routes.length + " legacy=" + snapshot.legacy.length + " pendingReviews=" + pendingReviews.length + ".";
+        return { content: [textBlock(result)], structuredContent: { result, snapshot: { ...snapshot, routes }, pendingReviews } };
+      }
+      if (action === "inbox") {
+        const route = requireRoute();
+        if (!managedCoachSidecar.listRouteMessages) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+        const messages = managedCoachSidecar.listRouteMessages({
+          routeId: route.routeId,
+          ...(origination ? { origination } : {}),
+          ...(afterSeq !== undefined ? { afterSeq } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        });
+        const result = "Route inbox messages=" + messages.length + ".";
+        return { content: [textBlock(result)], structuredContent: { result, messages } };
+      }
+      if (!managedCoachSidecar.classifyLegacyMessage) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+      const classification = managedCoachSidecar.classifyLegacyMessage({
+        ...(legacyId ? { legacyId } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(messageId ? { messageId } : {}),
+      });
+      const result = "Legacy message classification=" + classification.state + " (" + classification.reason + ").";
+      return { content: [textBlock(result)], structuredContent: { result, classification } };
+    },
+  );
+
   if (!config.readOnly) {
   // The browser challenge is created only by a user clicking the extension in
   // one concrete ChatGPT tab. This MCP action proves which DevSpace workspace
@@ -153,6 +232,174 @@ export function registerSidecarTools(
       });
       const result=claimed?"Exact browser route claimed; browser may finish the one-click authorization.":"Binding request expired, mismatched, duplicated, or unauthorized.";
       return {content:[textBlock(result)],structuredContent:{result,claimed}};
+    },
+  );
+
+  }
+
+  if (!config.readOnly) {
+  // Precise multi-route binding: the legacy workspace-only tool above keeps its
+  // exact old semantics; this tool additionally proves the exact unguessable
+  // routeId, DSH session id, one-time browser nonce and canonical chat URL.
+  registerAppTool(
+    server,
+    "coach_webgpt_claim_browser_route_exact",
+    {
+      title: "Claim an exact Coach multi-route binding",
+      description:
+        "Use only after the Paired Chrome extension sends a binding request in THIS ChatGPT conversation. Read its exact routeId, nonce and canonical chat URL, and supply the exact DSH session id that is explicitly authorized on this machine. One chat keeps exactly one DSH route; switching requires replaceRouteId + expectedConsentRevision after an explicit revoke/rebind. Never guess a routeId, session id or workspace.",
+      inputSchema: {
+        workspaceId: workspaceIdSchema,
+        routeId: routeIdSchema,
+        dshSessionId: dshSessionIdSchema,
+        nonce: routeNonceSchema,
+        url: z.string().url().max(2048),
+        replaceRouteId: routeIdSchema.optional(),
+        expectedConsentRevision: z.number().int().min(1).optional(),
+      },
+      outputSchema: resultOutputSchema({ claimed: z.boolean().optional(), route: z.unknown().optional(), code: z.string().optional(), error: optionalError }),
+      _meta: {},
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspaceId, routeId, dshSessionId, nonce, url, replaceRouteId, expectedConsentRevision }) => {
+      workspaces.getWorkspace(workspaceId);
+      if (!managedCoachSidecar.claimExactBrowserRoute) throw new Error("COACH_EXACT_ROUTE_BIND_NOT_SUPPORTED");
+      const claimed = managedCoachSidecar.claimExactBrowserRoute({
+        workspaceId, routeId, dshSessionId, nonce, url,
+        ...(replaceRouteId ? { replaceRouteId } : {}),
+        ...(expectedConsentRevision !== undefined ? { expectedConsentRevision } : {}),
+        persistScope: (nextScope) => {
+          const saved = ctx.coachReviewEvents.coachFeedConfig();
+          if (!saved || !nextScope.includes(saved.workspaceId) || nextScope.length > 8 ||
+              new Set(nextScope).size !== nextScope.length)
+            throw new Error("COACH_ROUTE_SCOPE_PERSISTENCE_DENIED");
+          ctx.coachReviewEvents.saveCoachFeedConfig({ ...saved, authorizedWorkspaceIds: nextScope });
+        },
+      });
+      const result = claimed.claimed
+        ? "Exact route claimed: chat now owns exactly one DSH route."
+        : "Exact route claim rejected (" + (claimed.code || "unknown") + "); no authority was granted.";
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result, claimed: claimed.claimed,
+          ...(claimed.route ? { route: claimed.route } : {}),
+          ...(claimed.code ? { code: claimed.code } : {}),
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "coach_route_admin",
+    {
+      title: "Durable exact-route queue operations",
+      description:
+        "Write side of the exact multi-route contract. revoke requires an explicit routeId (and optional expectedConsentRevision) and never auto-rebinds. enqueue_wake stores a fixed review wake generated from routeId/messageId/event identity; reply stores a WebGPT reply as message data only. claim_delivery/reply ack/resolve operate on exact (messageId,seq,contentSha256); timeout/draft/busy/navigation outcomes become needs_attention and are never retried blindly. A DOM submission is never a completed review.",
+      inputSchema: {
+        action: z.enum(["revoke", "enqueue_wake", "reply", "claim_delivery", "ack", "resolve", "migrate_legacy"]),
+        workspaceId: workspaceIdSchema.optional(),
+        routeId: routeIdSchema.optional(),
+        legacyId: legacyRouteIdSchema.optional(),
+        targetRouteId: routeIdSchema.optional(),
+        expectedConsentRevision: z.number().int().min(1).optional(),
+        messageId: routeMessageIdSchema.optional(),
+        inReplyTo: routeMessageIdSchema.optional(),
+        content: z.string().min(1).max(48 * 1024).optional(),
+        eventId: z.number().int().positive().optional(),
+        operationId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/).optional(),
+        origination: routeOriginationSchema.optional(),
+        limit: z.number().int().min(1).max(8).optional(),
+        seq: z.number().int().min(1).optional(),
+        contentSha256: routeSha256Schema.optional(),
+        outcome: routeOutcomeSchema.optional(),
+        resolveAction: z.enum(["retry", "mark_sent"]).optional(),
+        reason: z.string().max(160).optional(),
+      },
+      outputSchema: resultOutputSchema({ route: z.unknown().optional(), message: z.unknown().optional(), messages: z.unknown().optional(), legacy: z.unknown().optional(), code: z.string().optional(), error: optionalError }),
+      _meta: {},
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      const { action, routeId, workspaceId, reason } = args;
+      if (!managedCoachSidecar.routeSnapshot) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+      const requireRoute = () => {
+        if (!routeId) throw new Error("ROUTE_INVALID_INPUT: routeId is required");
+        const route = managedCoachSidecar.routeSnapshot!().routes.find((item) => item.routeId === routeId);
+        if (!route) throw new Error("ROUTE_NOT_FOUND");
+        if (workspaceId && route.workspaceId !== workspaceId) throw new Error("ROUTE_WORKSPACE_MISMATCH");
+        return route;
+      };
+      if (action === "revoke") {
+        if (!managedCoachSidecar.revokeBrowserRoute) throw new Error("COACH_ROUTE_REVOKE_NOT_SUPPORTED");
+        const revoked = managedCoachSidecar.revokeBrowserRoute({
+          routeId: routeId!, ...(args.expectedConsentRevision !== undefined ? { expectedConsentRevision: args.expectedConsentRevision } : {}),
+          ...(reason ? { reason } : {}),
+        });
+        const result = revoked.claimed ? "Exact route revoked; it never auto-rebinds." : "Route revoke rejected (" + (revoked.code || "unknown") + ").";
+        return { content: [textBlock(result)], structuredContent: { result, ...(revoked.route ? { route: revoked.route } : {}), ...(revoked.code ? { code: revoked.code } : {}) } };
+      }
+      if (action === "migrate_legacy") {
+        if (!managedCoachSidecar.migrateLegacyRoute) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+        if (!args.legacyId || !args.targetRouteId) throw new Error("ROUTE_INVALID_INPUT: legacyId and targetRouteId are required");
+        const legacy = managedCoachSidecar.migrateLegacyRoute({
+          legacyId: args.legacyId, targetRouteId: args.targetRouteId,
+          ...(args.expectedConsentRevision !== undefined ? { expectedConsentRevision: args.expectedConsentRevision } : {}),
+        });
+        const result = "Legacy route explicitly migrated; prior messages remain UNROUTABLE history.";
+        return { content: [textBlock(result)], structuredContent: { result, legacy } };
+      }
+      requireRoute();
+      if (action === "enqueue_wake") {
+        if (!managedCoachSidecar.enqueueRouteReviewWake) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+        if (!args.messageId || args.eventId === undefined || !args.operationId) throw new Error("ROUTE_INVALID_INPUT: messageId,eventId,operationId are required");
+        const enqueued = managedCoachSidecar.enqueueRouteReviewWake({
+          routeId: routeId!, messageId: args.messageId, eventId: args.eventId, operationId: args.operationId,
+        });
+        const result = enqueued.duplicate ? "Review wake already existed (idempotent)." : "Review wake durably enqueued at seq " + enqueued.envelope.seq + ".";
+        return { content: [textBlock(result)], structuredContent: { result, message: enqueued.envelope } };
+      }
+      if (action === "reply") {
+        if (!managedCoachSidecar.enqueueRouteReply) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+        if (!args.messageId || !args.inReplyTo || !args.content) throw new Error("ROUTE_INVALID_INPUT: messageId,inReplyTo,content are required");
+        const enqueued = managedCoachSidecar.enqueueRouteReply({
+          routeId: routeId!, messageId: args.messageId, content: args.content, inReplyTo: args.inReplyTo,
+        });
+        const result = enqueued.duplicate ? "Reply already existed (idempotent)." : "WebGPT reply durably enqueued at seq " + enqueued.envelope.seq + ".";
+        return { content: [textBlock(result)], structuredContent: { result, message: enqueued.envelope } };
+      }
+      if (action === "claim_delivery") {
+        if (!managedCoachSidecar.claimRouteDeliveries) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+        const messages = managedCoachSidecar.claimRouteDeliveries({
+          routeId: routeId!, origination: args.origination ?? "webgpt",
+          ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        });
+        const result = "Claimed " + messages.length + " durable message(s).";
+        return { content: [textBlock(result)], structuredContent: { result, messages } };
+      }
+      if (action === "ack" || action === "resolve") {
+        if (!args.messageId || args.seq === undefined || !args.contentSha256) throw new Error("ROUTE_INVALID_INPUT: messageId,seq,contentSha256 are required");
+        if (action === "ack") {
+          if (!args.outcome) throw new Error("ROUTE_INVALID_INPUT: outcome is required");
+          if (!managedCoachSidecar.recordRouteOutcome) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+          const message = managedCoachSidecar.recordRouteOutcome({
+            routeId: routeId!, messageId: args.messageId, seq: args.seq, contentSha256: args.contentSha256,
+            outcome: args.outcome, ...(reason ? { reason } : {}),
+          });
+          const result = "Message state=" + message.state + " (dom_submitted is a browser receipt, not a completed review).";
+          return { content: [textBlock(result)], structuredContent: { result, message } };
+        }
+        if (!args.resolveAction) throw new Error("ROUTE_INVALID_INPUT: resolveAction is required");
+        if (!managedCoachSidecar.resolveRouteAttention) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
+        const message = managedCoachSidecar.resolveRouteAttention({
+          routeId: routeId!, messageId: args.messageId, seq: args.seq, contentSha256: args.contentSha256,
+          action: args.resolveAction, ...(reason ? { reason } : {}),
+        });
+        const result = "Explicit operator resolution applied: state=" + message.state + ".";
+        return { content: [textBlock(result)], structuredContent: { result, message } };
+      }
+      throw new Error("ROUTE_INVALID_INPUT: unknown action");
     },
   );
 

@@ -214,4 +214,7 @@ chrome.runtime.onMessage.addListener((message,_sender,sendResponse) => {
   }
   return false;
 });
+// Exact multi-route gate (pure decisions, no chrome.* calls). Older harnesses
+// that stub importScripts simply leave the legacy single-route flow in place.
+importScripts("multiroute-gate.js");
 importScripts("auto-worker.js");

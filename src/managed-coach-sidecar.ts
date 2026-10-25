@@ -8,16 +8,33 @@ import { isPathInsideRoot } from "./roots.js";
 import Database from "better-sqlite3";
 import { JobResourceLocks, sharedResourceLocks } from "./job-resource-locks.js";
 import { AgentObserverStore } from "./agent-observer.js";
+import {
+  DSH_SESSION_RE, MultiRouteStore, ROUTE_ID_RE, RouteError, canonicalChatUrl,
+  type ClaimedEnvelope, type LegacyRouteRecord, type RouteEnvelope, type RouteMessageState,
+  type RouteOrigination, type RouteRecord, type StoreSnapshot,
+} from "./coach-multiroute.js";
 
 const SERVICE_NAME = "coach-feed";
 const PAIRING_EXTENSION_ID = "bapcebjlgncogfpgbhllioaichcldkbl";
 const MAX_EVENTS = 50;
 const EXTENSION_ID = /^[a-p]{32}$/;
 
-type SidecarInput = { workspaceId: string; workspaceRoot: string; port: number; pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string; authorizedWorkspaceIds?:string[] };
+type SidecarInput = {
+  workspaceId: string; workspaceRoot: string; port: number;
+  pairedExtensionId?: string; observeAllNativeAgents?: boolean; pairingToken?:string;
+  authorizedWorkspaceIds?:string[];
+  /** Explicit per-start consent for exact multi-route DSH sessions (bounded). */
+  authorizedDshSessionIds?: string[];
+  /** Durable per-route queue root; defaults next to the event database. */
+  routeStateDir?: string;
+};
 type EventRow = { event_id: string | number; workspace_id?:string; operation_id: string; event_type: string; created_at: string };
 export type DeliveryReceipt = {event_id:number;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
-type Entry = SidecarInput & { token: Buffer; server: Server; database: Database.Database; receiptDb?:Database.Database; jobId: string; startedAt: string; handoffPath?:string };
+type Entry = SidecarInput & {
+  token: Buffer; server: Server; database: Database.Database;
+  receiptDb?:Database.Database; jobId: string; startedAt: string; handoffPath?:string;
+  routeStore?: MultiRouteStore;
+};
 
 export interface CoachSidecarStatus { workspaceId: string; serviceName: string; port: number; state: "running"|"stopped"; startedAt?: string; pairedExtensionId?: string; reason?:string; }
 export interface CoachSidecarStartResult extends CoachSidecarStatus { token: string; }
@@ -29,6 +46,37 @@ export interface ManagedCoachSidecarControl {
   getDeliveryReceipt?(workspaceId:string,eventId:number):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
   close():Promise<void>;
   claimBrowserRoute?(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean;
+  claimExactBrowserRoute?(input:ExactRouteClaimInput):ExactRouteClaimResult;
+  revokeBrowserRoute?(input:{routeId:string;expectedConsentRevision?:number;reason?:string}):ExactRouteClaimResult;
+  enqueueRouteReviewWake?(input:{routeId:string;messageId:string;eventId:number;operationId:string}):{duplicate:boolean;envelope:RouteEnvelope};
+  enqueueRouteReply?(input:{routeId:string;messageId:string;content:string;inReplyTo:string}):{duplicate:boolean;envelope:RouteEnvelope};
+  claimRouteDeliveries?(input:{routeId:string;origination:RouteOrigination;limit?:number}):ClaimedEnvelope[];
+  recordRouteOutcome?(input:{routeId:string;messageId:string;seq:number;contentSha256:string;
+    outcome:"dom_submitted"|"manual_sent"|"acked"|"not_submitted"|"uncertain"|"timeout"|"existing_draft"|"page_busy"|"navigation_mismatch";reason?:string}):RouteEnvelope;
+  resolveRouteAttention?(input:{routeId:string;messageId:string;seq:number;contentSha256:string;action:"retry"|"mark_sent";reason?:string}):RouteEnvelope;
+  listRouteMessages?(input:{routeId:string;origination?:RouteOrigination;afterSeq?:number;limit?:number}):RouteEnvelope[];
+  routeSnapshot?():StoreSnapshot;
+  importLegacyRoutes?(records:{workspaceId:string;url:string;tabId?:number}[]):LegacyRouteRecord[];
+  migrateLegacyRoute?(input:{legacyId:string;targetRouteId:string;expectedConsentRevision?:number}):LegacyRouteRecord;
+  classifyLegacyMessage?(input:{legacyId?:string;workspaceId?:string;messageId?:string}):{state:"UNROUTABLE";reason:string;legacyId?:string};
+  pendingReviewWakes?():{routeId:string;messageId:string;seq:number;eventId:number;operationId:string;workspaceId:string;state:RouteMessageState;submittedAt:string}[];
+}
+
+export interface ExactRouteClaimInput {
+  workspaceId:string; dshSessionId:string; routeId:string; nonce:string; url:string;
+  replaceRouteId?:string; expectedConsentRevision?:number;
+  persistScope?:(ids:string[])=>void;
+}
+export interface ExactRouteClaimResult {
+  claimed:boolean; code?:string; route?:{
+    routeId:string; workspaceId:string; dshSessionId:string; canonicalChatUrl:string;
+    exactTabId:number; consentRevision:number; state:string;
+  };
+}
+
+/** Local HTTP error with an explicit browser-visible status; never carries internals. */
+class RouteHttpError extends Error {
+  constructor(readonly status: number, message: string) { super(message); this.name = "RouteHttpError"; }
 }
 
 function validPort(port: unknown): asserts port is number {
@@ -96,6 +144,16 @@ export class ManagedCoachSidecar {
     if (!input.workspaceId || !input.workspaceRoot) throw new TypeError("workspaceId and workspaceRoot are required");
     if (input.pairedExtensionId !== undefined && !EXTENSION_ID.test(input.pairedExtensionId)) throw new TypeError("Invalid paired extension id");
     if(input.pairingToken!==undefined&&!/^[A-Za-z0-9_-]{43}$/.test(input.pairingToken))throw new TypeError("Invalid pairing token");
+    if(input.authorizedDshSessionIds!==undefined){
+      const ids=input.authorizedDshSessionIds;
+      if(!Array.isArray(ids)||ids.length<1||ids.length>8||new Set(ids).size!==ids.length||
+         ids.some(id=>typeof id!=="string"||!DSH_SESSION_RE.test(id)))
+        throw new TypeError("Invalid authorized DSH session list");
+      // Multi-route identity is meaningful only for the paired extension flow.
+      if(!input.pairedExtensionId)throw new TypeError("Authorized DSH sessions require a paired extension");
+    }
+    if(input.routeStateDir!==undefined&&(typeof input.routeStateDir!=="string"||!input.routeStateDir))
+      throw new TypeError("Invalid route state directory");
     // Elevated cross-worktree observer scope must be explicitly granted at
     // sidecar startup, never implicitly inherited from the existing v0.2 token.
     if (input.observeAllNativeAgents && !input.pairedExtensionId) throw new TypeError("Admin observer requires a paired extension");
@@ -165,6 +223,7 @@ export class ManagedCoachSidecar {
         try { this.revokeHandoff(entry.handoffPath); } catch { /* Keep shutdown best-effort. */ }
         try { entry.database.close(); } catch { /* Already shutting down. */ }
         try { entry.receiptDb?.close(); } catch { /* Already shutting down. */ }
+        try { entry.routeStore?.close(); } catch { /* Already shutting down. */ }
         this.locks.release(entry.jobId);
       });
       entry.server.on("error", () => {
@@ -208,6 +267,15 @@ export class ManagedCoachSidecar {
       void this.acceptDeliveryReceipt(entry,req,res,cors);
       return;
     }
+    const routePostUrl = req.url ?? "";
+    if (req.method === "POST" && (routePostUrl === "/route/propose" || routePostUrl === "/routes/legacy/import" ||
+        /^\/routes\/rt_[A-Za-z0-9_-]{43}\/(?:ack|resolve|revoke)$/.test(routePostUrl))) {
+      if (!entry.pairedExtensionId || origin !== `chrome-extension://${entry.pairedExtensionId}` ||
+          !tokenMatches(entry.token, req.headers.authorization))
+        return send(res, 403, { error: "route transport forbidden" }, cors);
+      void this.handleRoutePost(entry, req, res, cors);
+      return;
+    }
     if (req.method !== "GET") return send(res, 405, { error: "method not allowed" }, cors);
     if (!tokenMatches(entry.token, req.headers.authorization)) return send(res, 401, { error: "unauthorized" }, cors);
     if (req.url === "/health") return send(res, 200, { ok: true, service: SERVICE_NAME, status: "ok" }, cors);
@@ -222,6 +290,16 @@ export class ManagedCoachSidecar {
       res.setHeader("cache-control","no-store");
       return send(res,200,{ok:true,state:v.workspaceId?"claimed":"pending",
         ...(v.workspaceId?{workspaceId:v.workspaceId,url:v.url}:{})},cors);
+    }
+    const routeGetUrl = req.url ?? "";
+    if (routeGetUrl === "/routes" || routeGetUrl.startsWith("/routes/") || routeGetUrl.startsWith("/route/status")) {
+      try {
+        if (this.handleRouteGet(entry, req, res, cors)) return;
+      } catch (error) {
+        const code = error instanceof RouteError ? error.code : "ROUTE_STORE_UNAVAILABLE";
+        return this.sendRouteError(res, code, cors);
+      }
+      return send(res, 404, { error: "not found" }, cors);
     }
     if (req.url) {
       const parsed=new URL(req.url,"http://127.0.0.1");
@@ -341,6 +419,286 @@ export class ManagedCoachSidecar {
     } catch {if(!res.headersSent)send(res,400,{error:"invalid binding"},cors);}
   }
 
+  // ---------------------------------------------------------------------
+  // Exact multi-route API (I1). The legacy workspace-only browser claim above
+  // is preserved byte-for-byte; this path always requires an exact routeId,
+  // DSH session id, canonical chat URL and explicit per-start session consent.
+  // ---------------------------------------------------------------------
+
+  private scopeFor(entry: Entry): string[] { return entry.authorizedWorkspaceIds ?? [entry.workspaceId]; }
+
+  private routeEntry(): Entry {
+    const entries = [...this.services.values()];
+    if (entries.length !== 1) throw new Error("COACH_ROUTE_STORE_UNAVAILABLE");
+    return entries[0];
+  }
+
+  private routeStoreFor(entry: Entry): MultiRouteStore {
+    if (entry.routeStore) return entry.routeStore;
+    const fallback = join(dirname(entry.database.name), "coach-routes");
+    const store = new MultiRouteStore({
+      stateDir: entry.routeStateDir ?? fallback,
+      maxRoutes: 32,
+      maxLegacyRoutes: 32,
+      maxProposals: 16,
+      maxQueuedPerRoute: 1024,
+    });
+    entry.routeStore = store;
+    return store;
+  }
+
+  private assertRouteInScope(entry: Entry, store: MultiRouteStore, routeId: string): RouteRecord {
+    const route = store.route(routeId);
+    if (!route || !this.scopeFor(entry).includes(route.workspaceId)) {
+      throw new RouteHttpError(403, "route scope not authorized");
+    }
+    return route;
+  }
+
+  private publicRoute(route: RouteRecord): ExactRouteClaimResult["route"] {
+    return {
+      routeId: route.routeId, workspaceId: route.workspaceId, dshSessionId: route.dshSessionId,
+      canonicalChatUrl: route.canonicalChatUrl, exactTabId: route.exactTabId,
+      consentRevision: route.consentRevision, state: route.state,
+    };
+  }
+
+  private sendRouteError(res: ServerResponse, code: string, cors: Record<string, string>): void {
+    const status =
+      code === "ROUTE_NOT_FOUND" || code === "ROUTE_PROPOSAL_NOT_FOUND" ? 404 :
+      code === "ROUTE_WORKSPACE_NOT_AUTHORIZED" || code === "ROUTE_DSH_SESSION_NOT_AUTHORIZED" ? 403 :
+      code === "ROUTE_LIMIT" || code === "ROUTE_QUEUE_LIMIT" ? 429 :
+      code.startsWith("ROUTE_QUEUE_CORRUPT") || code.startsWith("ROUTE_STORE_CORRUPT") || code === "ROUTE_STORE_UNAVAILABLE" ? 503 :
+      code === "ROUTE_CHAT_ALREADY_BOUND" || code === "ROUTE_SESSION_ALREADY_BOUND" || code === "ROUTE_TAB_ALREADY_BOUND" ||
+      code === "ROUTE_CONSENT_REVISION_MISMATCH" || code === "ROUTE_REVOKED" || code === "ROUTE_NOT_ACTIVE" ||
+      code === "ROUTE_ACK_CONFLICT" || code === "ROUTE_STATE_TRANSITION_DENIED" || code === "ROUTE_LEGACY_MIGRATION_DENIED" ? 409 :
+      code === "ROUTE_PROPOSAL_EXPIRED" || code === "ROUTE_PROPOSAL_ALREADY_CLAIMED" || code === "ROUTE_LEGACY_UNROUTABLE" ? 410 : 400;
+    send(res, status, { error: code }, cors);
+  }
+
+  private async readRouteJson(req: IncomingMessage, limit: number): Promise<Record<string, unknown>> {
+    if (req.headers["content-type"] !== "application/json") throw new RouteHttpError(415, "invalid content type");
+    let raw = "", length = 0;
+    for await (const part of req) {
+      length += Buffer.byteLength(part);
+      if (length > limit) throw new RouteHttpError(413, "body too large");
+      raw += part.toString("utf8");
+    }
+    let data: unknown;
+    try { data = JSON.parse(raw); } catch { throw new RouteHttpError(400, "invalid json"); }
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new RouteHttpError(400, "invalid body");
+    return data as Record<string, unknown>;
+  }
+
+  private checkRouteBody(data: Record<string, unknown>, allowed: string[], required: string[]): void {
+    for (const key of Object.keys(data)) if (!allowed.includes(key)) throw new RouteHttpError(400, "unexpected field");
+    for (const key of required) if (data[key] === undefined) throw new RouteHttpError(400, "missing field");
+  }
+
+  private async handleRoutePost(entry: Entry, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): Promise<void> {
+    try {
+      const url = req.url ?? "";
+      const store = this.routeStoreFor(entry);
+      const scope = this.scopeFor(entry);
+      if (url === "/route/propose") {
+        const data = await this.readRouteJson(req, 2048);
+        this.checkRouteBody(data, ["nonce", "tabId", "url"], ["nonce", "tabId", "url"]);
+        const proposal = store.propose({ nonce: String(data.nonce), url: String(data.url), tabId: Number(data.tabId) });
+        return send(res, 200, { ok: true, routeId: proposal.routeId, nonce: proposal.nonce,
+          url: proposal.canonicalChatUrl, tabId: proposal.exactTabId, expiresSeconds: 600 }, cors);
+      }
+      if (url === "/routes/legacy/import") {
+        const data = await this.readRouteJson(req, 16 * 1024);
+        this.checkRouteBody(data, ["records"], ["records"]);
+        if (!Array.isArray(data.records) || data.records.length < 1 || data.records.length > 32)
+          throw new RouteHttpError(400, "invalid records");
+        const records = data.records.map((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) throw new RouteHttpError(400, "invalid record");
+          const record = item as Record<string, unknown>;
+          this.checkRouteBody(record, ["workspaceId", "url", "tabId"], ["workspaceId", "url"]);
+          if (!scope.includes(String(record.workspaceId))) throw new RouteHttpError(403, "workspace scope not authorized");
+          return {
+            workspaceId: String(record.workspaceId), url: String(record.url),
+            ...(record.tabId !== undefined ? { tabId: Number(record.tabId) } : {}),
+          };
+        });
+        const legacy = store.importLegacyRoutes(records);
+        return send(res, 200, { ok: true, count: legacy.length, legacy }, cors);
+      }
+      const match = /^\/routes\/(rt_[A-Za-z0-9_-]{43})\/(ack|resolve|revoke)$/.exec(url);
+      if (!match) return send(res, 404, { error: "not found" }, cors);
+      const route = this.assertRouteInScope(entry, store, match[1]);
+      if (match[2] === "ack") {
+        const data = await this.readRouteJson(req, 4096);
+        this.checkRouteBody(data, ["messageId", "seq", "contentSha256", "outcome", "reason"],
+          ["messageId", "seq", "contentSha256", "outcome"]);
+        const envelope = store.recordDeliveryOutcome({
+          routeId: route.routeId, messageId: String(data.messageId), seq: Number(data.seq),
+          contentSha256: String(data.contentSha256), outcome: data.outcome as never,
+          ...(data.reason !== undefined ? { reason: String(data.reason) } : {}),
+        });
+        return send(res, 200, { ok: true, message: { routeId: envelope.routeId, messageId: envelope.messageId, seq: envelope.seq, state: envelope.state } }, cors);
+      }
+      if (match[2] === "resolve") {
+        const data = await this.readRouteJson(req, 4096);
+        this.checkRouteBody(data, ["messageId", "seq", "contentSha256", "action", "reason"],
+          ["messageId", "seq", "contentSha256", "action"]);
+        const envelope = store.resolveAttention({
+          routeId: route.routeId, messageId: String(data.messageId), seq: Number(data.seq),
+          contentSha256: String(data.contentSha256), action: data.action as never,
+          ...(data.reason !== undefined ? { reason: String(data.reason) } : {}),
+        });
+        return send(res, 200, { ok: true, message: { routeId: envelope.routeId, messageId: envelope.messageId, seq: envelope.seq, state: envelope.state } }, cors);
+      }
+      const data = await this.readRouteJson(req, 4096);
+      this.checkRouteBody(data, ["expectedConsentRevision", "reason"], []);
+      const revoked = store.revoke({
+        routeId: route.routeId,
+        ...(data.expectedConsentRevision !== undefined ? { expectedConsentRevision: Number(data.expectedConsentRevision) } : {}),
+        ...(data.reason !== undefined ? { reason: String(data.reason) } : {}),
+      });
+      return send(res, 200, { ok: true, route: this.publicRoute(revoked) }, cors);
+    } catch (error) {
+      if (error instanceof RouteHttpError) return send(res, error.status, { error: error.message }, cors);
+      const code = error instanceof RouteError ? error.code : "ROUTE_STORE_UNAVAILABLE";
+      return this.sendRouteError(res, code, cors);
+    }
+  }
+
+  private handleRouteGet(entry: Entry, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): boolean {
+    const url = req.url ?? "";
+    const store = this.routeStoreFor(entry);
+    const scope = this.scopeFor(entry);
+    if (url === "/routes") {
+      const snapshot = store.snapshot();
+      res.setHeader("cache-control", "no-store");
+      send(res, 200, {
+        ok: true, consentRevision: snapshot.consentRevision,
+        routes: snapshot.routes.map((route) => this.publicRoute(route)),
+        legacy: snapshot.legacy, pendingProposals: snapshot.pendingProposals,
+        pendingReviews: store.pendingReviewWakes().length,
+      }, cors);
+      return true;
+    }
+    const status = /^\/route\/status\?routeId=(rt_[A-Za-z0-9_-]{43})$/.exec(url);
+    if (status) {
+      const route = store.route(status[1]);
+      res.setHeader("cache-control", "no-store");
+      if (route) {
+        if (!scope.includes(route.workspaceId)) return send(res, 403, { error: "route scope not authorized" }, cors), true;
+        return send(res, 200, { ok: true, state: route.state, route: this.publicRoute(route) }, cors), true;
+      }
+      const proposal = store.proposalByRouteId(status[1]);
+      if (proposal && !proposal.claimedRouteId) {
+        return send(res, 200, { ok: true, state: "pending", routeId: proposal.routeId,
+          url: proposal.canonicalChatUrl, tabId: proposal.exactTabId,
+          expiresAt: new Date(proposal.expiresAt).toISOString() }, cors), true;
+      }
+      return send(res, 404, { error: "ROUTE_NOT_FOUND" }, cors), true;
+    }
+    const next = /^\/routes\/(rt_[A-Za-z0-9_-]{43})\/next\?origination=(dsh|webgpt)(?:&limit=([1-8]))?$/.exec(url);
+    if (next) {
+      const route = this.assertRouteInScope(entry, store, next[1]);
+      const messages = store.claimDeliveries({
+        routeId: route.routeId, origination: next[2] as RouteOrigination,
+        ...(next[3] ? { limit: Number(next[3]) } : {}),
+      });
+      const stats = store.queueStats(route.routeId);
+      res.setHeader("cache-control", "no-store");
+      send(res, 200, {
+        ok: true,
+        messages: messages.map((message) => ({
+          routeId: message.routeId, messageId: message.messageId, seq: message.seq,
+          contentSha256: message.contentSha256, kind: message.kind, origination: message.origination,
+          state: message.state, attempt: message.attempt, content: message.content, data: message.data,
+        })),
+        cursor: { ackedThroughSeq: stats.ackedThroughSeq, lastSeq: stats.lastSeq },
+      }, cors);
+      return true;
+    }
+    return false;
+  }
+
+  /** Exact bind used by coach_webgpt_claim_browser_route_exact (never the legacy tool). */
+  claimExactBrowserRoute(input: ExactRouteClaimInput): ExactRouteClaimResult {
+    const entry = this.routeEntry();
+    const scope = this.scopeFor(entry);
+    if (!scope.includes(input.workspaceId)) {
+      if (scope.length >= 8 || !input.persistScope) return { claimed: false, code: "ROUTE_WORKSPACE_NOT_AUTHORIZED" };
+      const next = [...scope, input.workspaceId];
+      try { input.persistScope(next); } catch { return { claimed: false, code: "COACH_ROUTE_SCOPE_PERSISTENCE_DENIED" }; }
+      entry.authorizedWorkspaceIds = next;
+    }
+    const authorizedDshSessionIds = entry.authorizedDshSessionIds ?? [];
+    if (authorizedDshSessionIds.length === 0) return { claimed: false, code: "COACH_ROUTE_DSH_SESSION_SCOPE_NOT_ENABLED" };
+    try {
+      const route = this.routeStoreFor(entry).claimExact({
+        routeId: input.routeId, nonce: input.nonce, url: input.url,
+        workspaceId: input.workspaceId, dshSessionId: input.dshSessionId,
+        authorizedWorkspaceIds: this.scopeFor(entry),
+        authorizedDshSessionIds,
+        ...(input.replaceRouteId ? { replaceRouteId: input.replaceRouteId } : {}),
+        ...(input.expectedConsentRevision !== undefined ? { expectedConsentRevision: input.expectedConsentRevision } : {}),
+      });
+      return { claimed: true, route: this.publicRoute(route) };
+    } catch (error) {
+      if (error instanceof RouteError) return { claimed: false, code: error.code };
+      throw error;
+    }
+  }
+
+  revokeBrowserRoute(input: { routeId: string; expectedConsentRevision?: number; reason?: string }): ExactRouteClaimResult {
+    try {
+      const entry = this.routeEntry();
+      this.assertRouteInScope(entry, this.routeStoreFor(entry), input.routeId);
+      const route = this.routeStoreFor(entry).revoke(input);
+      return { claimed: true, route: this.publicRoute(route) };
+    } catch (error) {
+      if (error instanceof RouteHttpError) return { claimed: false, code: "ROUTE_WORKSPACE_NOT_AUTHORIZED" };
+      if (error instanceof RouteError) return { claimed: false, code: error.code };
+      throw error;
+    }
+  }
+
+  enqueueRouteReviewWake(input: { routeId: string; messageId: string; eventId: number; operationId: string }) {
+    const entry = this.routeEntry();
+    return this.routeStoreFor(entry).enqueueReviewWake(input);
+  }
+  enqueueRouteReply(input: { routeId: string; messageId: string; content: string; inReplyTo: string }) {
+    return this.routeStoreFor(this.routeEntry()).enqueueReply(input);
+  }
+  claimRouteDeliveries(input: { routeId: string; origination: RouteOrigination; limit?: number }): ClaimedEnvelope[] {
+    return this.routeStoreFor(this.routeEntry()).claimDeliveries(input);
+  }
+  recordRouteOutcome(input: { routeId: string; messageId: string; seq: number; contentSha256: string;
+    outcome: "dom_submitted" | "manual_sent" | "acked" | "not_submitted" | "uncertain" | "timeout" | "existing_draft" | "page_busy" | "navigation_mismatch"; reason?: string }): RouteEnvelope {
+    return this.routeStoreFor(this.routeEntry()).recordDeliveryOutcome(input);
+  }
+  resolveRouteAttention(input: { routeId: string; messageId: string; seq: number; contentSha256: string; action: "retry" | "mark_sent"; reason?: string }): RouteEnvelope {
+    return this.routeStoreFor(this.routeEntry()).resolveAttention(input);
+  }
+  listRouteMessages(input: { routeId: string; origination?: RouteOrigination; afterSeq?: number; limit?: number }): RouteEnvelope[] {
+    return this.routeStoreFor(this.routeEntry()).listMessages(input);
+  }
+  routeSnapshot(): StoreSnapshot {
+    return this.routeStoreFor(this.routeEntry()).snapshot();
+  }
+  importLegacyRoutes(records: { workspaceId: string; url: string; tabId?: number }[]): LegacyRouteRecord[] {
+    const entry = this.routeEntry();
+    const scope = this.scopeFor(entry);
+    if (records.some((record) => !scope.includes(record.workspaceId))) throw new RouteHttpError(403, "workspace scope not authorized");
+    return this.routeStoreFor(entry).importLegacyRoutes(records);
+  }
+  migrateLegacyRoute(input: { legacyId: string; targetRouteId: string; expectedConsentRevision?: number }): LegacyRouteRecord {
+    return this.routeStoreFor(this.routeEntry()).migrateLegacy(input);
+  }
+  classifyLegacyMessage(input: { legacyId?: string; workspaceId?: string; messageId?: string }): { state: "UNROUTABLE"; reason: string; legacyId?: string } {
+    return this.routeStoreFor(this.routeEntry()).classifyLegacyMessage(input);
+  }
+  pendingReviewWakes() {
+    return this.routeStoreFor(this.routeEntry()).pendingReviewWakes();
+  }
+
   claimBrowserRoute(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean {
     if(!/^[a-f0-9]{32}$/.test(nonce))return false;
     const claim=this.browserClaims.get(nonce);
@@ -420,8 +778,10 @@ export class ManagedCoachSidecar {
       entry.server.closeAllConnections();
       await new Promise<void>((resolve) => entry.server.close(() => resolve()));
     } finally {
-      try { this.revokeHandoff(entry.handoffPath); entry.database.close(); entry.receiptDb?.close(); }
-      finally { this.locks.release(entry.jobId); }
+      try {
+        this.revokeHandoff(entry.handoffPath); entry.database.close(); entry.receiptDb?.close();
+        entry.routeStore?.close();
+      } finally { this.locks.release(entry.jobId); }
     }
   }
 
