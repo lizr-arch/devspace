@@ -135,7 +135,7 @@ function autoValid(e) {
     typeof e.operation_id === "string" && AUTO_ID.test(e.operation_id);
 }
 function autoInstruction(e) {
-  if(e.app_kind==="native_chatgpt_app_codex")return "请以 Web GPT 身份独立审核一项由 ChatGPT App 原生 Codex 完成的任务。"+
+  if(e.app_kind==="native_chatgpt_app_codex")return "请以 Web GPT Coach 身份独立审核一项由 ChatGPT App 原生 Codex 完成的任务。"+
     "通过 DevSpace MCP 使用 codex_app_thread_read 读取同一工作区和固定原生线程的真实源码差异与上下文，核对冻结 TASK 及测试；"+
     "completion 和浏览器提交回执都不是批准。请用 codex_app_review 为该事件写入有依据的 APPROVED / REWORK / BLOCKED 裁决。"+
     "REWORK 必须针对同一个固定 App 线程并使用新 operationId，不能启动本地 Codex CLI。"+
@@ -532,6 +532,32 @@ async function autoFetchFeed(pair,portOverride,workspaceFilter) {
     return {ok:false,code:"invalid_feed",detail:"incomplete accumulation"};
   return {ok:true,events,pending_count:expected,pages};
 }
+// Native App versions of the same exact thread: newest pending completion only.
+// Audit older events without replay; never modify an uncertain or sent ledger record.
+function autoSupersedeOlderNative(ledger,events) {
+  const latest=new Map();
+  for(const e of events) {
+    if(e?.app_kind!=="native_chatgpt_app_codex" ||
+       typeof e.workspace_id!=="string" || typeof e.thread_id!=="string" ||
+       typeof e.created_at!=="string")continue;
+    const group=e.workspace_id+":"+e.thread_id,prior=latest.get(group);
+    if(!prior || e.created_at>prior.created_at ||
+       (e.created_at===prior.created_at && e.event_id>prior.event_id))latest.set(group,e);
+  }
+  let changed=false;
+  for(const e of events) {
+    if(e?.app_kind!=="native_chatgpt_app_codex")continue;
+    const group=e.workspace_id+":"+e.thread_id;
+    if(!latest.has(group)||latest.get(group)===e)continue;
+    const key=autoKey(e),old=ledger[key];
+    if(old&&old.state!=="pending")continue;
+    ledger[key]={state:"superseded",deliveryWorkspaceId:autoDeliveryWorkspace(e),
+      at:new Date().toISOString(),
+      reason:"同一原生线程已有更新完成事件；旧通知保留审计，不重发且不冒认批准"};
+    changed=true;
+  }
+  return changed;
+}
 async function autoPump() {
   if(autoBusy)return;
   autoBusy=true;
@@ -581,6 +607,7 @@ async function autoPump() {
       return autoValid(e);
     });
     autoReconcileLegacy(ledger,events);
+    autoSupersedeOlderNative(ledger,events);
     for(const e of events) {
       const key=autoKey(e);
       if(!ledger[key] && Object.keys(ledger).length<2048)
