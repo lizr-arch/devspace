@@ -1,4 +1,5 @@
 import { RouteBridgeDelivery, type BridgeTransport, type TrustedReply } from "./coach-routes/delivery.js";
+import { RouteAccessController, type RouteAccessAction, type RouteAccessMode, type RoutePrincipal, type RoutePrincipalTarget, type RoutePrincipalVerifier } from "./coach-routes/route-principal.js";
 import { safeReportOutcome } from "./coach-result-contract.js";
 import { COACH_DELIVERY_SQL, completionDeliveryType } from "./coach-review-events.js";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
@@ -63,6 +64,11 @@ export interface ManagedCoachSidecarControl {
   migrateLegacyRoute?(input:{legacyId:string;targetRouteId:string;expectedConsentRevision?:number}):LegacyRouteRecord;
   classifyLegacyMessage?(input:{legacyId?:string;workspaceId?:string;messageId?:string}):{state:"UNROUTABLE";reason:string;legacyId?:string};
   pendingReviewWakes?():{routeId:string;messageId:string;seq:number;eventId:number;operationId:string;workspaceId:string;state:RouteMessageState;submittedAt:string}[];
+  configureRouteAccess(options:{mode?:RouteAccessMode;verifier?:RoutePrincipalVerifier}):void;
+  authorizeRouteAction(action:RouteAccessAction,context:unknown,route?:RoutePrincipalTarget):Promise<RoutePrincipal>;
+  authorizeRouteClaim(action:"claim_browser_route"|"claim_browser_route_exact",context:unknown,input:{workspaceId:string;chatId:string}):Promise<RoutePrincipal>;
+  visibleRoutesForPrincipal(principal:RoutePrincipal,routes:readonly RouteRecord[]):RouteRecord[];
+  principalCanSeeRoute(principal:RoutePrincipal,route:RouteRecord):boolean;
 }
 
 export interface ExactRouteClaimInput {
@@ -120,12 +126,37 @@ export class ManagedCoachSidecar {
   private starting?: Promise<CoachSidecarStartResult>;
   private closing = false;
   private readonly handoffPath?: string;
+  private readonly routeAccess = new RouteAccessController({ mode: "legacy" });
   constructor(
     private readonly locks: JobResourceLocks = sharedResourceLocks,
     private readonly nativeEventDatabasePath?: string,
     private readonly observer?: AgentObserverStore,
     private readonly bridgeTransport?: BridgeTransport,
   ) { this.handoffPath=nativeEventDatabasePath?join(realpathSync(dirname(nativeEventDatabasePath)),"coach-current-pairing.json"):undefined; }
+
+  /**
+   * HOST wiring point for route authorization. Production server code enables
+   * "enforced" with no verifier => every sensitive route action is denied until
+   * a real authenticated verifier is injected. Direct local/test users may keep
+   * the compatibility "legacy" mode, which must never be used with a live
+   * ChatGPT/MCP transport.
+   */
+  configureRouteAccess(options: { mode?: RouteAccessMode; verifier?: RoutePrincipalVerifier }): void {
+    this.routeAccess.configure(options);
+  }
+  async authorizeRouteAction(action: RouteAccessAction, context: unknown, route?: RoutePrincipalTarget): Promise<RoutePrincipal> {
+    return this.routeAccess.authorize(action, context, route);
+  }
+  async authorizeRouteClaim(action: "claim_browser_route" | "claim_browser_route_exact", context: unknown,
+    input: { workspaceId: string; chatId: string }): Promise<RoutePrincipal> {
+    return this.routeAccess.authorizeClaim(action, context, input);
+  }
+  visibleRoutesForPrincipal(principal: RoutePrincipal, routes: readonly RouteRecord[]): RouteRecord[] {
+    return this.routeAccess.visibleRoutes(principal, routes);
+  }
+  principalCanSeeRoute(principal: RoutePrincipal, route: RouteRecord): boolean {
+    return this.routeAccess.canSeeRoute(principal, route);
+  }
 
   private publishHandoff(port:number,token:Buffer):string|undefined {
     const path=this.handoffPath;if(!path)return undefined;

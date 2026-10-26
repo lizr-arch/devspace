@@ -1,0 +1,7 @@
+40fe3e5326db5aefeaadd1ef2c68112275427916216deab9b9ebed460f6a1e3b  src/coach-routes/route-principal.ts
+931f51338be26ee65ad300a226f02f2bd49e2fae23ce17d3ca96696b7dbe15af  src/coach-routes/route-principal.test.ts
+55e70d5377b3011067773f2659302d03f61dd03ab172e1307529b3fb03f27ff1  src/managed-coach-sidecar.ts
+8ce270d3f1ceb6823c02754935d4a04e7e6d981294d9f5e5a69cf7dd63f4bae9  src/server/tools-sidecar.ts
+106a6cdd664741da605264dbd9a591456d169c76151a73afc326dd23a82588c1  src/server.ts
+676602c64b44341eb2584e09e1ba6cd53fee1cc258d2079e3177de53ac47f8ea  src/codex-worker-ipc.ts
+8f047b778fdc7405db439ee0d011e5e90046643158976c88b09084c0451dde5e  docs/evidence/dsh-r2/tests.log

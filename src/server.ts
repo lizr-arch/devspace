@@ -347,6 +347,10 @@ function createServerWithOwnedState(
   const managedCoachSidecar = codexWorkerSocket
     ? new CodexWorkerCoachClient(codexWorkerSocket,defaultCodexWorkerKey(config.stateDir),coachReviewEvents)
     : new ManagedCoachSidecar(undefined, coachReviewEvents.path, agentObserver);
+  // Route access is denied by default until a host-injected principal verifier
+  // authenticates the calling ChatGPT transport. The legacy compatibility mode
+  // is available only to direct local/test instances, never this server.
+  managedCoachSidecar.configureRouteAccess({mode:"enforced"});
   // Lazy: unsupported hosts may still start DevSpace; Codex is only resolved
   // after an explicitly authorized Agent tool invocation.
   let nativeCodexRunner: CodexAgentControl | undefined;

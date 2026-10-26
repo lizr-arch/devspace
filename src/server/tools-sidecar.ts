@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
+import { canonicalChatUrl, chatIdFromCanonical } from "../coach-multiroute.js";
 
 const workspaceIdSchema = z.string().min(1);
 const portSchema = z.number().int().min(1).max(65535);
@@ -166,7 +167,8 @@ export function registerSidecarTools(
       _meta: {},
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ action, workspaceId, routeId, origination, afterSeq, limit, legacyId, messageId }) => {
+    async (args, extra) => {
+      const { action, workspaceId, routeId, origination, afterSeq, limit, legacyId, messageId } = args;
       if (!managedCoachSidecar.routeSnapshot) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
       const snapshot = managedCoachSidecar.routeSnapshot();
       const requireRoute = () => {
@@ -177,13 +179,21 @@ export function registerSidecarTools(
         return route;
       };
       if (action === "snapshot") {
-        const routes = workspaceId ? snapshot.routes.filter((route) => route.workspaceId === workspaceId) : snapshot.routes;
-        const pendingReviews = (managedCoachSidecar.pendingReviewWakes?.() ?? []).filter((wake) => !workspaceId || wake.workspaceId === workspaceId);
-        const result = "Exact routes=" + routes.length + " legacy=" + snapshot.legacy.length + " pendingReviews=" + pendingReviews.length + ".";
-        return { content: [textBlock(result)], structuredContent: { result, snapshot: { ...snapshot, routes }, pendingReviews } };
+        // Host-verified principal, never the optional workspaceId argument.
+        const principal = await managedCoachSidecar.authorizeRouteAction("snapshot", extra);
+        const visible = managedCoachSidecar.visibleRoutesForPrincipal(principal, snapshot.routes);
+        const routes = workspaceId ? visible.filter((route) => route.workspaceId === workspaceId) : visible;
+        const visibleIds = new Set(routes.map((route) => route.routeId));
+        const pendingReviews = (managedCoachSidecar.pendingReviewWakes?.() ?? [])
+          .filter((wake) => visibleIds.has(wake.routeId))
+          .filter((wake) => !workspaceId || wake.workspaceId === workspaceId);
+        const legacy = principal.kind === "operator" ? snapshot.legacy : [];
+        const result = "Exact routes=" + routes.length + " legacy=" + legacy.length + " pendingReviews=" + pendingReviews.length + ".";
+        return { content: [textBlock(result)], structuredContent: { result, snapshot: { ...snapshot, routes, legacy }, pendingReviews } };
       }
       if (action === "inbox") {
         const route = requireRoute();
+        await managedCoachSidecar.authorizeRouteAction("inbox", extra, route);
         if (!managedCoachSidecar.listRouteMessages) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
         const messages = managedCoachSidecar.listRouteMessages({
           routeId: route.routeId,
@@ -194,6 +204,7 @@ export function registerSidecarTools(
         const result = "Route inbox messages=" + messages.length + ".";
         return { content: [textBlock(result)], structuredContent: { result, messages } };
       }
+      await managedCoachSidecar.authorizeRouteAction("classify_legacy", extra);
       if (!managedCoachSidecar.classifyLegacyMessage) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
       const classification = managedCoachSidecar.classifyLegacyMessage({
         ...(legacyId ? { legacyId } : {}),
@@ -220,8 +231,11 @@ export function registerSidecarTools(
       _meta:{},
       annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false},
     },
-    async ({workspaceId,nonce,url})=>{
+    async ({workspaceId,nonce,url}, extra)=>{
       workspaces.getWorkspace(workspaceId);
+      const canonical = canonicalChatUrl(url);
+      if (!canonical) throw new Error("ROUTE_INVALID_INPUT: url is not a canonical ChatGPT conversation");
+      await managedCoachSidecar.authorizeRouteClaim("claim_browser_route", extra, { workspaceId, chatId: chatIdFromCanonical(canonical) });
       if(!managedCoachSidecar.claimBrowserRoute)throw new Error("COACH_BIND_NOT_SUPPORTED");
       const claimed=managedCoachSidecar.claimBrowserRoute(workspaceId,nonce,url,(nextScope)=>{
         const saved=ctx.coachReviewEvents.coachFeedConfig();
@@ -261,8 +275,11 @@ export function registerSidecarTools(
       _meta: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ workspaceId, routeId, dshSessionId, nonce, url, replaceRouteId, expectedConsentRevision }) => {
+    async ({ workspaceId, routeId, dshSessionId, nonce, url, replaceRouteId, expectedConsentRevision }, extra) => {
       workspaces.getWorkspace(workspaceId);
+      const canonical = canonicalChatUrl(url);
+      if (!canonical) throw new Error("ROUTE_INVALID_INPUT: url is not a canonical ChatGPT conversation");
+      await managedCoachSidecar.authorizeRouteClaim("claim_browser_route_exact", extra, { workspaceId, chatId: chatIdFromCanonical(canonical) });
       if (!managedCoachSidecar.claimExactBrowserRoute) throw new Error("COACH_EXACT_ROUTE_BIND_NOT_SUPPORTED");
       const claimed = await managedCoachSidecar.claimExactBrowserRoute({
         workspaceId, routeId, dshSessionId, nonce, url,
@@ -333,6 +350,8 @@ export function registerSidecarTools(
         return route;
       };
       if (action === "revoke") {
+        const route = requireRoute();
+        await managedCoachSidecar.authorizeRouteAction("revoke", extra, route);
         if (!managedCoachSidecar.revokeBrowserRoute) throw new Error("COACH_ROUTE_REVOKE_NOT_SUPPORTED");
         const revoked = managedCoachSidecar.revokeBrowserRoute({
           routeId: routeId!, ...(args.expectedConsentRevision !== undefined ? { expectedConsentRevision: args.expectedConsentRevision } : {}),
@@ -342,6 +361,7 @@ export function registerSidecarTools(
         return { content: [textBlock(result)], structuredContent: { result, ...(revoked.route ? { route: revoked.route } : {}), ...(revoked.code ? { code: revoked.code } : {}) } };
       }
       if (action === "migrate_legacy") {
+        await managedCoachSidecar.authorizeRouteAction("migrate_legacy", extra);
         if (!managedCoachSidecar.migrateLegacyRoute) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
         if (!args.legacyId || !args.targetRouteId) throw new Error("ROUTE_INVALID_INPUT: legacyId and targetRouteId are required");
         const legacy = managedCoachSidecar.migrateLegacyRoute({
@@ -351,7 +371,14 @@ export function registerSidecarTools(
         const result = "Legacy route explicitly migrated; prior messages remain UNROUTABLE history.";
         return { content: [textBlock(result)], structuredContent: { result, legacy } };
       }
-      requireRoute();
+      const route = requireRoute();
+      const actionAuth: Record<string, "enqueue_wake" | "trusted_reply" | "reply" | "claim_delivery" | "ack" | "resolve"> = {
+        enqueue_wake: "enqueue_wake", trusted_reply: "trusted_reply", reply: "reply",
+        claim_delivery: "claim_delivery", ack: "ack", resolve: "resolve",
+      };
+      const authorizedAction = actionAuth[action];
+      if (!authorizedAction) throw new Error("ROUTE_INVALID_INPUT: unknown action");
+      await managedCoachSidecar.authorizeRouteAction(authorizedAction, extra, route);
       if (action === "enqueue_wake") {
         if (!managedCoachSidecar.enqueueRouteReviewWake) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
         if (!args.messageId || args.eventId === undefined || !args.operationId) throw new Error("ROUTE_INVALID_INPUT: messageId,eventId,operationId are required");

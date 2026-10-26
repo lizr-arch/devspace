@@ -228,6 +228,7 @@ export async function startCodexWorkerService(config:ServerConfig,deps:{inspectP
     nodePath:"/Users/liz/.local/bin/node",codexPath:"/Users/liz/.local/bin/codex",
     workerLease:{workerId,generation:lease.generation}});
   const coach=new ManagedCoachSidecar(undefined,events.path,observer);
+  coach.configureRouteAccess({mode:"enforced"});
   const coachRecovery:{error?:string}={};
   let closing=false,coachRecovering=false;
   const recoverPersistedCoach=async()=>{
@@ -379,6 +380,13 @@ export class CodexWorkerCoachClient implements ManagedCoachSidecarControl {
     return this.worker.coachDeliveryReceipt(workspaceId,eventId);
   }
   activeServiceIdsForRoot(root:string):string[]{return this.events.coachFeedWorkspaceIdsForRoot(root);}
+  // Route authorization must happen against the HOST-side Sidecar, not this
+  // remote worker proxy; fail closed rather than forward unverified principals.
+  configureRouteAccess():void{/* enforced by the owning host process, not this proxy */}
+  async authorizeRouteAction():Promise<never>{throw new Error("ROUTE_PRINCIPAL_UNAVAILABLE");}
+  async authorizeRouteClaim():Promise<never>{throw new Error("ROUTE_PRINCIPAL_UNAVAILABLE");}
+  visibleRoutesForPrincipal():[] { return []; }
+  principalCanSeeRoute():boolean { return false; }
   async close():Promise<void>{/* API lifecycle never stops the independent Worker or Coach Feed. */}
 }
 
