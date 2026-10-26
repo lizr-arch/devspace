@@ -207,7 +207,9 @@ export class RouteAccessController {
       if (!visibleIds.has(wake.routeId)) return false;
       return principal.kind === "operator"
         ? (globalOperator || wake.workspaceId === principal.workspaceId)
-        : wake.workspaceId === principal.workspaceId;
+        // A trusted host may provide only the exact chat id; only compare a
+        // workspace when the principal actually carries one (R3 review P2).
+        : (principal.workspaceId === undefined || wake.workspaceId === principal.workspaceId);
     });
     return {
       snapshot: {

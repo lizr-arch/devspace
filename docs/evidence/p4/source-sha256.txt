@@ -1,0 +1,4 @@
+f6cd08e9916ae8e9caeb47e479abb06b3e9463311d5fa3d68a506c6f1ef6c907  src/coach-routes/route-principal.ts
+856a2c2d37faf5ee60beccc1792eeabbd91894e8dec3eadf41d5304e8ae09fe4  src/coach-routes/route-principal.test.ts
+a6bef6aaca6a69daae8215a82a3fe61ec1f8958638ab17e1bc03f5ce5f05295a  docs/P4_HOST_IDENTITY_BRIDGE_INTEGRATION_REVIEW.md
+2cfdc1042816fc8fac4cd4b9907de184ff1c85ef6cbe6263db9e75ad017912fa  docs/evidence/p4/tests.log

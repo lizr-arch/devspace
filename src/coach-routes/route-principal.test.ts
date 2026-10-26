@@ -52,7 +52,8 @@ const ownerB: RoutePrincipal = { kind: "owner", chatId: chatB, workspaceId };
 const ownerC: RoutePrincipal = { kind: "owner", chatId: chatC, workspaceId: workspaceB };
 const operator: RoutePrincipal = { kind: "operator" };
 const operatorA: RoutePrincipal = { kind: "operator", workspaceId };
-const principals: Record<string, RoutePrincipal> = { A: ownerA, B: ownerB, C: ownerC, OP: operator, OPA: operatorA };
+const ownerANoWorkspace: RoutePrincipal = { kind: "owner", chatId: chatA };
+const principals: Record<string, RoutePrincipal> = { A: ownerA, B: ownerB, C: ownerC, OP: operator, OPA: operatorA, ANW: ownerANoWorkspace };
 
 const manager = new ManagedCoachSidecar();
 manager.configureRouteAccess({
@@ -163,6 +164,15 @@ try {
       routeId: proposedC.routeId, dshSessionId: sessionB, nonce: nonceC, url: urlC });
     assert.equal(missing.isError, true);
     assert.equal(store.route(proposedC.routeId), undefined);
+  });
+
+  await check("owner with chatId only still sees its own pendingReviews (no workspaceId P2 regression)", async () => {
+    const result = await call("coach_route_state", { action: "snapshot" }, "ANW");
+    assert.ok(!result.isError, JSON.stringify(result));
+    const snapshot = result.structuredContent?.snapshot ?? {};
+    assert.deepEqual((snapshot.routes ?? []).map((route: any) => route.routeId), [routeA.routeId]);
+    assert.deepEqual((result.structuredContent?.pendingReviews ?? []).map((wake: any) => wake.routeId), [routeA.routeId]);
+    assert.deepEqual(Object.keys(snapshot.queues ?? {}), [routeA.routeId]);
   });
 
   await check("owner C sees only route C: routes, queues, legacy and counters are projected", async () => {
