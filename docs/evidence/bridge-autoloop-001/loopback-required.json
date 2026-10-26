@@ -1,0 +1,7 @@
+{
+  "command": "node --import tsx src/coach-multiroute.integration.test.ts",
+  "exit_code": 1,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/loopback-required.txt",
+  "evidence_sha256": "b4797960890212ab0b954a34ebaffbc85b082fb6bdfc02b7816549478824376f",
+  "elapsed_seconds": 8.514
+}

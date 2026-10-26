@@ -1,0 +1,865 @@
+COMMAND: node --test src/coach-multiroute-extension.test.cjs src/coach-browser-extension.test.cjs src/coach-auto-delivery.test.cjs
+TAP version 13
+# Subtest: all delivery extension scripts are valid JavaScript
+ok 1 - all delivery extension scripts are valid JavaScript
+  ---
+  duration_ms: 36.941792
+  type: 'test'
+  ...
+# Subtest: disabled by default: no ChatGPT tab touched and exact URL required
+ok 2 - disabled by default: no ChatGPT tab touched and exact URL required
+  ---
+  duration_ms: 55.973458
+  type: 'test'
+  ...
+# Subtest: only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppression
+ok 3 - only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppression
+  ---
+  duration_ms: 195.419834
+  type: 'test'
+  ...
+# Subtest: progress and invalid reports never send; conflict reaches only its bound owner as revision feedback
+ok 4 - progress and invalid reports never send; conflict reaches only its bound owner as revision feedback
+  ---
+  duration_ms: 75.709625
+  type: 'test'
+  ...
+# Subtest: DOM-submitted receipt is identity-scoped, durable and never requires a second chat send
+ok 5 - DOM-submitted receipt is identity-scoped, durable and never requires a second chat send
+  ---
+  duration_ms: 45.135375
+  type: 'test'
+  ...
+# Subtest: manual send acknowledgement never fabricates an automatic DOM receipt
+ok 6 - manual send acknowledgement never fabricates an automatic DOM receipt
+  ---
+  duration_ms: 104.986
+  type: 'test'
+  ...
+# Subtest: reloaded extension reinjects script into already-open ChatGPT tab before sending
+ok 7 - reloaded extension reinjects script into already-open ChatGPT tab before sending
+  ---
+  duration_ms: 23.598584
+  type: 'test'
+  ...
+# Subtest: old content script replies but is rejected by v5 protocol and replaced safely
+ok 8 - old content script replies but is rejected by v5 protocol and replaced safely
+  ---
+  duration_ms: 131.201042
+  type: 'test'
+  ...
+# Subtest: script injection permission denial never sends and keeps event pending
+ok 9 - script injection permission denial never sends and keeps event pending
+  ---
+  duration_ms: 30.97075
+  type: 'test'
+  ...
+# Subtest: legacy unknown and scoped records coalesce without replaying uncertain delivery
+ok 10 - legacy unknown and scoped records coalesce without replaying uncertain delivery
+  ---
+  duration_ms: 23.8625
+  type: 'test'
+  ...
+# Subtest: opening extension popup reconciles scoped and unknown keys even when queue is blocked
+ok 11 - opening extension popup reconciles scoped and unknown keys even when queue is blocked
+  ---
+  duration_ms: 3.726917
+  type: 'test'
+  ...
+# Subtest: ambiguous workspace matches preserve original ledger identities on offline status
+ok 12 - ambiguous workspace matches preserve original ledger identities on offline status
+  ---
+  duration_ms: 2.963958
+  type: 'test'
+  ...
+# Subtest: manual Check reports blocker instead of generic success even with a working Sidecar
+ok 13 - manual Check reports blocker instead of generic success even with a working Sidecar
+  ---
+  duration_ms: 35.048916
+  type: 'test'
+  ...
+# Subtest: confirmed legacy sent state suppresses scoped duplicate send
+ok 14 - confirmed legacy sent state suppresses scoped duplicate send
+  ---
+  duration_ms: 26.236167
+  type: 'test'
+  ...
+# Subtest: legacy unknown outcome for a different task cannot stall unrelated workspaces
+ok 15 - legacy unknown outcome for a different task cannot stall unrelated workspaces
+  ---
+  duration_ms: 7.345958
+  type: 'test'
+  ...
+# Subtest: uncertain chat A submission cannot stall authorized independent chat B
+ok 16 - uncertain chat A submission cannot stall authorized independent chat B
+  ---
+  duration_ms: 21.649959
+  type: 'test'
+  ...
+# Subtest: incomplete Sidecar event page never silently delivers a truncated queue
+ok 17 - incomplete Sidecar event page never silently delivers a truncated queue
+  ---
+  duration_ms: 23.969666
+  type: 'test'
+  ...
+# Subtest: user may mark manually sent pending event without an automatic duplicate
+ok 18 - user may mark manually sent pending event without an automatic duplicate
+  ---
+  duration_ms: 26.70125
+  type: 'test'
+  ...
+# Subtest: pending manual mark never permits a retry without a failed send
+ok 19 - pending manual mark never permits a retry without a failed send
+  ---
+  duration_ms: 1.04425
+  type: 'test'
+  ...
+# Subtest: old Sidecar lacking workspace_id is rejected without routing
+ok 20 - old Sidecar lacking workspace_id is rejected without routing
+  ---
+  duration_ms: 28.823
+  type: 'test'
+  ...
+# Subtest: event for another workspace never reaches the explicitly bound chat
+ok 21 - event for another workspace never reaches the explicitly bound chat
+  ---
+  duration_ms: 20.005208
+  type: 'test'
+  ...
+# Subtest: two different workspaces cannot bind the same ChatGPT conversation
+ok 22 - two different workspaces cannot bind the same ChatGPT conversation
+  ---
+  duration_ms: 15.050541
+  type: 'test'
+  ...
+# Subtest: persisted duplicate workspace-to-conversation mapping refuses both sends
+ok 23 - persisted duplicate workspace-to-conversation mapping refuses both sends
+  ---
+  duration_ms: 19.916458
+  type: 'test'
+  ...
+# Subtest: explicit unbind blocks stale async route restoration until a fresh bind
+ok 24 - explicit unbind blocks stale async route restoration until a fresh bind
+  ---
+  duration_ms: 23.543375
+  type: 'test'
+  ...
+# Subtest: unidentified work stays pending while authorized workspace events still route exactly
+ok 25 - unidentified work stays pending while authorized workspace events still route exactly
+  ---
+  duration_ms: 23.655083
+  type: 'test'
+  ...
+# Subtest: when original tab is lost, two matching replacements fail closed
+ok 26 - when original tab is lost, two matching replacements fail closed
+  ---
+  duration_ms: 30.698583
+  type: 'test'
+  ...
+# Subtest: Sidecar restricts combined events to explicitly approved workspace IDs
+ok 27 - Sidecar restricts combined events to explicitly approved workspace IDs
+  ---
+  duration_ms: 0.448083
+  type: 'test'
+  ...
+# Subtest: navigation to different conversation stops delivery without opening tabs
+ok 28 - navigation to different conversation stops delivery without opening tabs
+  ---
+  duration_ms: 1.124666
+  type: 'test'
+  ...
+# Subtest: unknown DOM outcome becomes needs_attention and is never blindly replayed
+ok 29 - unknown DOM outcome becomes needs_attention and is never blindly replayed
+  ---
+  duration_ms: 14.075417
+  type: 'test'
+  ...
+# Subtest: confirmed no-input preflight failure remains pending without blocking later retry
+ok 30 - confirmed no-input preflight failure remains pending without blocking later retry
+  ---
+  duration_ms: 6.247875
+  type: 'test'
+  ...
+# Subtest: worker recovery preserves in-flight ambiguity and blocks duplicate delivery
+ok 31 - worker recovery preserves in-flight ambiguity and blocks duplicate delivery
+  ---
+  duration_ms: 14.683125
+  type: 'test'
+  ...
+# Subtest: leaving the bound conversation explicitly pauses, returning does not auto-resume
+ok 32 - leaving the bound conversation explicitly pauses, returning does not auto-resume
+  ---
+  duration_ms: 27.43725
+  type: 'test'
+  ...
+# Subtest: only explicit unpair removes persistent route consent
+ok 33 - only explicit unpair removes persistent route consent
+  ---
+  duration_ms: 1.353708
+  type: 'test'
+  ...
+# Subtest: unpairing sidecar removes ability to send new events
+ok 34 - unpairing sidecar removes ability to send new events
+  ---
+  duration_ms: 14.402166
+  type: 'test'
+  ...
+# Subtest: content-script ping is read-only and reinjection never duplicates listeners
+ok 35 - content-script ping is read-only and reinjection never duplicates listeners
+  ---
+  duration_ms: 2.075792
+  type: 'test'
+  ...
+# Subtest: new v5 content-script registration coexists with old v4 listener without duplicate send
+ok 36 - new v5 content-script registration coexists with old v4 listener without duplicate send
+  ---
+  duration_ms: 12.545709
+  type: 'test'
+  ...
+# Subtest: ProseMirror paragraph line breaks do not reject intact multiline review instructions
+ok 37 - ProseMirror paragraph line breaks do not reject intact multiline review instructions
+  ---
+  duration_ms: 3.319416
+  type: 'test'
+  ...
+# Subtest: framework rendering delay is awaited before checking input equality
+ok 38 - framework rendering delay is awaited before checking input equality
+  ---
+  duration_ms: 2.462875
+  type: 'test'
+  ...
+# Subtest: corrupted instruction remains a retained draft; auto-send never clicks
+ok 39 - corrupted instruction remains a retained draft; auto-send never clicks
+  ---
+  duration_ms: 6.971708
+  type: 'test'
+  ...
+# Subtest: auto-click waits for delayed ChatGPT send control and clicks only once
+ok 40 - auto-click waits for delayed ChatGPT send control and clicks only once
+  ---
+  duration_ms: 1.609334
+  type: 'test'
+  ...
+# Subtest: auto-click accepts a unique submit button only in the same composer form
+ok 41 - auto-click accepts a unique submit button only in the same composer form
+  ---
+  duration_ms: 1.436625
+  type: 'test'
+  ...
+# Subtest: unavailable or disabled send button never clicks and preserves the draft
+ok 42 - unavailable or disabled send button never clicks and preserves the draft
+  ---
+  duration_ms: 17.724958
+  type: 'test'
+  ...
+# Subtest: no auto-click when the user already owns a draft
+ok 43 - no auto-click when the user already owns a draft
+  ---
+  duration_ms: 6.037833
+  type: 'test'
+  ...
+# Subtest: missing composer reports conclusively no submission
+ok 44 - missing composer reports conclusively no submission
+  ---
+  duration_ms: 29.401958
+  type: 'test'
+  ...
+# Subtest: labelled modern ChatGPT composer works, with Chinese locale and deduped selectors
+ok 45 - labelled modern ChatGPT composer works, with Chinese locale and deduped selectors
+  ---
+  duration_ms: 6.973708
+  type: 'test'
+  ...
+# Subtest: competing or non-editable composers fail closed without typing
+ok 46 - competing or non-editable composers fail closed without typing
+  ---
+  duration_ms: 11.605666
+  type: 'test'
+  ...
+# Subtest: short stop-generation control blocks delivery before typing
+ok 47 - short stop-generation control blocks delivery before typing
+  ---
+  duration_ms: 0.690291
+  type: 'test'
+  ...
+# Subtest: content script rejects unrelated tab, existing draft, busy UI and missing controls
+ok 48 - content script rejects unrelated tab, existing draft, busy UI and missing controls
+  ---
+  duration_ms: 11.227042
+  type: 'test'
+  ...
+# Subtest: event to content-script DOM submission: simulated extension end-to-end
+ok 49 - event to content-script DOM submission: simulated extension end-to-end
+  ---
+  duration_ms: 47.612834
+  type: 'test'
+  ...
+# Subtest: Chrome restart retains explicit workspace route consent
+ok 50 - Chrome restart retains explicit workspace route consent
+  ---
+  duration_ms: 18.28875
+  type: 'test'
+  ...
+# Subtest: closed chat preserves enabled workspace route and poll rebinds one recreated exact tab
+ok 51 - closed chat preserves enabled workspace route and poll rebinds one recreated exact tab
+  ---
+  duration_ms: 69.914916
+  type: 'test'
+  ...
+# Subtest: one-click binding content script is isolated and never accepts an audit notification
+ok 52 - one-click binding content script is isolated and never accepts an audit notification
+  ---
+  duration_ms: 15.335417
+  type: 'test'
+  ...
+# Subtest: one click requests an MCP challenge, then exact claimed workspace is enabled without a second click
+ok 53 - one click requests an MCP challenge, then exact claimed workspace is enabled without a second click
+  ---
+  duration_ms: 19.75175
+  type: 'test'
+  ...
+# Subtest: three one-click binding requests coexist and finish independently
+ok 54 - three one-click binding requests coexist and finish independently
+  ---
+  duration_ms: 25.617166
+  type: 'test'
+  ...
+# Subtest: cancelled one-click challenge cannot later resurrect a route
+ok 55 - cancelled one-click challenge cannot later resurrect a route
+  ---
+  duration_ms: 27.108583
+  type: 'test'
+  ...
+# Subtest: cancel one pending tab without disturbing two other concurrent first-click bindings
+ok 56 - cancel one pending tab without disturbing two other concurrent first-click bindings
+  ---
+  duration_ms: 16.516583
+  type: 'test'
+  ...
+# Subtest: duplicate ChatGPT tabs preserve explicitly selected original tab instead of losing authorization
+ok 57 - duplicate ChatGPT tabs preserve explicitly selected original tab instead of losing authorization
+  ---
+  duration_ms: 27.800042
+  type: 'test'
+  ...
+# Subtest: three independent background ChatGPT tabs route only their own workspace events
+ok 58 - three independent background ChatGPT tabs route only their own workspace events
+  ---
+  duration_ms: 13.233917
+  type: 'test'
+  ...
+# Subtest: content script only confirms composer DOM submission, not completed AI review
+ok 59 - content script only confirms composer DOM submission, not completed AI review
+  ---
+  duration_ms: 7.426709
+  type: 'test'
+  ...
+# Subtest: all delivery extension scripts are valid JavaScript
+ok 60 - all delivery extension scripts are valid JavaScript
+  ---
+  duration_ms: 6.179875
+  type: 'test'
+  ...
+# Subtest: disabled by default: no ChatGPT tab touched and exact URL required
+ok 61 - disabled by default: no ChatGPT tab touched and exact URL required
+  ---
+  duration_ms: 23.153375
+  type: 'test'
+  ...
+# Subtest: only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppression
+ok 62 - only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppression
+  ---
+  duration_ms: 113.107834
+  type: 'test'
+  ...
+# Subtest: progress and invalid reports never send; conflict reaches only its bound owner as revision feedback
+ok 63 - progress and invalid reports never send; conflict reaches only its bound owner as revision feedback
+  ---
+  duration_ms: 119.370375
+  type: 'test'
+  ...
+# Subtest: DOM-submitted receipt is identity-scoped, durable and never requires a second chat send
+ok 64 - DOM-submitted receipt is identity-scoped, durable and never requires a second chat send
+  ---
+  duration_ms: 30.553375
+  type: 'test'
+  ...
+# Subtest: manual send acknowledgement never fabricates an automatic DOM receipt
+ok 65 - manual send acknowledgement never fabricates an automatic DOM receipt
+  ---
+  duration_ms: 127.764458
+  type: 'test'
+  ...
+# Subtest: reloaded extension reinjects script into already-open ChatGPT tab before sending
+ok 66 - reloaded extension reinjects script into already-open ChatGPT tab before sending
+  ---
+  duration_ms: 47.200209
+  type: 'test'
+  ...
+# Subtest: old content script replies but is rejected by v5 protocol and replaced safely
+ok 67 - old content script replies but is rejected by v5 protocol and replaced safely
+  ---
+  duration_ms: 18.092458
+  type: 'test'
+  ...
+# Subtest: script injection permission denial never sends and keeps event pending
+ok 68 - script injection permission denial never sends and keeps event pending
+  ---
+  duration_ms: 126.641917
+  type: 'test'
+  ...
+# Subtest: legacy unknown and scoped records coalesce without replaying uncertain delivery
+ok 69 - legacy unknown and scoped records coalesce without replaying uncertain delivery
+  ---
+  duration_ms: 123.670833
+  type: 'test'
+  ...
+# Subtest: opening extension popup reconciles scoped and unknown keys even when queue is blocked
+ok 70 - opening extension popup reconciles scoped and unknown keys even when queue is blocked
+  ---
+  duration_ms: 1.230333
+  type: 'test'
+  ...
+# Subtest: ambiguous workspace matches preserve original ledger identities on offline status
+ok 71 - ambiguous workspace matches preserve original ledger identities on offline status
+  ---
+  duration_ms: 1.430166
+  type: 'test'
+  ...
+# Subtest: manual Check reports blocker instead of generic success even with a working Sidecar
+ok 72 - manual Check reports blocker instead of generic success even with a working Sidecar
+  ---
+  duration_ms: 12.620292
+  type: 'test'
+  ...
+# Subtest: confirmed legacy sent state suppresses scoped duplicate send
+ok 73 - confirmed legacy sent state suppresses scoped duplicate send
+  ---
+  duration_ms: 19.95525
+  type: 'test'
+  ...
+# Subtest: legacy unknown outcome for a different task cannot stall unrelated workspaces
+ok 74 - legacy unknown outcome for a different task cannot stall unrelated workspaces
+  ---
+  duration_ms: 26.19525
+  type: 'test'
+  ...
+# Subtest: uncertain chat A submission cannot stall authorized independent chat B
+ok 75 - uncertain chat A submission cannot stall authorized independent chat B
+  ---
+  duration_ms: 9.875584
+  type: 'test'
+  ...
+# Subtest: incomplete Sidecar event page never silently delivers a truncated queue
+ok 76 - incomplete Sidecar event page never silently delivers a truncated queue
+  ---
+  duration_ms: 26.557334
+  type: 'test'
+  ...
+# Subtest: user may mark manually sent pending event without an automatic duplicate
+ok 77 - user may mark manually sent pending event without an automatic duplicate
+  ---
+  duration_ms: 26.030584
+  type: 'test'
+  ...
+# Subtest: pending manual mark never permits a retry without a failed send
+ok 78 - pending manual mark never permits a retry without a failed send
+  ---
+  duration_ms: 4.042
+  type: 'test'
+  ...
+# Subtest: old Sidecar lacking workspace_id is rejected without routing
+ok 79 - old Sidecar lacking workspace_id is rejected without routing
+  ---
+  duration_ms: 32.297375
+  type: 'test'
+  ...
+# Subtest: event for another workspace never reaches the explicitly bound chat
+ok 80 - event for another workspace never reaches the explicitly bound chat
+  ---
+  duration_ms: 29.9705
+  type: 'test'
+  ...
+# Subtest: two different workspaces cannot bind the same ChatGPT conversation
+ok 81 - two different workspaces cannot bind the same ChatGPT conversation
+  ---
+  duration_ms: 25.746875
+  type: 'test'
+  ...
+# Subtest: persisted duplicate workspace-to-conversation mapping refuses both sends
+ok 82 - persisted duplicate workspace-to-conversation mapping refuses both sends
+  ---
+  duration_ms: 14.770084
+  type: 'test'
+  ...
+# Subtest: explicit unbind blocks stale async route restoration until a fresh bind
+ok 83 - explicit unbind blocks stale async route restoration until a fresh bind
+  ---
+  duration_ms: 7.349583
+  type: 'test'
+  ...
+# Subtest: unidentified work stays pending while authorized workspace events still route exactly
+ok 84 - unidentified work stays pending while authorized workspace events still route exactly
+  ---
+  duration_ms: 11.649458
+  type: 'test'
+  ...
+# Subtest: when original tab is lost, two matching replacements fail closed
+ok 85 - when original tab is lost, two matching replacements fail closed
+  ---
+  duration_ms: 11.803792
+  type: 'test'
+  ...
+# Subtest: Sidecar restricts combined events to explicitly approved workspace IDs
+ok 86 - Sidecar restricts combined events to explicitly approved workspace IDs
+  ---
+  duration_ms: 1.186666
+  type: 'test'
+  ...
+# Subtest: navigation to different conversation stops delivery without opening tabs
+ok 87 - navigation to different conversation stops delivery without opening tabs
+  ---
+  duration_ms: 1.83275
+  type: 'test'
+  ...
+# Subtest: unknown DOM outcome becomes needs_attention and is never blindly replayed
+ok 88 - unknown DOM outcome becomes needs_attention and is never blindly replayed
+  ---
+  duration_ms: 14.609
+  type: 'test'
+  ...
+# Subtest: confirmed no-input preflight failure remains pending without blocking later retry
+ok 89 - confirmed no-input preflight failure remains pending without blocking later retry
+  ---
+  duration_ms: 17.93575
+  type: 'test'
+  ...
+# Subtest: worker recovery preserves in-flight ambiguity and blocks duplicate delivery
+ok 90 - worker recovery preserves in-flight ambiguity and blocks duplicate delivery
+  ---
+  duration_ms: 8.506458
+  type: 'test'
+  ...
+# Subtest: leaving the bound conversation explicitly pauses, returning does not auto-resume
+ok 91 - leaving the bound conversation explicitly pauses, returning does not auto-resume
+  ---
+  duration_ms: 66.878292
+  type: 'test'
+  ...
+# Subtest: only explicit unpair removes persistent route consent
+ok 92 - only explicit unpair removes persistent route consent
+  ---
+  duration_ms: 2.342333
+  type: 'test'
+  ...
+# Subtest: unpairing sidecar removes ability to send new events
+ok 93 - unpairing sidecar removes ability to send new events
+  ---
+  duration_ms: 36.147584
+  type: 'test'
+  ...
+# Subtest: content-script ping is read-only and reinjection never duplicates listeners
+ok 94 - content-script ping is read-only and reinjection never duplicates listeners
+  ---
+  duration_ms: 5.656083
+  type: 'test'
+  ...
+# Subtest: new v5 content-script registration coexists with old v4 listener without duplicate send
+ok 95 - new v5 content-script registration coexists with old v4 listener without duplicate send
+  ---
+  duration_ms: 13.534584
+  type: 'test'
+  ...
+# Subtest: ProseMirror paragraph line breaks do not reject intact multiline review instructions
+ok 96 - ProseMirror paragraph line breaks do not reject intact multiline review instructions
+  ---
+  duration_ms: 0.912792
+  type: 'test'
+  ...
+# Subtest: framework rendering delay is awaited before checking input equality
+ok 97 - framework rendering delay is awaited before checking input equality
+  ---
+  duration_ms: 8.426125
+  type: 'test'
+  ...
+# Subtest: corrupted instruction remains a retained draft; auto-send never clicks
+ok 98 - corrupted instruction remains a retained draft; auto-send never clicks
+  ---
+  duration_ms: 1.660542
+  type: 'test'
+  ...
+# Subtest: auto-click waits for delayed ChatGPT send control and clicks only once
+ok 99 - auto-click waits for delayed ChatGPT send control and clicks only once
+  ---
+  duration_ms: 2.7525
+  type: 'test'
+  ...
+# Subtest: auto-click accepts a unique submit button only in the same composer form
+ok 100 - auto-click accepts a unique submit button only in the same composer form
+  ---
+  duration_ms: 1.125792
+  type: 'test'
+  ...
+# Subtest: unavailable or disabled send button never clicks and preserves the draft
+ok 101 - unavailable or disabled send button never clicks and preserves the draft
+  ---
+  duration_ms: 21.015084
+  type: 'test'
+  ...
+# Subtest: no auto-click when the user already owns a draft
+ok 102 - no auto-click when the user already owns a draft
+  ---
+  duration_ms: 14.5855
+  type: 'test'
+  ...
+# Subtest: missing composer reports conclusively no submission
+ok 103 - missing composer reports conclusively no submission
+  ---
+  duration_ms: 1.687333
+  type: 'test'
+  ...
+# Subtest: labelled modern ChatGPT composer works, with Chinese locale and deduped selectors
+ok 104 - labelled modern ChatGPT composer works, with Chinese locale and deduped selectors
+  ---
+  duration_ms: 25.302583
+  type: 'test'
+  ...
+# Subtest: competing or non-editable composers fail closed without typing
+ok 105 - competing or non-editable composers fail closed without typing
+  ---
+  duration_ms: 1.9015
+  type: 'test'
+  ...
+# Subtest: short stop-generation control blocks delivery before typing
+ok 106 - short stop-generation control blocks delivery before typing
+  ---
+  duration_ms: 14.216417
+  type: 'test'
+  ...
+# Subtest: content script rejects unrelated tab, existing draft, busy UI and missing controls
+ok 107 - content script rejects unrelated tab, existing draft, busy UI and missing controls
+  ---
+  duration_ms: 13.884125
+  type: 'test'
+  ...
+# Subtest: event to content-script DOM submission: simulated extension end-to-end
+ok 108 - event to content-script DOM submission: simulated extension end-to-end
+  ---
+  duration_ms: 42.508166
+  type: 'test'
+  ...
+# Subtest: Chrome restart retains explicit workspace route consent
+ok 109 - Chrome restart retains explicit workspace route consent
+  ---
+  duration_ms: 19.389583
+  type: 'test'
+  ...
+# Subtest: closed chat preserves enabled workspace route and poll rebinds one recreated exact tab
+ok 110 - closed chat preserves enabled workspace route and poll rebinds one recreated exact tab
+  ---
+  duration_ms: 41.014625
+  type: 'test'
+  ...
+# Subtest: one-click binding content script is isolated and never accepts an audit notification
+ok 111 - one-click binding content script is isolated and never accepts an audit notification
+  ---
+  duration_ms: 8.390458
+  type: 'test'
+  ...
+# Subtest: one click requests an MCP challenge, then exact claimed workspace is enabled without a second click
+ok 112 - one click requests an MCP challenge, then exact claimed workspace is enabled without a second click
+  ---
+  duration_ms: 16.812625
+  type: 'test'
+  ...
+# Subtest: three one-click binding requests coexist and finish independently
+ok 113 - three one-click binding requests coexist and finish independently
+  ---
+  duration_ms: 11.284084
+  type: 'test'
+  ...
+# Subtest: cancelled one-click challenge cannot later resurrect a route
+ok 114 - cancelled one-click challenge cannot later resurrect a route
+  ---
+  duration_ms: 2.616125
+  type: 'test'
+  ...
+# Subtest: cancel one pending tab without disturbing two other concurrent first-click bindings
+ok 115 - cancel one pending tab without disturbing two other concurrent first-click bindings
+  ---
+  duration_ms: 7.421792
+  type: 'test'
+  ...
+# Subtest: duplicate ChatGPT tabs preserve explicitly selected original tab instead of losing authorization
+ok 116 - duplicate ChatGPT tabs preserve explicitly selected original tab instead of losing authorization
+  ---
+  duration_ms: 19.237583
+  type: 'test'
+  ...
+# Subtest: three independent background ChatGPT tabs route only their own workspace events
+ok 117 - three independent background ChatGPT tabs route only their own workspace events
+  ---
+  duration_ms: 18.613083
+  type: 'test'
+  ...
+# Subtest: content script only confirms composer DOM submission, not completed AI review
+ok 118 - content script only confirms composer DOM submission, not completed AI review
+  ---
+  duration_ms: 10.290167
+  type: 'test'
+  ...
+# Subtest: manifest narrow localhost plus opt-in ChatGPT content script
+ok 119 - manifest narrow localhost plus opt-in ChatGPT content script
+  ---
+  duration_ms: 0.411958
+  type: 'test'
+  ...
+# Subtest: no token means no fetch and explicit pairing required
+ok 120 - no token means no fetch and explicit pairing required
+  ---
+  duration_ms: 2.318958
+  type: 'test'
+  ...
+# Subtest: bad token rejected without persisting or fetching
+ok 121 - bad token rejected without persisting or fetching
+  ---
+  duration_ms: 6.979542
+  type: 'test'
+  ...
+# Subtest: unavailable native host fails closed and leaves manual pairing available
+ok 122 - unavailable native host fails closed and leaves manual pairing available
+  ---
+  duration_ms: 2.0805
+  type: 'test'
+  ...
+# Subtest: first explicit native pairing consents to token-free startup recovery and rotation
+ok 123 - first explicit native pairing consents to token-free startup recovery and rotation
+  ---
+  duration_ms: 120.006125
+  type: 'test'
+  ...
+# Subtest: simultaneous native pairing requests share one host request
+ok 124 - simultaneous native pairing requests share one host request
+  ---
+  duration_ms: 19.026209
+  type: 'test'
+  ...
+# Subtest: unpair cancels a native request already in progress
+ok 125 - unpair cancels a native request already in progress
+  ---
+  duration_ms: 79.803084
+  type: 'test'
+  ...
+# Subtest: native host validates exact extension identity and reads only owner-only handoff
+ok 126 - native host validates exact extension identity and reads only owner-only handoff
+  ---
+  duration_ms: 1255.921959
+  type: 'test'
+  ...
+# Subtest: native host installer defaults to config stateDir and honors explicit custom path
+ok 127 - native host installer defaults to config stateDir and honors explicit custom path
+  ---
+  duration_ms: 76.583625
+  type: 'test'
+  ...
+# Subtest: native host installation uses stable owner-only files, rejects preexisting symlinks
+ok 128 - native host installation uses stable owner-only files, rejects preexisting symlinks
+  ---
+  duration_ms: 297.470708
+  type: 'test'
+  ...
+# Subtest: unpair clears native pairing consent, saved workspace routes, and session bearer
+ok 129 - unpair clears native pairing consent, saved workspace routes, and session bearer
+  ---
+  duration_ms: 25.403792
+  type: 'test'
+  ...
+# Subtest: HTTP authorization failure rejected without storing token
+ok 130 - HTTP authorization failure rejected without storing token
+  ---
+  duration_ms: 16.21575
+  type: 'test'
+  ...
+# Subtest: explicit pair, scoped localhost requests, UI status hides token
+ok 131 - explicit pair, scoped localhost requests, UI status hides token
+  ---
+  duration_ms: 2.46375
+  type: 'test'
+  ...
+# Subtest: all delivery and gate scripts are valid JavaScript and the gate is a classic script
+ok 132 - all delivery and gate scripts are valid JavaScript and the gate is a classic script
+  ---
+  duration_ms: 76.046667
+  type: 'test'
+  ...
+# Subtest: the manifest stays a valid MV3 manifest and does not auto-inject the gate
+ok 133 - the manifest stays a valid MV3 manifest and does not auto-inject the gate
+  ---
+  duration_ms: 10.4545
+  type: 'test'
+  ...
+# Subtest: worker.js loads the gate before the auto-worker, keeping the legacy key
+ok 134 - worker.js loads the gate before the auto-worker, keeping the legacy key
+  ---
+  duration_ms: 11.562459
+  type: 'test'
+  ...
+# Subtest: exact route identity is validated strictly and legacy records are UNROUTABLE
+ok 135 - exact route identity is validated strictly and legacy records are UNROUTABLE
+  ---
+  duration_ms: 2.014125
+  type: 'test'
+  ...
+# Subtest: a wake must be the frozen identity tuple; an email body or command is rejected
+ok 136 - a wake must be the frozen identity tuple; an email body or command is rejected
+  ---
+  duration_ms: 14.137458
+  type: 'test'
+  ...
+# Subtest: decideDelivery submits exactly once under a bound tab and trusted wake
+ok 137 - decideDelivery submits exactly once under a bound tab and trusted wake
+  ---
+  duration_ms: 4.134458
+  type: 'test'
+  ...
+# Subtest: settled or uncertain messages are never resubmitted blindly
+ok 138 - settled or uncertain messages are never resubmitted blindly
+  ---
+  duration_ms: 0.483584
+  type: 'test'
+  ...
+# Subtest: outcomes: DOM submission stays unverified and user obstacles need attention
+ok 139 - outcomes: DOM submission stays unverified and user obstacles need attention
+  ---
+  duration_ms: 12.707416
+  type: 'test'
+  ...
+# Subtest: review completion requires the tracked GPT reply, never a DOM receipt
+ok 140 - review completion requires the tracked GPT reply, never a DOM receipt
+  ---
+  duration_ms: 6.021584
+  type: 'test'
+  ...
+# Subtest: contentSha256 binds the rebuilt wake instruction (fixes wrong-SHA transport)
+ok 141 - contentSha256 binds the rebuilt wake instruction (fixes wrong-SHA transport)
+  ---
+  duration_ms: 102.419625
+  type: 'test'
+  ...
+# Subtest: canonical chat identity matches the Sidecar core contract
+ok 142 - canonical chat identity matches the Sidecar core contract
+  ---
+  duration_ms: 0.982334
+  type: 'test'
+  ...
+1..142
+# tests 142
+# suites 0
+# pass 142
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4018.8275
+
+OUTER_EXIT_CODE: 0

@@ -1,0 +1,25 @@
+{
+  "workspace": "/Users/liz/.devspace/worktrees/devspace-a8f30657",
+  "branch": "devspace/integration/devspace-devspace-a8f30657",
+  "head": "cd9b1d6471919c5fda8b6ff0dacecf2862aaa2ac",
+  "git_dir": "/Users/liz/Documents/Codex/2026-07-21/wo-de/work/devspace/.git/worktrees/devspace-a8f30657",
+  "commit_created": false,
+  "commit_blocker": "git add exit 128; index.lock outside writable roots",
+  "task_sha256": "fc3d8ede8e2151598ae04bd0317d3c1eef47b6a6e5273b22a3e0e03fa6b955ac",
+  "source_lines": {
+    "coach-browser-extension/auto-worker.js": 856,
+    "coach-browser-extension/multiroute-gate.js": 285,
+    "package.json": 91,
+    "src/coach-multiroute.ts": 214,
+    "src/coach-multiroute.test.ts": 1001,
+    "src/managed-coach-sidecar.ts": 846,
+    "src/server/tools-sidecar.ts": 449,
+    "src/coach-routes/bridge-hostile.test.ts": 314,
+    "src/coach-routes/bridge-wiring.test.ts": 125,
+    "src/coach-routes/delivery.ts": 198,
+    "src/coach-routes/durable-queue.ts": 526,
+    "src/coach-routes/protocol.ts": 326,
+    "src/coach-routes/registry.ts": 433,
+    "docs/BRIDGE_WEBGPT_DSH_AUTONOMOUS_LOOP_001_REPORT.md": 203
+  }
+}

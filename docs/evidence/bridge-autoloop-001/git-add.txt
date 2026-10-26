@@ -1,0 +1,4 @@
+COMMAND: git add -- src/coach-multiroute.ts src/coach-multiroute.test.ts src/coach-routes src/managed-coach-sidecar.ts src/server/tools-sidecar.ts coach-browser-extension/auto-worker.js coach-browser-extension/multiroute-gate.js package.json docs/BRIDGE_WEBGPT_DSH_AUTONOMOUS_LOOP_001_REPORT.md docs/evidence/bridge-autoloop-001
+fatal: Unable to create '/Users/liz/Documents/Codex/2026-07-21/wo-de/work/devspace/.git/worktrees/devspace-a8f30657/index.lock': Operation not permitted
+
+OUTER_EXIT_CODE: 128

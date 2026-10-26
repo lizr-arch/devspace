@@ -1,0 +1,10 @@
+COMMAND: node --import tsx src/coach-routes/bridge-wiring.test.ts
+PASS trusted receipt enters actual Sidecar routeStore; forged legacy reply cannot close DSH event
+PASS HTTP handler validates host/origin/bearer; next flattens event identity without source body
+PASS live authorization revocation blocks actual Sidecar /next
+PASS real MCP invocation rejects unverified principal even if body claims trusted WebGPT
+PASS real MCP trusted_reply passes host invocation metadata and dispatches exact session
+PASS no configured transport is explicitly BLOCKED_REAL_E2E, never implicit permission
+OFFLINE in-memory wiring: 6 passed; HTTP SOCKET/REAL E2E NOT RUN
+
+OUTER_EXIT_CODE: 0

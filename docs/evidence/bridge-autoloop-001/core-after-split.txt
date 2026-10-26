@@ -1,0 +1,39 @@
+COMMAND: node --import tsx src/coach-multiroute.test.ts
+PASS routeId is a random 256-bit value, unguessable and not derived from any identity
+PASS canonicalChatUrl accepts exactly one canonical ChatGPT conversation form
+PASS the review-wake template is byte-identical in core and Chrome gate
+PASS challenge and exact claim reject every wrong or unauthorized identity
+PASS A-02 same workspace: two sessions/two chats run in parallel and never cross
+PASS A-02 three workspaces: three exact routes run simultaneously in both directions
+PASS bidirectional traffic interleaves; duplicate enqueue is idempotent; payload conflicts fail closed
+PASS dom_submitted alone never counts as a completed review; only a tracked GPT reply does
+PASS explicit revoke stops the route; explicit rebind increments consentRevision and fences stale work
+PASS rebind is fenced by chat, workspace and stale consent revision
+PASS wrong tab and navigated conversation are hard mismatches, never silent rebinds
+PASS restart recovers per-route queue, sequence, cursor and ACK idempotently
+PASS a torn half block is never read as a message and is repaired without replay
+PASS checksum corruption and non-tail corruption fail closed instead of guessing
+PASS corrupt registry and cursor fail closed
+PASS disconnect after claim: lease expiry re-claims the same message once, then ACK settles it
+PASS timeout/draft/busy/navigation/uncertain outcomes require explicit operator resolution
+PASS an operator can explicitly settle an ambiguous delivery as manual_sent
+PASS definite not_submitted returns to the queue; manual resolution can settle as manual_sent
+PASS ACK is idempotent per identity and fails closed on any conflicting ack
+PASS legacy workspace-only routes stay visible, remain UNROUTABLE and migrate only explicitly
+PASS queue/proposal/route limits fail closed without partial state
+PASS route count limit and unsafe state directory are rejected
+FAIL a non-writable state directory surfaces an explicit error and keeps prior state :: DEVSPACE_INSTANCE_ALREADY_RUNNING
+PASS durable files and audit logs never contain authentication material
+PASS secret helpers reject or redact credential material
+PASS snapshot exposes identities and queue counters without secrets
+
+COACH_MULTIROUTE_CORE_RESULT passed=26 failed=1
+FAILED: a non-writable state directory surfaces an explicit error and keeps prior state :: Error: DEVSPACE_INSTANCE_ALREADY_RUNNING
+    at new DevSpaceInstanceLock (/Users/liz/.devspace/worktrees/devspace-a8f30657/src/devspace-instance-lock.ts:41:15)
+    at new MultiRouteStore (/Users/liz/.devspace/worktrees/devspace-a8f30657/src/coach-multiroute.ts:19:23)
+    at openStore (/Users/liz/.devspace/worktrees/devspace-a8f30657/src/coach-multiroute.test.ts:79:10)
+    at <anonymous> (/Users/liz/.devspace/worktrees/devspace-a8f30657/src/coach-multiroute.test.ts:889:23)
+    at check (/Users/liz/.devspace/worktrees/devspace-a8f30657/src/coach-multiroute.test.ts:56:11)
+    at <anonymous> (/Users/liz/.devspace/worktrees/devspace-a8f30657/src/coach-multiroute.test.ts:868:7)
+
+OUTER_EXIT_CODE: 1

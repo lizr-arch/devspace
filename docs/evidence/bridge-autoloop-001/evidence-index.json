@@ -1,0 +1,216 @@
+{
+  "schema": "BRIDGE_OFFLINE_EVIDENCE_INDEX_V1",
+  "task_id": "BRIDGE-WEBGPT-DSH-AUTONOMOUS-LOOP-001",
+  "operation_id": "bridge-autoloop-001-p0p1-implementation",
+  "source_head": "cd9b1d6471919c5fda8b6ff0dacecf2862aaa2ac",
+  "commit_created": false,
+  "real_e2e": "BLOCKED_REAL_E2E; not executed",
+  "test_claims_independently_verified": false,
+  "artifacts": [
+    {
+      "path": "docs/BRIDGE_WEBGPT_DSH_AUTONOMOUS_LOOP_001_REPORT.md",
+      "sha256": "4ca04612691dcb988984ac7a1da4bb4b56c4170814216d877b5365de3b265234",
+      "bytes": 16108
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/artifact-verification.txt",
+      "sha256": "2298c50f25ebd0eea286ebcbae6a460b6a0d556920cee99e6bee1769c2beda52",
+      "bytes": 245
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/baseline-rerun.json",
+      "sha256": "ed511fc9cc665a859dc614febea9b8cd876dcf36e5335114ae9351809480f4d6",
+      "bytes": 259
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/baseline-rerun.txt",
+      "sha256": "4374be320b6cea7086cf321fa12d7f3484966905287b204577f7d6faa66a2590",
+      "bytes": 1076
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/bridge-final.json",
+      "sha256": "48dbf0e392054d123d849d7e07760e15949a0923570ddcb82bfef7ed77133728",
+      "bytes": 254
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/bridge-final.txt",
+      "sha256": "567398ff5dfb9ab0b975a919daf033f364be136415e31ee10d477fc89961b432",
+      "bytes": 2179
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/bridge-verified.json",
+      "sha256": "7b2a25c0b0c7140190a9b1d239b76ac8d3e83cdd595058ac1dd3b6f815305378",
+      "bytes": 257
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/bridge-verified.sources.json",
+      "sha256": "167338addd8cbfcf2ba0911c59c69db85c25d57275511ad71deb61ce4b13ad4e",
+      "bytes": 1357
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/bridge-verified.txt",
+      "sha256": "abe7b2cfbca97b6b2abe3c651282d5743b6750fa48cc5bb7f6d293eac702fe4c",
+      "bytes": 2281
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/chrome-regressions.json",
+      "sha256": "03a0284f62b1cb4c31860aa54eaabe5807c67218130562e1c76ae002a262d3f4",
+      "bytes": 355
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/chrome-regressions.txt",
+      "sha256": "d6d1400ee1ff57851b80e50d207b07f69cb99b0d8ef8a849040cc69af9590c49",
+      "bytes": 31077
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/chrome-verified.json",
+      "sha256": "0dc54fbfbb0b2ac28f60241609d0c4afed51945a3dc3af7acaee30f65ba9b8c1",
+      "bytes": 352
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/chrome-verified.sources.json",
+      "sha256": "167338addd8cbfcf2ba0911c59c69db85c25d57275511ad71deb61ce4b13ad4e",
+      "bytes": 1357
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/chrome-verified.txt",
+      "sha256": "fb0127cf141e1a9274df04c6e96756032e927da52cfd2aaf05f2aebb62607629",
+      "bytes": 31091
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/core-after-split.json",
+      "sha256": "5174f49af488c045fe131b09a9d6777a7cf76cb7a506a9ad5fd3fff4135a7ebd",
+      "bytes": 279
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/core-after-split.txt",
+      "sha256": "e5d0d66bb5197a65440e3a9a65dc0d7f2823d3309819207c81322ed7b601c413",
+      "bytes": 3082
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/core-fixed.json",
+      "sha256": "21ec83c12c23bdde7fa0a3fe862841b9befea9ff5e4660839168394f58e7c30b",
+      "bytes": 272
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/core-fixed.txt",
+      "sha256": "98d4300b37442e45d1a76d851aa2cb3b6c922e20383487b4986ac27396fbc1dc",
+      "bytes": 2300
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/git-add.json",
+      "sha256": "3ec88255c24de6ee97c9b6a5f993dcb5a577802e91669e7a09ad27d8c63fa2c4",
+      "bytes": 544
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/git-add.sources.json",
+      "sha256": "167338addd8cbfcf2ba0911c59c69db85c25d57275511ad71deb61ce4b13ad4e",
+      "bytes": 1357
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/git-add.txt",
+      "sha256": "489009837cb5c6b82d1caccd06bde430660f2426ba62661cbc89448402cca913",
+      "bytes": 504
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/git-identity.json",
+      "sha256": "f49092635177dc9cd38e9b177da51c582acb27463bec4f953fde0ac8401b3206",
+      "bytes": 1131
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/git-status.txt",
+      "sha256": "d4ba1c0f3f7915623a43ef474e4474e9918b8ed4e7095aec30687fe5e3ee0d93",
+      "bytes": 411
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/hostile-first.json",
+      "sha256": "9d715603eb21f2c3b6bdc7b9868d3db03a1da7f7de94660e0bb201a9f42a181d",
+      "bytes": 286
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/hostile-first.txt",
+      "sha256": "082295412ba8abc245baa832d02d594e62ea1aa61ed980cd1103f8cbb4a0819b",
+      "bytes": 1386
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/implementation.patch",
+      "sha256": "202cdc37d992f10368d138f938e089cfbeddd21dd1de8af989fc9a9da4606d54",
+      "bytes": 214372
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/loopback-required.json",
+      "sha256": "80ea3086a1fd45def89907a2d516d4c75effa9fa5aa5655f565bd7879fa82567",
+      "bytes": 291
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/loopback-required.txt",
+      "sha256": "b4797960890212ab0b954a34ebaffbc85b082fb6bdfc02b7816549478824376f",
+      "bytes": 569
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/multiroute-verified.json",
+      "sha256": "39c2954852fd0ff41140f41eaae1abaed6d6682a0232b70322efb976a17d1037",
+      "bytes": 265
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/multiroute-verified.sources.json",
+      "sha256": "167338addd8cbfcf2ba0911c59c69db85c25d57275511ad71deb61ce4b13ad4e",
+      "bytes": 1357
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/multiroute-verified.txt",
+      "sha256": "8f16b6914787f8ebbad40577993c6e32c18493a2c7cf65f40c72df4d614287fe",
+      "bytes": 2981
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/run-check.py",
+      "sha256": "7d252d6f33ce95d1900a216e0406b33e903367e33415accec35091b9bb6e3a33",
+      "bytes": 1306
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/typecheck-final.json",
+      "sha256": "61b74bd4fc19414b665c61d4b2894cd703229cddaa3df3bcfa4d02559dd9a570",
+      "bytes": 281
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/typecheck-final.txt",
+      "sha256": "c0f3207563f069815cd4fc445de9e12d79b7f7e4c8d2f4e90cf189107b09ca19",
+      "bytes": 79
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/typecheck-verified.json",
+      "sha256": "32dcdf37652e6f5b6e0999a0bbf14c644aeaa9d83197503a3f349b9ddc965c43",
+      "bytes": 283
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/typecheck-verified.sources.json",
+      "sha256": "167338addd8cbfcf2ba0911c59c69db85c25d57275511ad71deb61ce4b13ad4e",
+      "bytes": 1357
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/typecheck-verified.txt",
+      "sha256": "c0f3207563f069815cd4fc445de9e12d79b7f7e4c8d2f4e90cf189107b09ca19",
+      "bytes": 79
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/typecheck.json",
+      "sha256": "fd527f34aedd51f5ee2005ee11d8f98625ec85e0af7c087279ed0cc7e8caee29",
+      "bytes": 275
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/typecheck.txt",
+      "sha256": "c0f3207563f069815cd4fc445de9e12d79b7f7e4c8d2f4e90cf189107b09ca19",
+      "bytes": 79
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/wiring-first.json",
+      "sha256": "bdb835fd83b2bf5a9476725b5947d0d850e483f6ba50fb058b988f88283a5f55",
+      "bytes": 284
+    },
+    {
+      "path": "docs/evidence/bridge-autoloop-001/wiring-first.txt",
+      "sha256": "0e58eaa52f9b34e7f61e8ec1cd3258f74c05d1f29824b47a557de2266f713e76",
+      "bytes": 674
+    }
+  ]
+}

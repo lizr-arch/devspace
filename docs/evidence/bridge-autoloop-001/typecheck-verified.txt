@@ -1,0 +1,3 @@
+COMMAND: ./node_modules/.bin/tsc -p tsconfig.json --noEmit
+
+OUTER_EXIT_CODE: 0

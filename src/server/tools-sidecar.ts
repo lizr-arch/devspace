@@ -264,7 +264,7 @@ export function registerSidecarTools(
     async ({ workspaceId, routeId, dshSessionId, nonce, url, replaceRouteId, expectedConsentRevision }) => {
       workspaces.getWorkspace(workspaceId);
       if (!managedCoachSidecar.claimExactBrowserRoute) throw new Error("COACH_EXACT_ROUTE_BIND_NOT_SUPPORTED");
-      const claimed = managedCoachSidecar.claimExactBrowserRoute({
+      const claimed = await managedCoachSidecar.claimExactBrowserRoute({
         workspaceId, routeId, dshSessionId, nonce, url,
         ...(replaceRouteId ? { replaceRouteId } : {}),
         ...(expectedConsentRevision !== undefined ? { expectedConsentRevision } : {}),
@@ -296,9 +296,9 @@ export function registerSidecarTools(
     {
       title: "Durable exact-route queue operations",
       description:
-        "Write side of the exact multi-route contract. revoke requires an explicit routeId (and optional expectedConsentRevision) and never auto-rebinds. enqueue_wake stores a fixed review wake generated from routeId/messageId/event identity; reply stores a WebGPT reply as message data only. claim_delivery/reply ack/resolve operate on exact (messageId,seq,contentSha256); timeout/draft/busy/navigation outcomes become needs_attention and are never retried blindly. A DOM submission is never a completed review.",
+        "Write side of the exact multi-route contract. revoke requires an explicit routeId (and optional expectedConsentRevision) and never auto-rebinds. enqueue_wake stores a fixed review wake generated from routeId/messageId/event identity; reply stores legacy message data only. trusted_reply requires exact sessionId/revision and host-verified WebGPT principal; it dispatches and reconciles the stable bridge requestId, fail closed when unavailable. claim_delivery/reply ack/resolve operate on exact (messageId,seq,contentSha256); timeout/draft/busy/navigation outcomes become needs_attention and are never retried blindly. A DOM submission is never a completed review.",
       inputSchema: {
-        action: z.enum(["revoke", "enqueue_wake", "reply", "claim_delivery", "ack", "resolve", "migrate_legacy"]),
+        action: z.enum(["revoke", "enqueue_wake", "reply", "trusted_reply", "claim_delivery", "ack", "resolve", "migrate_legacy"]),
         workspaceId: workspaceIdSchema.optional(),
         routeId: routeIdSchema.optional(),
         legacyId: legacyRouteIdSchema.optional(),
@@ -306,6 +306,7 @@ export function registerSidecarTools(
         expectedConsentRevision: z.number().int().min(1).optional(),
         messageId: routeMessageIdSchema.optional(),
         inReplyTo: routeMessageIdSchema.optional(),
+        sessionId: dshSessionIdSchema.optional(),
         content: z.string().min(1).max(48 * 1024).optional(),
         eventId: z.number().int().positive().optional(),
         operationId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/).optional(),
@@ -321,7 +322,7 @@ export function registerSidecarTools(
       _meta: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async (args) => {
+    async (args, extra) => {
       const { action, routeId, workspaceId, reason } = args;
       if (!managedCoachSidecar.routeSnapshot) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
       const requireRoute = () => {
@@ -359,6 +360,16 @@ export function registerSidecarTools(
         });
         const result = enqueued.duplicate ? "Review wake already existed (idempotent)." : "Review wake durably enqueued at seq " + enqueued.envelope.seq + ".";
         return { content: [textBlock(result)], structuredContent: { result, message: enqueued.envelope } };
+      }
+      if (action === "trusted_reply") {
+        if (!managedCoachSidecar.submitTrustedRouteReply || !args.messageId || !args.sessionId ||
+            args.expectedConsentRevision === undefined || !args.inReplyTo || !args.content)
+          throw new Error("BRIDGE_TRUSTED_REPLY_INPUT_REQUIRED");
+        const reply = await managedCoachSidecar.submitTrustedRouteReply({ routeId: routeId!,
+          sessionId: args.sessionId, consentRevision: args.expectedConsentRevision,
+          messageId: args.messageId, inReplyTo: args.inReplyTo, content: args.content }, extra);
+        const result = "Trusted reply dispatch=" + reply.dispatch.state + "; only bridge receipt confirms completion.";
+        return { content: [textBlock(result)], structuredContent: { result, message: reply } };
       }
       if (action === "reply") {
         if (!managedCoachSidecar.enqueueRouteReply) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");

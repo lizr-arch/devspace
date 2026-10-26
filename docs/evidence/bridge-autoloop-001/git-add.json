@@ -1,0 +1,7 @@
+{
+  "command": "git add -- src/coach-multiroute.ts src/coach-multiroute.test.ts src/coach-routes src/managed-coach-sidecar.ts src/server/tools-sidecar.ts coach-browser-extension/auto-worker.js coach-browser-extension/multiroute-gate.js package.json docs/BRIDGE_WEBGPT_DSH_AUTONOMOUS_LOOP_001_REPORT.md docs/evidence/bridge-autoloop-001",
+  "exit_code": 128,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/git-add.txt",
+  "evidence_sha256": "489009837cb5c6b82d1caccd06bde430660f2426ba62661cbc89448402cca913",
+  "elapsed_seconds": 0.706
+}

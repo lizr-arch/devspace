@@ -98,6 +98,7 @@ async function autoMultiAck(pair, routeId, message, outcome, reason) {
 // One fixed review wake at a time, route-scoped. Never a second chat send for a
 // messageId already settled; dom_submitted remains "unverified" by contract.
 async function autoMultiPump(pair) {
+  const sendEpoch = autoRouteMutationEpoch;
   const routes = await autoMultiRoutes();
   for (const [routeId, record] of Object.entries(routes)) {
     const check = autoMultiCheck(record);
@@ -126,6 +127,12 @@ async function autoMultiPump(pair) {
       await autoMultiAck(pair, routeId, message, "uncertain", decision.code);
       return {ok: true, code: decision.code};
     }
+    if (!await ROUTE_GATE.wakeDigestMatches(message, decision.instruction, crypto.subtle)) {
+      ledger[key] = {state: "needs_attention", code: "WAKE_DIGEST_MISMATCH", at: new Date().toISOString()};
+      await autoSaveLedger(ledger);
+      await autoMultiAck(pair, routeId, message, "uncertain", "WAKE_DIGEST_MISMATCH");
+      return {ok: true, code: "WAKE_DIGEST_MISMATCH"};
+    }
     // Readiness/injection is repeatable and never edits a message by itself.
     const prepared = await autoReady(check.route.tabId, check.route.url);
     if (!prepared.ok) {
@@ -134,6 +141,16 @@ async function autoMultiPump(pair) {
     }
     ledger[key] = {state: "in_flight", at: new Date().toISOString()};
     await autoSaveLedger(ledger); // durable before any DOM action
+    const latest = (await autoMultiRoutes())[routeId];
+    const latestTab = await chrome.tabs.get(check.route.tabId).catch(() => null);
+    if (sendEpoch !== autoRouteMutationEpoch || !latest?.enabled || latest.tabId !== check.route.tabId ||
+        latest.url !== check.route.url || latest.consentRevision !== check.route.consentRevision ||
+        ROUTE_GATE.canonicalChatUrl(latestTab?.url) !== check.route.url) {
+      ledger[key] = {state: "needs_attention", code: "GRANT_CHANGED", at: new Date().toISOString()};
+      await autoSaveLedger(ledger);
+      await autoMultiAck(pair, routeId, message, "uncertain", "GRANT_CHANGED");
+      return {ok: true, code: "GRANT_CHANGED"};
+    }
     let result = null;
     try { result = await chrome.tabs.sendMessage(check.route.tabId, decision.command); }
     catch { result = {ok: false, uncertain: true, reason: "内容脚本不可达"}; }

@@ -1,0 +1,7 @@
+{
+  "command": "npm run test:coach:multiroute",
+  "exit_code": 1,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/baseline-rerun.txt",
+  "evidence_sha256": "4374be320b6cea7086cf321fa12d7f3484966905287b204577f7d6faa66a2590",
+  "elapsed_seconds": 1.089
+}

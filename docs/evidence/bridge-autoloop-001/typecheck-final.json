@@ -1,0 +1,7 @@
+{
+  "command": "./node_modules/.bin/tsc -p tsconfig.json --noEmit",
+  "exit_code": 0,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/typecheck-final.txt",
+  "evidence_sha256": "c0f3207563f069815cd4fc445de9e12d79b7f7e4c8d2f4e90cf189107b09ca19",
+  "elapsed_seconds": 55.528
+}

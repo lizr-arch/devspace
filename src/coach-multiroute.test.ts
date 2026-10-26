@@ -881,8 +881,10 @@ await check("a non-writable state directory surfaces an explicit error and keeps
     chmodSync(queuePath, 0o400);
     try {
       const reopened = openStore(dir, c.now);
-      assert.throws(() => reopened.enqueueReviewWake({ routeId: route.routeId, messageId: "wake-2", eventId: 2, operationId: "codex-2" }),
-        (error: unknown) => error instanceof RouteError);
+      try {
+        assert.throws(() => reopened.enqueueReviewWake({ routeId: route.routeId, messageId: "wake-2", eventId: 2, operationId: "codex-2" }),
+          (error: unknown) => error instanceof RouteError);
+      } finally { reopened.close(); } // the journal now has an exclusive OS owner
     } finally {
       chmodSync(queuePath, 0o600);
     }

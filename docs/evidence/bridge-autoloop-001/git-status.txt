@@ -1,0 +1,14 @@
+ M coach-browser-extension/auto-worker.js
+ M coach-browser-extension/multiroute-gate.js
+ M package.json
+ M src/coach-multiroute.test.ts
+ M src/coach-multiroute.ts
+ M src/managed-coach-sidecar.ts
+ M src/server/tools-sidecar.ts
+?? .devspace/
+?? BRIDGE-WEBGPT-DSH-AUTONOMOUS-LOOP-001-TASK.md
+?? TASK.md
+?? docs/BRIDGE_WEBGPT_DSH_AUTONOMOUS_LOOP_001_REPORT.md
+?? docs/evidence/
+?? node_modules
+?? src/coach-routes/

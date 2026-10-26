@@ -1,0 +1,7 @@
+{
+  "command": "node --test src/coach-multiroute-extension.test.cjs src/coach-browser-extension.test.cjs src/coach-auto-delivery.test.cjs",
+  "exit_code": 0,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/chrome-verified.txt",
+  "evidence_sha256": "fb0127cf141e1a9274df04c6e96756032e927da52cfd2aaf05f2aebb62607629",
+  "elapsed_seconds": 4.485
+}

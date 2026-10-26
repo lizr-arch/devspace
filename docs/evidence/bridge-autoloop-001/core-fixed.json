@@ -1,0 +1,7 @@
+{
+  "command": "node --import tsx src/coach-multiroute.test.ts",
+  "exit_code": 0,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/core-fixed.txt",
+  "evidence_sha256": "98d4300b37442e45d1a76d851aa2cb3b6c922e20383487b4986ac27396fbc1dc",
+  "elapsed_seconds": 6.232
+}

@@ -1,0 +1,7 @@
+{
+  "command": "npm run test:coach:bridge",
+  "exit_code": 0,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/bridge-final.txt",
+  "evidence_sha256": "567398ff5dfb9ab0b975a919daf033f364be136415e31ee10d477fc89961b432",
+  "elapsed_seconds": 29.132
+}

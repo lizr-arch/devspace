@@ -1,3 +1,4 @@
+import { RouteBridgeDelivery, type BridgeTransport, type TrustedReply } from "./coach-routes/delivery.js";
 import { safeReportOutcome } from "./coach-result-contract.js";
 import { COACH_DELIVERY_SQL, completionDeliveryType } from "./coach-review-events.js";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
@@ -34,6 +35,7 @@ type Entry = SidecarInput & {
   token: Buffer; server: Server; database: Database.Database;
   receiptDb?:Database.Database; jobId: string; startedAt: string; handoffPath?:string;
   routeStore?: MultiRouteStore;
+  routeBridge?: RouteBridgeDelivery;
 };
 
 export interface CoachSidecarStatus { workspaceId: string; serviceName: string; port: number; state: "running"|"stopped"; startedAt?: string; pairedExtensionId?: string; reason?:string; }
@@ -46,9 +48,10 @@ export interface ManagedCoachSidecarControl {
   getDeliveryReceipt?(workspaceId:string,eventId:number):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
   close():Promise<void>;
   claimBrowserRoute?(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean;
-  claimExactBrowserRoute?(input:ExactRouteClaimInput):ExactRouteClaimResult;
+  claimExactBrowserRoute?(input:ExactRouteClaimInput):ExactRouteClaimResult|Promise<ExactRouteClaimResult>;
   revokeBrowserRoute?(input:{routeId:string;expectedConsentRevision?:number;reason?:string}):ExactRouteClaimResult;
   enqueueRouteReviewWake?(input:{routeId:string;messageId:string;eventId:number;operationId:string}):{duplicate:boolean;envelope:RouteEnvelope};
+  submitTrustedRouteReply?(input:TrustedReply, context:unknown):ReturnType<RouteBridgeDelivery["reply"]>;
   enqueueRouteReply?(input:{routeId:string;messageId:string;content:string;inReplyTo:string}):{duplicate:boolean;envelope:RouteEnvelope};
   claimRouteDeliveries?(input:{routeId:string;origination:RouteOrigination;limit?:number}):ClaimedEnvelope[];
   recordRouteOutcome?(input:{routeId:string;messageId:string;seq:number;contentSha256:string;
@@ -121,6 +124,7 @@ export class ManagedCoachSidecar {
     private readonly locks: JobResourceLocks = sharedResourceLocks,
     private readonly nativeEventDatabasePath?: string,
     private readonly observer?: AgentObserverStore,
+    private readonly bridgeTransport?: BridgeTransport,
   ) { this.handoffPath=nativeEventDatabasePath?join(realpathSync(dirname(nativeEventDatabasePath)),"coach-current-pairing.json"):undefined; }
 
   private publishHandoff(port:number,token:Buffer):string|undefined {
@@ -294,7 +298,10 @@ export class ManagedCoachSidecar {
     const routeGetUrl = req.url ?? "";
     if (routeGetUrl === "/routes" || routeGetUrl.startsWith("/routes/") || routeGetUrl.startsWith("/route/status")) {
       try {
-        if (this.handleRouteGet(entry, req, res, cors)) return;
+        void this.handleRouteGet(entry, req, res, cors).then((handled) => {
+          if (!handled) send(res, 404, { error: "not found" }, cors);
+        }).catch((error: unknown) => this.sendRouteError(res, error instanceof RouteError ? error.code : "ROUTE_STORE_UNAVAILABLE", cors));
+        return;
       } catch (error) {
         const code = error instanceof RouteError ? error.code : "ROUTE_STORE_UNAVAILABLE";
         return this.sendRouteError(res, code, cors);
@@ -447,6 +454,19 @@ export class ManagedCoachSidecar {
     return store;
   }
 
+  private bridgeFor(entry: Entry): RouteBridgeDelivery {
+    if (!this.bridgeTransport) throw new Error("BLOCKED_REAL_E2E: trusted bridge and WebGPT principal verifier required");
+    return entry.routeBridge ??= new RouteBridgeDelivery(this.routeStoreFor(entry), this.bridgeTransport,
+      () => entry.authorizedDshSessionIds ?? [], () => this.scopeFor(entry));
+  }
+  /** Local trusted ingest entry: only references, never self-reported sender/body. */
+  ingestDshReceipt(input: Parameters<RouteBridgeDelivery["ingest"]>[0]) {
+    return this.bridgeFor(this.routeEntry()).ingest(input);
+  }
+  submitTrustedRouteReply(input: TrustedReply, context: unknown) {
+    return this.bridgeFor(this.routeEntry()).reply(input, context);
+  }
+
   private assertRouteInScope(entry: Entry, store: MultiRouteStore, routeId: string): RouteRecord {
     const route = store.route(routeId);
     if (!route || !this.scopeFor(entry).includes(route.workspaceId)) {
@@ -565,7 +585,7 @@ export class ManagedCoachSidecar {
     }
   }
 
-  private handleRouteGet(entry: Entry, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): boolean {
+  private async handleRouteGet(entry: Entry, req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): Promise<boolean> {
     const url = req.url ?? "";
     const store = this.routeStoreFor(entry);
     const scope = this.scopeFor(entry);
@@ -599,7 +619,7 @@ export class ManagedCoachSidecar {
     const next = /^\/routes\/(rt_[A-Za-z0-9_-]{43})\/next\?origination=(dsh|webgpt)(?:&limit=([1-8]))?$/.exec(url);
     if (next) {
       const route = this.assertRouteInScope(entry, store, next[1]);
-      const messages = store.claimDeliveries({
+      const messages = this.bridgeTransport && next[2] === "dsh" ? await this.bridgeFor(entry).claimBrowser(route.routeId) : store.claimDeliveries({
         routeId: route.routeId, origination: next[2] as RouteOrigination,
         ...(next[3] ? { limit: Number(next[3]) } : {}),
       });
@@ -610,7 +630,13 @@ export class ManagedCoachSidecar {
         messages: messages.map((message) => ({
           routeId: message.routeId, messageId: message.messageId, seq: message.seq,
           contentSha256: message.contentSha256, kind: message.kind, origination: message.origination,
-          state: message.state, attempt: message.attempt, content: message.content, data: message.data,
+          state: message.state, attempt: message.attempt, content: message.content,
+          ...("eventId" in message.data ? { eventId: message.data.eventId,
+            operationId: message.data.operationId, workspaceId: message.workspaceId } : {}),
+          ...(message.kind === "DSH_MESSAGE_NOTIFY" && "eventId" in message.data ? {
+            dshSessionId: message.dshSessionId, sourceContentSha256: message.data.sourceContentSha256,
+            data: { eventId: message.data.eventId, operationId: message.data.operationId, sourceContentSha256: message.data.sourceContentSha256 },
+          } : { data: message.data }),
         })),
         cursor: { ackedThroughSeq: stats.ackedThroughSeq, lastSeq: stats.lastSeq },
       }, cors);
@@ -620,7 +646,24 @@ export class ManagedCoachSidecar {
   }
 
   /** Exact bind used by coach_webgpt_claim_browser_route_exact (never the legacy tool). */
-  claimExactBrowserRoute(input: ExactRouteClaimInput): ExactRouteClaimResult {
+  claimExactBrowserRoute(input: ExactRouteClaimInput): ExactRouteClaimResult | Promise<ExactRouteClaimResult> {
+    // Keep the old transport-free API synchronous. Configured trusted routes
+    // must re-query the exact live session before granting a new claim.
+    if (!this.bridgeTransport) return this.claimExactBrowserRouteUnchecked(input);
+    return this.claimExactBrowserRouteLive(input);
+  }
+  private async claimExactBrowserRouteLive(input: ExactRouteClaimInput): Promise<ExactRouteClaimResult> {
+    const entry = this.routeEntry();
+    if (!entry.authorizedDshSessionIds?.includes(input.dshSessionId))
+      return { claimed: false, code: "ROUTE_DSH_SESSION_NOT_AUTHORIZED" };
+    try {
+      const session = await this.bridgeTransport!.session(input.dshSessionId);
+      if (!session || session.sessionId !== input.dshSessionId || !session.allowed)
+        return { claimed: false, code: "ROUTE_DSH_SESSION_NOT_AUTHORIZED" };
+      return this.claimExactBrowserRouteUnchecked(input); // rechecks current scope and revision
+    } catch { return { claimed: false, code: "ROUTE_DSH_SESSION_NOT_AUTHORIZED" }; }
+  }
+  private claimExactBrowserRouteUnchecked(input: ExactRouteClaimInput): ExactRouteClaimResult {
     const entry = this.routeEntry();
     const scope = this.scopeFor(entry);
     if (!scope.includes(input.workspaceId)) {
@@ -665,7 +708,16 @@ export class ManagedCoachSidecar {
     return this.routeStoreFor(entry).enqueueReviewWake(input);
   }
   enqueueRouteReply(input: { routeId: string; messageId: string; content: string; inReplyTo: string }) {
-    return this.routeStoreFor(this.routeEntry()).enqueueReply(input);
+    const store = this.routeStoreFor(this.routeEntry());
+    let afterSeq = 0;
+    for (;;) {
+      const page = store.listMessages({ routeId: input.routeId, afterSeq, limit: 50 });
+      if (page.some((message) => message.messageId === input.inReplyTo && message.kind === "DSH_MESSAGE_NOTIFY"))
+        throw new Error("BRIDGE_WEBGPT_PRINCIPAL_UNVERIFIED: use trusted_reply");
+      if (page.length < 50) break;
+      afterSeq = page.at(-1)!.seq;
+    }
+    return store.enqueueReply(input);
   }
   claimRouteDeliveries(input: { routeId: string; origination: RouteOrigination; limit?: number }): ClaimedEnvelope[] {
     return this.routeStoreFor(this.routeEntry()).claimDeliveries(input);

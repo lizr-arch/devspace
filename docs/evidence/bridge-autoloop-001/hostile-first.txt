@@ -1,0 +1,18 @@
+COMMAND: node --import tsx src/coach-routes/bridge-hostile.test.ts
+PASS three unattended OFFLINE turns: authenticated receipt -> fake Chrome -> verified GPT -> exact DSH
+PASS sender spoof, forged from=dsh, missing/truncated/wrong-session/torn receipts and bad SHA fail closed
+PASS duplicate/replay binds kind/session/source SHA and reply inReplyTo, not just content
+PASS unverified GPT principal and wrong exact session/revision cannot enqueue or submit
+PASS stopped exact session persists incoming/outgoing; resume does not select a different running session
+PASS bridge allowlist revocation, stale live session and revoke during await prohibit new claims/dispatch
+PASS two chats in one workspace plus three workspaces remain isolated; explicit rebind bumps consent
+PASS external ACK loss -> UNCERTAIN survives restart; request/wait reconcile never resends
+EXPECTED_CHILD_EXIT=91 (crash after mock submit)
+PASS actual child crash after mock external submit; durable SUBMITTING recovers without POST
+EXPECTED_CHILD_SIGNAL=SIGKILL (test-owned holder)
+PASS cross-process owner lock rejects second writer; SIGKILL releases OS ownership
+PASS torn outbound frame and checksum corruption never authorize retry
+PASS fake Chrome worker restart: ACK loss and persisted in_flight both prevent a second DOM submit
+OFFLINE hostile checks: 12 passed; real Chrome/DSH E2E NOT RUN
+
+OUTER_EXIT_CODE: 0

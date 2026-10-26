@@ -1,0 +1,7 @@
+{
+  "command": "node --import tsx src/coach-routes/bridge-wiring.test.ts",
+  "exit_code": 0,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/wiring-first.txt",
+  "evidence_sha256": "0e58eaa52f9b34e7f61e8ec1cd3258f74c05d1f29824b47a557de2266f713e76",
+  "elapsed_seconds": 9.292
+}

@@ -1,0 +1,7 @@
+{
+  "command": "node --import tsx src/coach-routes/bridge-hostile.test.ts",
+  "exit_code": 0,
+  "evidence_path": "docs/evidence/bridge-autoloop-001/hostile-first.txt",
+  "evidence_sha256": "082295412ba8abc245baa832d02d594e62ea1aa61ed980cd1103f8cbb4a0819b",
+  "elapsed_seconds": 6.442
+}
