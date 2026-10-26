@@ -12,7 +12,7 @@ import { JobResourceLocks, sharedResourceLocks } from "./job-resource-locks.js";
 import { AgentObserverStore } from "./agent-observer.js";
 import {
   DSH_SESSION_RE, MultiRouteStore, ROUTE_ID_RE, RouteError, canonicalChatUrl,
-  type ClaimedEnvelope, type LegacyRouteRecord, type RouteEnvelope, type RouteMessageState,
+  type ClaimedEnvelope, type LegacyRouteRecord, type PendingReviewWake, type RouteEnvelope, type RouteMessageState,
   type RouteOrigination, type RouteRecord, type StoreSnapshot,
 } from "./coach-multiroute.js";
 
@@ -67,6 +67,8 @@ export interface ManagedCoachSidecarControl {
   configureRouteAccess(options:{mode?:RouteAccessMode;verifier?:RoutePrincipalVerifier}):void;
   authorizeRouteAction(action:RouteAccessAction,context:unknown,route?:RoutePrincipalTarget):Promise<RoutePrincipal>;
   authorizeRouteClaim(action:"claim_browser_route"|"claim_browser_route_exact",context:unknown,input:{workspaceId:string;chatId:string}):Promise<RoutePrincipal>;
+  authorizeRouteWorkspaceAction(action:"classify_legacy"|"migrate_legacy",context:unknown,workspaceId?:string):Promise<RoutePrincipal>;
+  projectRouteSnapshotForPrincipal(principal:RoutePrincipal,snapshot:StoreSnapshot,pendingReviews:readonly PendingReviewWake[]):{snapshot:StoreSnapshot;pendingReviews:PendingReviewWake[]};
   visibleRoutesForPrincipal(principal:RoutePrincipal,routes:readonly RouteRecord[]):RouteRecord[];
   principalCanSeeRoute(principal:RoutePrincipal,route:RouteRecord):boolean;
 }
@@ -150,6 +152,14 @@ export class ManagedCoachSidecar {
   async authorizeRouteClaim(action: "claim_browser_route" | "claim_browser_route_exact", context: unknown,
     input: { workspaceId: string; chatId: string }): Promise<RoutePrincipal> {
     return this.routeAccess.authorizeClaim(action, context, input);
+  }
+  async authorizeRouteWorkspaceAction(action: "classify_legacy" | "migrate_legacy", context: unknown,
+    workspaceId?: string): Promise<RoutePrincipal> {
+    return this.routeAccess.authorizeWorkspaceAction(action, context, workspaceId);
+  }
+  projectRouteSnapshotForPrincipal(principal: RoutePrincipal, snapshot: StoreSnapshot,
+    pendingReviews: readonly PendingReviewWake[]) {
+    return this.routeAccess.projectSnapshot(principal, snapshot, pendingReviews);
   }
   visibleRoutesForPrincipal(principal: RoutePrincipal, routes: readonly RouteRecord[]): RouteRecord[] {
     return this.routeAccess.visibleRoutes(principal, routes);

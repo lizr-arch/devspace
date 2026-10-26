@@ -385,6 +385,8 @@ export class CodexWorkerCoachClient implements ManagedCoachSidecarControl {
   configureRouteAccess():void{/* enforced by the owning host process, not this proxy */}
   async authorizeRouteAction():Promise<never>{throw new Error("ROUTE_PRINCIPAL_UNAVAILABLE");}
   async authorizeRouteClaim():Promise<never>{throw new Error("ROUTE_PRINCIPAL_UNAVAILABLE");}
+  async authorizeRouteWorkspaceAction():Promise<never>{throw new Error("ROUTE_PRINCIPAL_UNAVAILABLE");}
+  projectRouteSnapshotForPrincipal():never { throw new Error("ROUTE_PRINCIPAL_UNAVAILABLE"); }
   visibleRoutesForPrincipal():[] { return []; }
   principalCanSeeRoute():boolean { return false; }
   async close():Promise<void>{/* API lifecycle never stops the independent Worker or Coach Feed. */}

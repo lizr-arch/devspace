@@ -13,7 +13,7 @@
  *    tests; no principal is required. It is NOT a real authorization mode and
  *    must never be enabled for a live ChatGPT/MCP transport.
  */
-import { CHAT_ID_RE, RouteError, type RouteRecord } from "./protocol.js";
+import { CHAT_ID_RE, RouteError, type LegacyRouteRecord, type PendingReviewWake, type RouteRecord, type StoreSnapshot } from "./protocol.js";
 
 export type RouteAccessMode = "enforced" | "legacy";
 export type RouteAccessAction =
@@ -108,6 +108,15 @@ export class RouteAccessController {
     const principal = this.validate(await this.verifier(context, target));
     if (principal.kind === "operator") {
       if (!OPERATOR_ACTIONS.has(action)) throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "operator action is not allowed");
+      // A workspace-scoped operator is not a global administrator. It may act
+      // only on an exact target in its own workspace.
+      if (principal.workspaceId !== undefined) {
+        // Snapshot is allowed without a single target; projection enforces the scope.
+        if (action === "snapshot" && target === undefined) return principal;
+        if (!target) throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "workspace-scoped operator requires an exact route target");
+        if (target.workspaceId !== principal.workspaceId)
+          throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "route belongs to a different workspace");
+      }
       return principal;
     }
     if (!OWNER_ACTIONS.has(action))
@@ -134,7 +143,11 @@ export class RouteAccessController {
     if (this.mode === "legacy") return { kind: "operator" };
     if (!this.verifier) throw new RoutePrincipalError("ROUTE_PRINCIPAL_REQUIRED", "no trusted route principal verifier is configured");
     const principal = this.validate(await this.verifier(context));
-    if (principal.kind === "operator") return principal;
+    if (principal.kind === "operator") {
+      if (principal.workspaceId !== undefined && principal.workspaceId !== input.workspaceId)
+        throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "claim workspace does not match the operator scope");
+      return principal;
+    }
     if (!input.chatId || !CHAT_ID_RE.test(input.chatId))
       throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "claimed chat identity is invalid");
     if (principal.chatId !== input.chatId)
@@ -145,8 +158,76 @@ export class RouteAccessController {
   }
 
   /** Snapshot visibility: owner sees only its own chat's routes; operator sees all. */
+  /**
+   * Non-route-scoped admin actions (legacy classification/migration) still need
+   * a workspace target. A scoped operator may only act inside its own workspace;
+   * a global operator only exists when the host explicitly granted no scope.
+   */
+  async authorizeWorkspaceAction(
+    action: Extract<RouteAccessAction, "classify_legacy" | "migrate_legacy">,
+    context: unknown,
+    workspaceId?: string,
+  ): Promise<RoutePrincipal> {
+    if (this.mode === "legacy") return { kind: "operator" };
+    if (!this.verifier) throw new RoutePrincipalError("ROUTE_PRINCIPAL_REQUIRED", "no trusted route principal verifier is configured");
+    const principal = this.validate(await this.verifier(context));
+    if (principal.kind === "owner")
+      throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "owner chat cannot perform legacy administration");
+    if (!OPERATOR_ACTIONS.has(action))
+      throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "operator action is not allowed");
+    if (principal.workspaceId !== undefined) {
+      if (workspaceId === undefined)
+        throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "workspace-scoped operator requires a workspace target");
+      if (workspaceId !== principal.workspaceId)
+        throw new RoutePrincipalError("ROUTE_PRINCIPAL_FORBIDDEN", "workspace target is outside the operator scope");
+    }
+    return principal;
+  }
+
+  /**
+   * Explicit response projection for coach_route_state snapshot. Never rely on
+   * spread-plus-override: queues/legacy/global counters are projected per caller.
+   */
+  projectSnapshot(
+    principal: RoutePrincipal,
+    snapshot: StoreSnapshot,
+    pendingReviews: readonly PendingReviewWake[],
+  ): { snapshot: StoreSnapshot; pendingReviews: PendingReviewWake[] } {
+    const globalOperator = principal.kind === "operator" && principal.workspaceId === undefined;
+    const routes = this.visibleRoutes(principal, snapshot.routes);
+    const visibleIds = new Set(routes.map((route) => route.routeId));
+    const legacy: LegacyRouteRecord[] = principal.kind === "operator"
+      ? snapshot.legacy.filter((record) => globalOperator || record.workspaceId === principal.workspaceId)
+      : [];
+    const queues: StoreSnapshot["queues"] = {};
+    for (const routeId of Object.keys(snapshot.queues)) {
+      if (visibleIds.has(routeId)) queues[routeId] = { ...snapshot.queues[routeId] };
+    }
+    const pending = pendingReviews.filter((wake) => {
+      if (!visibleIds.has(wake.routeId)) return false;
+      return principal.kind === "operator"
+        ? (globalOperator || wake.workspaceId === principal.workspaceId)
+        : wake.workspaceId === principal.workspaceId;
+    });
+    return {
+      snapshot: {
+        // Global counters are hidden unless the host granted a global operator.
+        consentRevision: globalOperator ? snapshot.consentRevision : 0,
+        routes: routes.map((route) => ({ ...route })),
+        legacy: legacy.map((record) => ({ ...record })),
+        pendingProposals: globalOperator ? snapshot.pendingProposals : 0,
+        queues,
+      },
+      pendingReviews: pending.map((wake) => ({ ...wake })),
+    };
+  }
+
   visibleRoutes<R extends Pick<RouteRecord, "chatId" | "workspaceId" | "state">>(principal: RoutePrincipal, routes: readonly R[]): R[] {
-    if (principal.kind === "operator") return [...routes];
+    if (principal.kind === "operator") {
+      return principal.workspaceId === undefined
+        ? [...routes]
+        : routes.filter((route) => route.workspaceId === principal.workspaceId);
+    }
     return routes.filter((route) =>
       route.state === "active" &&
       route.chatId === principal.chatId &&
@@ -155,8 +236,9 @@ export class RouteAccessController {
 
   /** Owner may see only its own pending review wakes; operator sees all. */
   canSeeRoute(principal: RoutePrincipal, route: Pick<RouteRecord, "chatId" | "workspaceId">): boolean {
-    return principal.kind === "operator" ||
-      (route.chatId === principal.chatId &&
-        (principal.workspaceId === undefined || route.workspaceId === principal.workspaceId));
+    if (principal.kind === "operator")
+      return principal.workspaceId === undefined || route.workspaceId === principal.workspaceId;
+    return route.chatId === principal.chatId &&
+      (principal.workspaceId === undefined || route.workspaceId === principal.workspaceId);
   }
 }

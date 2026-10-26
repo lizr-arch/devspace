@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
-import { canonicalChatUrl, chatIdFromCanonical } from "../coach-multiroute.js";
+import { canonicalChatUrl, chatIdFromCanonical, type PendingReviewWake } from "../coach-multiroute.js";
 
 const workspaceIdSchema = z.string().min(1);
 const portSchema = z.number().int().min(1).max(65535);
@@ -181,15 +181,22 @@ export function registerSidecarTools(
       if (action === "snapshot") {
         // Host-verified principal, never the optional workspaceId argument.
         const principal = await managedCoachSidecar.authorizeRouteAction("snapshot", extra);
-        const visible = managedCoachSidecar.visibleRoutesForPrincipal(principal, snapshot.routes);
-        const routes = workspaceId ? visible.filter((route) => route.workspaceId === workspaceId) : visible;
-        const visibleIds = new Set(routes.map((route) => route.routeId));
-        const pendingReviews = (managedCoachSidecar.pendingReviewWakes?.() ?? [])
-          .filter((wake) => visibleIds.has(wake.routeId))
-          .filter((wake) => !workspaceId || wake.workspaceId === workspaceId);
-        const legacy = principal.kind === "operator" ? snapshot.legacy : [];
-        const result = "Exact routes=" + routes.length + " legacy=" + legacy.length + " pendingReviews=" + pendingReviews.length + ".";
-        return { content: [textBlock(result)], structuredContent: { result, snapshot: { ...snapshot, routes, legacy }, pendingReviews } };
+        const rawPending = (managedCoachSidecar.pendingReviewWakes?.() ?? []) as PendingReviewWake[];
+        const projected = managedCoachSidecar.projectRouteSnapshotForPrincipal(principal, snapshot, rawPending);
+        let visibleSnapshot = projected.snapshot;
+        let pendingReviews = projected.pendingReviews;
+        if (workspaceId) {
+          const routes = visibleSnapshot.routes.filter((route) => route.workspaceId === workspaceId);
+          const visibleIds = new Set(routes.map((route) => route.routeId));
+          const queues = Object.fromEntries(Object.entries(visibleSnapshot.queues).filter(([id]) => visibleIds.has(id)));
+          pendingReviews = pendingReviews.filter((wake) => wake.workspaceId === workspaceId && visibleIds.has(wake.routeId));
+          visibleSnapshot = { ...visibleSnapshot,
+            routes,
+            legacy: visibleSnapshot.legacy.filter((record) => record.workspaceId === workspaceId),
+            queues };
+        }
+        const result = "Exact routes=" + visibleSnapshot.routes.length + " legacy=" + visibleSnapshot.legacy.length + " pendingReviews=" + pendingReviews.length + ".";
+        return { content: [textBlock(result)], structuredContent: { result, snapshot: visibleSnapshot, pendingReviews } };
       }
       if (action === "inbox") {
         const route = requireRoute();
@@ -204,7 +211,9 @@ export function registerSidecarTools(
         const result = "Route inbox messages=" + messages.length + ".";
         return { content: [textBlock(result)], structuredContent: { result, messages } };
       }
-      await managedCoachSidecar.authorizeRouteAction("classify_legacy", extra);
+      let legacyWorkspace = workspaceId;
+      if (legacyId) legacyWorkspace = snapshot.legacy.find((record) => record.legacyId === legacyId)?.workspaceId ?? workspaceId;
+      await managedCoachSidecar.authorizeRouteWorkspaceAction("classify_legacy", extra, legacyWorkspace);
       if (!managedCoachSidecar.classifyLegacyMessage) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
       const classification = managedCoachSidecar.classifyLegacyMessage({
         ...(legacyId ? { legacyId } : {}),
@@ -361,9 +370,14 @@ export function registerSidecarTools(
         return { content: [textBlock(result)], structuredContent: { result, ...(revoked.route ? { route: revoked.route } : {}), ...(revoked.code ? { code: revoked.code } : {}) } };
       }
       if (action === "migrate_legacy") {
-        await managedCoachSidecar.authorizeRouteAction("migrate_legacy", extra);
-        if (!managedCoachSidecar.migrateLegacyRoute) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
         if (!args.legacyId || !args.targetRouteId) throw new Error("ROUTE_INVALID_INPUT: legacyId and targetRouteId are required");
+        const legacyRecord = managedCoachSidecar.routeSnapshot!().legacy.find((record) => record.legacyId === args.legacyId);
+        if (!legacyRecord) throw new Error("ROUTE_NOT_FOUND");
+        const targetRoute = managedCoachSidecar.routeSnapshot!().routes.find((record) => record.routeId === args.targetRouteId);
+        if (targetRoute && targetRoute.workspaceId !== legacyRecord.workspaceId)
+          throw new Error("ROUTE_WORKSPACE_MISMATCH");
+        await managedCoachSidecar.authorizeRouteWorkspaceAction("migrate_legacy", extra, legacyRecord.workspaceId);
+        if (!managedCoachSidecar.migrateLegacyRoute) throw new Error("COACH_ROUTE_STORE_NOT_SUPPORTED");
         const legacy = managedCoachSidecar.migrateLegacyRoute({
           legacyId: args.legacyId, targetRouteId: args.targetRouteId,
           ...(args.expectedConsentRevision !== undefined ? { expectedConsentRevision: args.expectedConsentRevision } : {}),

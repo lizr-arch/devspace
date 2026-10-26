@@ -18,29 +18,41 @@ import type { RoutePrincipal } from "./route-principal.js";
 const dir = mkdtempSync(join(tmpdir(), "route-principal-offline-"));
 const store = new MultiRouteStore({ stateDir: dir });
 const workspaceId = "ws-principal-test";
+const workspaceB = "ws-principal-other";
 const sessionA = "session-aaaaaaaa-1111-4111-8111-111111111111";
 const sessionB = "session-bbbbbbbb-2222-4222-8222-222222222222";
+const sessionC = "session-cccccccc-3333-4333-8333-333333333333";
 const urlA = "https://chatgpt.com/c/principal-owner-a";
 const urlB = "https://chatgpt.com/c/principal-owner-b";
+const urlC = "https://chatgpt.com/c/principal-owner-c";
 const chatA = "principal-owner-a";
 const chatB = "principal-owner-b";
-function claim(url: string, nonceChar: string, sessionId: string, tabId: number) {
+const chatC = "principal-owner-c";
+function claim(url: string, nonceChar: string, sessionId: string, tabId: number, workspace = workspaceId) {
   const nonce = nonceChar.repeat(32);
   const proposed = store.propose({ nonce, url, tabId });
-  return store.claimExact({ routeId: proposed.routeId, nonce, url, workspaceId, dshSessionId: sessionId,
-    authorizedWorkspaceIds: [workspaceId], authorizedDshSessionIds: [sessionId] });
+  return store.claimExact({ routeId: proposed.routeId, nonce, url, workspaceId: workspace, dshSessionId: sessionId,
+    authorizedWorkspaceIds: [workspace], authorizedDshSessionIds: [sessionId] });
 }
 const routeA = claim(urlA, "a", sessionA, 10);
 const routeB = claim(urlB, "b", sessionB, 11);
+const routeC = claim(urlC, "c", sessionC, 12, workspaceB);
 const wakeA = store.enqueueReviewWake({ routeId: routeA.routeId, messageId: "wake-a", eventId: 1, operationId: "op-a" });
 const wakeB = store.enqueueReviewWake({ routeId: routeB.routeId, messageId: "wake-b", eventId: 2, operationId: "op-b" });
+const wakeC = store.enqueueReviewWake({ routeId: routeC.routeId, messageId: "wake-c", eventId: 3, operationId: "op-c" });
+store.importLegacyRoutes([
+  { workspaceId, url: "https://chatgpt.com/c/legacy-owner-a", tabId: 20 },
+  { workspaceId: workspaceB, url: "https://chatgpt.com/c/legacy-owner-b", tabId: 21 },
+]);
 // A browser DOM receipt makes wake A a pending review (never a completed review).
 store.recordDeliveryOutcome({ routeId: routeA.routeId, messageId: wakeA.envelope.messageId,
   seq: wakeA.envelope.seq, contentSha256: wakeA.envelope.contentSha256, outcome: "dom_submitted" });
 const ownerA: RoutePrincipal = { kind: "owner", chatId: chatA, workspaceId };
 const ownerB: RoutePrincipal = { kind: "owner", chatId: chatB, workspaceId };
+const ownerC: RoutePrincipal = { kind: "owner", chatId: chatC, workspaceId: workspaceB };
 const operator: RoutePrincipal = { kind: "operator" };
-const principals: Record<string, RoutePrincipal> = { A: ownerA, B: ownerB, OP: operator };
+const operatorA: RoutePrincipal = { kind: "operator", workspaceId };
+const principals: Record<string, RoutePrincipal> = { A: ownerA, B: ownerB, C: ownerC, OP: operator, OPA: operatorA };
 
 const manager = new ManagedCoachSidecar();
 manager.configureRouteAccess({
@@ -53,14 +65,14 @@ manager.configureRouteAccess({
   },
 });
 const token = Buffer.alloc(32, 3); const extension = "b".repeat(32);
-const entry = { workspaceId, authorizedWorkspaceIds: [workspaceId], authorizedDshSessionIds: [sessionA, sessionB],
+const entry = { workspaceId, authorizedWorkspaceIds: [workspaceId, workspaceB], authorizedDshSessionIds: [sessionA, sessionB, sessionC],
   routeStore: store, port: 12346, token, pairedExtensionId: extension };
 (manager as any).services.set(workspaceId, entry);
 
 const server = new McpServer({ name: "route-principal-offline", version: "1" });
 const client = new Client({ name: "principal-client", version: "1" });
 registerSidecarTools(server, { config: { readOnly: false }, managedCoachSidecar: manager,
-  workspaces: { getWorkspace(id: string) { assert.equal(id, workspaceId); return { root: dir }; } },
+  workspaces: { getWorkspace(id: string) { assert.ok(id === workspaceId || id === workspaceB); return { root: dir }; } },
 } as unknown as ServerContext);
 const [a, b] = InMemoryTransport.createLinkedPair();
 await server.connect(a); await client.connect(b);
@@ -141,7 +153,7 @@ try {
   });
 
   await check("owner A cannot claim/bind a route for owner B (claim URL is untrusted data)", async () => {
-    const nonceC = "c".repeat(32); const urlC = "https://chatgpt.com/c/principal-owner-c";
+    const nonceC = "e".repeat(32); const urlC = "https://chatgpt.com/c/principal-owner-e";
     const proposedC = store.propose({ nonce: nonceC, url: urlC, tabId: 12 });
     const denied = await call("coach_webgpt_claim_browser_route_exact", { workspaceId,
       routeId: proposedC.routeId, dshSessionId: sessionB, nonce: nonceC, url: urlC }, "A");
@@ -153,20 +165,89 @@ try {
     assert.equal(store.route(proposedC.routeId), undefined);
   });
 
-  await check("separate operator principal sees both routes and may revoke B", async () => {
-    const snapshot = await call("coach_route_state", { action: "snapshot" }, "OP");
-    assert.ok(!snapshot.isError, JSON.stringify(snapshot));
-    const routes = snapshot.structuredContent?.snapshot?.routes ?? [];
-    assert.equal(routes.length, 2);
+  await check("owner C sees only route C: routes, queues, legacy and counters are projected", async () => {
+    const result = await call("coach_route_state", { action: "snapshot" }, "C");
+    assert.ok(!result.isError, JSON.stringify(result));
+    const snapshot = result.structuredContent?.snapshot ?? {};
+    assert.deepEqual((snapshot.routes ?? []).map((route: any) => route.routeId), [routeC.routeId]);
+    assert.deepEqual(Object.keys(snapshot.queues ?? {}), [routeC.routeId]);
+    assert.deepEqual(snapshot.legacy, []);
+    assert.equal(snapshot.pendingProposals, 0);
+    assert.equal(snapshot.consentRevision, 0);
+    const json = JSON.stringify(result);
+    for (const hidden of [routeA.routeId, routeB.routeId, "legacy-owner-a", chatA, chatB]) {
+      assert.equal(json.includes(hidden), false, "cross-workspace/cross-chat data leaked: " + hidden);
+    }
+  });
+
+  await check("workspace-scoped operator A snapshot hides workspace B routes/queues/legacy and global counters", async () => {
+    const result = await call("coach_route_state", { action: "snapshot" }, "OPA");
+    assert.ok(!result.isError, JSON.stringify(result));
+    const snapshot = result.structuredContent?.snapshot ?? {};
+    const routeIds = (snapshot.routes ?? []).map((route: any) => route.routeId).sort();
+    assert.deepEqual(routeIds, [routeA.routeId, routeB.routeId].sort());
+    assert.deepEqual(Object.keys(snapshot.queues ?? {}).sort(), [routeA.routeId, routeB.routeId].sort());
+    assert.ok((snapshot.legacy ?? []).every((record: any) => record.workspaceId === workspaceId));
+    assert.equal((snapshot.legacy ?? []).some((record: any) => record.workspaceId === workspaceB), false);
+    assert.equal(snapshot.pendingProposals, 0);
+    assert.equal(snapshot.consentRevision, 0);
+    assert.equal(JSON.stringify(result).includes(routeC.routeId), false);
+  });
+
+  await check("workspace-scoped operator A cannot read/mutate/bind/legacy-manage workspace B", async () => {
+    const inbox = await call("coach_route_state", { action: "inbox", routeId: routeC.routeId }, "OPA");
+    assert.equal(inbox.isError, true);
+    const claim = await call("coach_route_admin", { action: "claim_delivery", routeId: routeC.routeId,
+      origination: "dsh" }, "OPA");
+    assert.equal(claim.isError, true);
+    const revoke = await call("coach_route_admin", { action: "revoke", routeId: routeC.routeId,
+      expectedConsentRevision: routeC.consentRevision }, "OPA");
+    assert.equal(revoke.isError, true);
+    assert.equal(store.route(routeC.routeId)?.state, "active");
+    const nonceF = "f".repeat(32); const urlF = "https://chatgpt.com/c/principal-scope-f";
+    const proposedF = store.propose({ nonce: nonceF, url: urlF, tabId: 13 });
+    const binding = await call("coach_webgpt_claim_browser_route_exact", { workspaceId: workspaceB,
+      routeId: proposedF.routeId, dshSessionId: sessionC, nonce: nonceF, url: urlF }, "OPA");
+    assert.equal(binding.isError, true);
+    assert.equal(store.route(proposedF.routeId), undefined);
+    const legacyB = store.snapshot().legacy.find((record) => record.workspaceId === workspaceB)!;
+    const classify = await call("coach_route_state", { action: "classify_legacy", legacyId: legacyB.legacyId }, "OPA");
+    assert.equal(classify.isError, true);
+    const migrate = await call("coach_route_admin", { action: "migrate_legacy", legacyId: legacyB.legacyId,
+      targetRouteId: routeC.routeId }, "OPA");
+    assert.equal(migrate.isError, true);
+  });
+
+  await check("workspace-scoped operator A may act in its own workspace (inbox/classify/revoke)", async () => {
+    const inbox = await call("coach_route_state", { action: "inbox", routeId: routeA.routeId }, "OPA");
+    assert.ok(!inbox.isError, JSON.stringify(inbox));
+    const legacyA = store.snapshot().legacy.find((record) => record.workspaceId === workspaceId)!;
+    const classify = await call("coach_route_state", { action: "classify_legacy", legacyId: legacyA.legacyId }, "OPA");
+    assert.ok(!classify.isError, JSON.stringify(classify));
     const revoke = await call("coach_route_admin", { action: "revoke", routeId: routeB.routeId,
-      expectedConsentRevision: routeB.consentRevision, reason: "operator revoke" }, "OP");
+      expectedConsentRevision: routeB.consentRevision, reason: "scoped operator revoke" }, "OPA");
     assert.ok(!revoke.isError, JSON.stringify(revoke));
     assert.equal(store.route(routeB.routeId)?.state, "revoked");
   });
 
-  await check("after operator revoke, stale owner B and anonymous access fail closed", async () => {
+  await check("global operator sees all routes/queues/legacy and may revoke workspace B", async () => {
+    const snapshot = await call("coach_route_state", { action: "snapshot" }, "OP");
+    assert.ok(!snapshot.isError, JSON.stringify(snapshot));
+    const data = snapshot.structuredContent?.snapshot ?? {};
+    assert.equal((data.routes ?? []).length, 3);
+    assert.deepEqual(Object.keys(data.queues ?? {}).sort(), [routeA.routeId, routeB.routeId, routeC.routeId].sort());
+    assert.equal((data.legacy ?? []).length, 2);
+    const revoke = await call("coach_route_admin", { action: "revoke", routeId: routeC.routeId,
+      expectedConsentRevision: routeC.consentRevision, reason: "global operator revoke" }, "OP");
+    assert.ok(!revoke.isError, JSON.stringify(revoke));
+    assert.equal(store.route(routeC.routeId)?.state, "revoked");
+  });
+
+  await check("after revoke, stale owner B/C and anonymous access fail closed", async () => {
     const inbox = await call("coach_route_state", { action: "inbox", routeId: routeB.routeId }, "B");
     assert.equal(inbox.isError, true);
+    const inboxC = await call("coach_route_state", { action: "inbox", routeId: routeC.routeId }, "C");
+    assert.equal(inboxC.isError, true);
     const anon = await call("coach_route_state", { action: "inbox", routeId: routeB.routeId });
     assert.equal(anon.isError, true);
     const claim = await call("coach_route_admin", { action: "claim_delivery", routeId: routeB.routeId,
