@@ -19,6 +19,9 @@
 #   AUTORESTART=1
 #   AUTORESTART_AFTER=3
 #   RESTART_COOLDOWN=900
+#   DEVSPACE_RESTART=1            # restart the DevSpace service on sustained local_down
+#   DEVSPACE_RESTART_AFTER=5      # consecutive local_down samples before restarting
+#   DEVSPACE_RESTART_COOLDOWN=900 # min seconds between DevSpace restarts
 #   REMIND_SECONDS=1800
 #   HOST_SATURATED_AFTER=2
 #   MEMORY_PRESSURE_AFTER=3
@@ -37,7 +40,7 @@
 
 set -u
 
-SCRIPT_VERSION="2026-10-24.v2"
+SCRIPT_VERSION="2026-10-26.v3"
 
 STATE_DIR="${DEVSPACE_WATCHDOG_STATE_DIR:-$HOME/.local/state/devspace}"
 mkdir -p "$STATE_DIR"
@@ -54,6 +57,13 @@ REMIND_SECONDS="${REMIND_SECONDS:-${DEVSPACE_WATCHDOG_REMIND_SECONDS:-1800}}"
 RESTART_COOLDOWN="${RESTART_COOLDOWN:-${DEVSPACE_WATCHDOG_RESTART_COOLDOWN:-900}}"
 AUTORESTART="${AUTORESTART:-${DEVSPACE_WATCHDOG_AUTORESTART:-0}}"
 AUTORESTART_AFTER="${AUTORESTART_AFTER:-${DEVSPACE_WATCHDOG_AUTORESTART_AFTER:-3}}"
+# Origin (DevSpace service) self-healing. local_down used to be never acted on,
+# which left the 2026-10-26 outage unrecovered for two hours: the process was
+# alive but never accepting connections, so kickstart is the only recovery.
+DEVSPACE_RESTART="${DEVSPACE_RESTART:-${DEVSPACE_WATCHDOG_DEVSPACE_RESTART:-1}}"
+DEVSPACE_RESTART_AFTER="${DEVSPACE_RESTART_AFTER:-${DEVSPACE_WATCHDOG_DEVSPACE_RESTART_AFTER:-5}}"
+DEVSPACE_RESTART_COOLDOWN="${DEVSPACE_RESTART_COOLDOWN:-${DEVSPACE_WATCHDOG_DEVSPACE_RESTART_COOLDOWN:-900}}"
+DEVSPACE_LABEL="${DEVSPACE_LABEL:-${DEVSPACE_WATCHDOG_DEVSPACE_LABEL:-gui/$(id -u)/com.liz.devspace}}"
 DRY_RUN="${DRY_RUN:-${DEVSPACE_WATCHDOG_DRY_RUN:-0}}"
 HOST_SATURATED_AFTER="${HOST_SATURATED_AFTER:-${DEVSPACE_WATCHDOG_HOST_SATURATED_AFTER:-2}}"
 MEMORY_PRESSURE_AFTER="${MEMORY_PRESSURE_AFTER:-${DEVSPACE_WATCHDOG_MEMORY_PRESSURE_AFTER:-3}}"
@@ -122,6 +132,7 @@ TUNNEL_STATUS="healthy"
 TUNNEL_CONSECUTIVE=0
 TUNNEL_NOTIFY_AT=0
 TUNNEL_RESTART_AT=0
+DEVSPACE_RESTART_AT=0
 HOST_STATUS="ok"
 HOST_CONSECUTIVE=0
 HOST_NOTIFY_AT=0
@@ -151,6 +162,7 @@ load_state() {
     TUNNEL_CONSECUTIVE) TUNNEL_CONSECUTIVE="$value" ;;
     TUNNEL_NOTIFY_AT) TUNNEL_NOTIFY_AT="$value" ;;
     TUNNEL_RESTART_AT) TUNNEL_RESTART_AT="$value" ;;
+    DEVSPACE_RESTART_AT) DEVSPACE_RESTART_AT="$value" ;;
     HOST_STATUS) HOST_STATUS="$value" ;;
     HOST_CONSECUTIVE) HOST_CONSECUTIVE="$value" ;;
     HOST_NOTIFY_AT) HOST_NOTIFY_AT="$value" ;;
@@ -169,6 +181,7 @@ save_state() {
     printf 'TUNNEL_CONSECUTIVE=%s\n' "$TUNNEL_CONSECUTIVE"
     printf 'TUNNEL_NOTIFY_AT=%s\n' "$TUNNEL_NOTIFY_AT"
     printf 'TUNNEL_RESTART_AT=%s\n' "$TUNNEL_RESTART_AT"
+    printf 'DEVSPACE_RESTART_AT=%s\n' "$DEVSPACE_RESTART_AT"
     printf 'HOST_STATUS=%s\n' "$HOST_STATUS"
     printf 'HOST_CONSECUTIVE=%s\n' "$HOST_CONSECUTIVE"
     printf 'HOST_NOTIFY_AT=%s\n' "$HOST_NOTIFY_AT"
@@ -178,6 +191,31 @@ save_state() {
     printf 'TUNNEL_DETAIL=%s\n' "${TUNNEL_DETAIL:-}"
   } >"$STATE_FILE"
 }
+
+# ---------------- self healing (origin: DevSpace service) --------------------
+#
+# A hung DevSpace process keeps the port open but stops accepting connections;
+# local_down is the watchdog state that describes exactly this failure. Restart
+# the LaunchAgent after a sustained streak, with a cooldown so a saturated host
+# cannot be restarted in a loop. A guard file disables this during maintenance:
+#   $STATE_DIR/disable-devspace-restart
+
+if [ "$DEVSPACE_RESTART" = "1" ] &&
+  [ ! -f "$STATE_DIR/disable-devspace-restart" ] &&
+  [ "$TUNNEL_STATUS" = "local_down" ] &&
+  [ "$TUNNEL_CONSECUTIVE" -ge "$DEVSPACE_RESTART_AFTER" ] &&
+  [ $((NOW - DEVSPACE_RESTART_AT)) -ge "$DEVSPACE_RESTART_COOLDOWN" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    DEVSPACE_RESTART_AT=$NOW
+    log "AUTORESTART_DEVSPACE_DRY label=$DEVSPACE_LABEL consecutive=$TUNNEL_CONSECUTIVE"
+  elif launchctl kickstart -k "$DEVSPACE_LABEL" >/dev/null 2>&1; then
+    DEVSPACE_RESTART_AT=$NOW
+    log "AUTORESTART_DEVSPACE kickstart issued label=$DEVSPACE_LABEL consecutive=$TUNNEL_CONSECUTIVE"
+    notify "DevSpace 自动恢复" "本机服务连续 ${TUNNEL_CONSECUTIVE} 次无响应，已重启 DevSpace" "Funk"
+  else
+    log "AUTORESTART_DEVSPACE_FAILED label=$DEVSPACE_LABEL"
+  fi
+fi
 
 # ---------------- log rotation ----------------------------------------------
 
@@ -418,6 +456,31 @@ if [ "$AUTORESTART" = "1" ] &&
     notify "DevSpace 自动重启隧道" "已对 $TUNNEL_STATUS 执行 cloudflared 重启" "Funk"
   else
     log "AUTORESTART_FAILED label=$CLOUDFLARED_LABEL"
+  fi
+fi
+
+# ---------------- self healing (origin: DevSpace service) --------------------
+#
+# A hung DevSpace process keeps the port open but stops accepting connections;
+# local_down is the watchdog state that describes exactly this failure. Restart
+# the LaunchAgent after a sustained streak, with a cooldown so a saturated host
+# cannot be restarted in a loop. A guard file disables this during maintenance:
+#   $STATE_DIR/disable-devspace-restart
+
+if [ "$DEVSPACE_RESTART" = "1" ] &&
+  [ ! -f "$STATE_DIR/disable-devspace-restart" ] &&
+  [ "$TUNNEL_STATUS" = "local_down" ] &&
+  [ "$TUNNEL_CONSECUTIVE" -ge "$DEVSPACE_RESTART_AFTER" ] &&
+  [ $((NOW - DEVSPACE_RESTART_AT)) -ge "$DEVSPACE_RESTART_COOLDOWN" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    DEVSPACE_RESTART_AT=$NOW
+    log "AUTORESTART_DEVSPACE_DRY label=$DEVSPACE_LABEL consecutive=$TUNNEL_CONSECUTIVE"
+  elif launchctl kickstart -k "$DEVSPACE_LABEL" >/dev/null 2>&1; then
+    DEVSPACE_RESTART_AT=$NOW
+    log "AUTORESTART_DEVSPACE kickstart issued label=$DEVSPACE_LABEL consecutive=$TUNNEL_CONSECUTIVE"
+    notify "DevSpace 自动恢复" "本机服务连续 ${TUNNEL_CONSECUTIVE} 次无响应，已重启 DevSpace" "Funk"
+  else
+    log "AUTORESTART_DEVSPACE_FAILED label=$DEVSPACE_LABEL"
   fi
 fi
 

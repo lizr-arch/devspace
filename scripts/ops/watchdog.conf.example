@@ -6,6 +6,11 @@
 AUTORESTART=1
 AUTORESTART_AFTER=3          # consecutive tunnel_down samples before restarting
 RESTART_COOLDOWN=900         # minimum seconds between cloudflared restarts
+# Origin (DevSpace service) self-healing: sustained local_down means the process
+# is alive but not accepting connections; kickstart is the only recovery.
+DEVSPACE_RESTART=1
+DEVSPACE_RESTART_AFTER=5     # consecutive local_down samples before restarting
+DEVSPACE_RESTART_COOLDOWN=900 # minimum seconds between DevSpace restarts
 REMIND_SECONDS=1800          # repeat a persistent alert at most this often
 
 # --- host pressure thresholds (WS-5) ----------------------------------------
