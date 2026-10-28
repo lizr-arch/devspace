@@ -13,7 +13,7 @@ import { AgentObserverStore } from "./agent-observer.js";
 import {
   DSH_SESSION_RE, MultiRouteStore, ROUTE_ID_RE, RouteError, canonicalChatUrl,
   type ClaimedEnvelope, type LegacyRouteRecord, type PendingReviewWake, type RouteEnvelope, type RouteMessageState,
-  type RouteOrigination, type RouteRecord, type StoreSnapshot,
+  type RouteOrigination, type RouteProposal, type RouteRecord, type StoreSnapshot,
 } from "./coach-multiroute.js";
 
 const SERVICE_NAME = "coach-feed";
@@ -60,6 +60,8 @@ export interface ManagedCoachSidecarControl {
   resolveRouteAttention?(input:{routeId:string;messageId:string;seq:number;contentSha256:string;action:"retry"|"mark_sent";reason?:string}):RouteEnvelope;
   listRouteMessages?(input:{routeId:string;origination?:RouteOrigination;afterSeq?:number;limit?:number}):RouteEnvelope[];
   routeSnapshot?():StoreSnapshot;
+  /** Test/diagnostics-only in-process read of unclaimed, unexpired proposals; never HTTP. */
+  pendingRouteProposals?():RouteProposal[];
   importLegacyRoutes?(records:{workspaceId:string;url:string;tabId?:number}[]):LegacyRouteRecord[];
   migrateLegacyRoute?(input:{legacyId:string;targetRouteId:string;expectedConsentRevision?:number}):LegacyRouteRecord;
   classifyLegacyMessage?(input:{legacyId?:string;workspaceId?:string;messageId?:string}):{state:"UNROUTABLE";reason:string;legacyId?:string};
@@ -775,6 +777,14 @@ export class ManagedCoachSidecar {
   }
   routeSnapshot(): StoreSnapshot {
     return this.routeStoreFor(this.routeEntry()).snapshot();
+  }
+  /**
+   * Test-only in-process view used by `p6-test-bootstrap`: it can only OBSERVE a
+   * proposal that the user's test extension created through POST /route/propose.
+   * It is not routed through HTTP and is never called by production server code.
+   */
+  pendingRouteProposals(): RouteProposal[] {
+    return this.routeStoreFor(this.routeEntry()).pendingRouteProposals();
   }
   importLegacyRoutes(records: { workspaceId: string; url: string; tabId?: number }[]): LegacyRouteRecord[] {
     const entry = this.routeEntry();

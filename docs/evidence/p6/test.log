@@ -231,3 +231,62 @@ ok 11 - canonical chat identity matches the Sidecar core contract
 # todo 0
 # duration_ms 63.581417
 multiroute_exit=0
+=== P6 TEST BOOTSTRAP 2026-10-28T07:37:04Z base=6b961635256c2797b9e3505eac204c872d53756d ===
+Scope: test-only two-phase bootstrap (src/coach-routes/p6-test-bootstrap.ts,
+scripts/p6-dsh-test-bootstrap.ts, src/coach-routes/p6-test-bootstrap.test.ts).
+Targeted gates only; the full suite was NOT run. Node UNDICI-EHPA warnings are
+omitted below; command lines, PASS lines and exit codes are verbatim.
+Every bootstrap output line carries TEST_ONLY_BINDING_CLAIM=true: the claim path
+here is test-only; the production claim path remains the authenticated Web GPT
+MCP tool coach_webgpt_claim_browser_route_exact.
+
+--- tsc
+$ npm run typecheck
+> @waishnav/devspace@1.1.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+tsc_exit=0
+
+--- test bootstrap (new target gate: real dedicated Sidecar HTTP + fake loopback bridge)
+$ node --import tsx src/coach-routes/p6-test-bootstrap.test.ts
+PASS two-phase bootstrap: real /route/propose click -> live-allow claim -> arm before completion -> durable queue -> delayed dom_submitted
+PASS bootstrap fails closed with BLOCKED_TEST_BOOTSTRAP when the user never creates a proposal
+PASS bootstrap claim fails closed when the live bridge session is not allowed: no route, never armed
+P6_TEST_BOOTSTRAP_TEST_DONE
+bootstrap_exit=0
+
+--- autotrigger regression
+$ node --import tsx src/coach-routes/p6-autotrigger.test.ts
+PASS automatic trigger: completion after listener arm enters the real Sidecar queue and /next
+PASS automatic trigger fails closed before start when the exact route/session binding is absent
+P6_AUTOTRIGGER_TEST_DONE
+autotrigger_exit=0
+
+--- ingress regression
+$ node --import tsx src/coach-routes/dsh-bridge-ingress.test.ts
+PASS complete trusted receipt enters the existing durable queue as fixed DSH_MESSAGE_NOTIFY
+PASS duplicate ingest is idempotent; no second queue message
+PASS non-completed/stopped/uncertain records never enqueue and never resend
+PASS incomplete/truncated/wrong identity receipts fail closed
+PASS receipt SHA is independently re-fetched; a changed second read is rejected
+PASS wrong revision and revoked route reject before queueing
+PASS DSH text injection is data only and cannot change the fixed wake instruction
+PASS real loopback HTTP adapter reads auth/runtime privately and refuses redirects/missing auth
+P6_INGRESS_TEST_PASS 8
+ingress_exit=0
+
+--- CLI fail-closed smoke (temp workspace under /private/var/folders, port 51056, 300ms route wait; no test extension click)
+$ node --import tsx scripts/p6-dsh-test-bootstrap.ts --bridge-state-dir <tmp>/bridge     --workspace-root <tmp>/workspace --workspace-id ws-smoke-test     --route-state-dir <tmp>/routes --port 51056 --paired-extension-id <32 hex>     --pairing-token-file <tmp>/token --session-id session-eeeeeeee-5555-4555-8555-555555555555     --request-id smoke-request-001 --route-wait-ms 300 --request-wait-ms 300     --timeout-ms 300 --receipt-timeout-ms 300
+{"ok":true,"phase":"READY_FOR_BINDING","testOnlyBindingClaim":true,"port":51056,...,"note":"Dedicated test Sidecar is listening. Waiting for the user's test-extension click (POST /route/propose)."}
+{"ok":false,"phase":"BLOCKED_TEST_BOOTSTRAP","testOnlyBindingClaim":true,"code":"PROPOSAL_WAIT_TIMEOUT","detail":"no unclaimed /route/propose proposal within 300ms (test extension click required)"}
+{"phase":"DONE","testOnlyBindingClaim":true,"ok":false,"exitCode":2,"state":"BLOCKED_TEST_BOOTSTRAP","code":"PROPOSAL_WAIT_TIMEOUT",...}
+cli_smoke_exit=2
+
+$ node --import tsx scripts/p6-dsh-test-bootstrap.ts   # no arguments
+{"ok":false,"phase":"BLOCKED_TEST_BOOTSTRAP","testOnlyBindingClaim":true,"code":"MISSING_ARG_BRIDGE_STATE_DIR","detail":"MISSING_ARG_BRIDGE_STATE_DIR"}
+missing_args_exit=2
+
+No pairing token appears in any captured output (it is read only from the private
+0600 file, never argv/log). No production Sidecar/port/Chrome/DSH session, other
+worktree, shared mailbox or test-extension harness file was touched by these runs.
+Real binding E2E is still NOT RUN -> BLOCKED_TEST_BINDING.

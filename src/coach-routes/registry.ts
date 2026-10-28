@@ -184,6 +184,23 @@ export class RouteRegistry {
     return undefined;
   }
 
+  /**
+   * Test/diagnostics-only read-only view: unclaimed, unexpired proposal metadata
+   * copies, oldest first. This is the only way an in-process test bootstrap can
+   * observe a proposal that the *user* created by clicking the test extension
+   * (`POST /route/propose`); it never creates or claims a proposal itself.
+   * Deliberately not exposed over HTTP and never wired into the production
+   * server, so no production code path can enumerate binding challenges.
+   */
+  pendingRouteProposals(): RouteProposal[] {
+    if (this.closed) throw new RouteError("ROUTE_NOT_ACTIVE", "route store is closed");
+    const now = this.nowMs();
+    return [...this.proposals.values()]
+      .filter((proposal) => !proposal.claimedRouteId && proposal.expiresAt >= now)
+      .sort((a, b) => a.createdAt - b.createdAt || a.routeId.localeCompare(b.routeId))
+      .map((proposal) => ({ ...proposal }));
+  }
+
   private pruneProposals(): void {
     const now = this.nowMs();
     for (const [nonce, proposal] of this.proposals) if (proposal.expiresAt < now) this.proposals.delete(nonce);

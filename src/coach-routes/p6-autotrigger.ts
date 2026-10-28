@@ -51,7 +51,38 @@ export interface P6AutoTriggerHandle {
   stop: () => Promise<void>;
 }
 
-function readPrivatePairingToken(path: string): string {
+/**
+ * Poll one exact durable-queue messageId until Chrome records a delivery outcome.
+ * Shared (exported) by the P6 two-phase test bootstrap so both entry points use
+ * the identical receipt semantics: only `dom_submitted` is a successful browser
+ * receipt; `manual_sent`/`acked` are explicitly unverified; `needs_attention`
+ * and timeout fail closed. This never writes a receipt itself.
+ */
+export function createBrowserReceiptWaiter(
+  manager: Pick<ManagedCoachSidecar, "listRouteMessages">,
+  routeId: string,
+  defaultTimeoutMs = 120_000,
+): (messageId: string, timeoutMs?: number) => Promise<BrowserReceiptResult> {
+  return async (messageId, timeoutMs = defaultTimeoutMs) => {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      let state: string | undefined;
+      try {
+        const message = (manager.listRouteMessages?.({ routeId, limit: 50 }) ?? [])
+          .find((item) => item.messageId === messageId);
+        state = message?.state;
+      } catch { state = undefined; }
+      if (state === "dom_submitted") return { state: "BROWSER_DOM_SUBMITTED_UNVERIFIED", messageId };
+      if (state === "manual_sent" || state === "acked") return { state: "BROWSER_ACKED_UNVERIFIED", messageId, detail: state };
+      if (state === "needs_attention") return { state: "NEEDS_ATTENTION", messageId, detail: "operator review required; no retry" };
+      if (Date.now() >= deadline) return { state: "TIMEOUT", messageId };
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+}
+
+/** Strict private pairing-token file read (0600 regular file, own uid, no symlink). */
+export function readPrivatePairingToken(path: string): string {
   const st = lstatSync(path);
   if (st.isSymbolicLink() || !st.isFile() || (process.getuid && st.uid !== process.getuid()) ||
       (process.platform !== "win32" && (st.mode & 0o077) !== 0) || realpathSync(path) !== path)
@@ -113,22 +144,7 @@ export async function startP6AutoTrigger(options: P6AutoTriggerOptions): Promise
     });
     // Arm the observer immediately; completion can happen at any later time.
     const monitor = ingress.waitAndIngest(options.requestId, options.timeoutMs ?? 120_000);
-    const waitForBrowserReceipt = async (messageId: string, timeoutMs = options.receiptTimeoutMs ?? 120_000): Promise<BrowserReceiptResult> => {
-      const deadline = Date.now() + Math.max(0, timeoutMs);
-      for (;;) {
-        let state: string | undefined;
-        try {
-          const message = (manager.listRouteMessages?.({ routeId: options.routeId, limit: 50 }) ?? [])
-            .find((item) => item.messageId === messageId);
-          state = message?.state;
-        } catch { state = undefined; }
-        if (state === "dom_submitted") return { state: "BROWSER_DOM_SUBMITTED_UNVERIFIED", messageId };
-        if (state === "manual_sent" || state === "acked") return { state: "BROWSER_ACKED_UNVERIFIED", messageId, detail: state };
-        if (state === "needs_attention") return { state: "NEEDS_ATTENTION", messageId, detail: "operator review required; no retry" };
-        if (Date.now() >= deadline) return { state: "TIMEOUT", messageId };
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    };
+    const waitForBrowserReceipt = createBrowserReceiptWaiter(manager, options.routeId, options.receiptTimeoutMs ?? 120_000);
     return { manager, token: startedInfo.token, port: options.port,
       monitor, waitForBrowserReceipt, stop: () => manager.stop(options.workspaceId) };
   } catch (error) {

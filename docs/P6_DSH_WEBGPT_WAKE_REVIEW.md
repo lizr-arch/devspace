@@ -1,9 +1,12 @@
 # P6 — DSH completion → exact Web GPT conversation wake (one-way)
 
-Status: **IMPLEMENTED_OFFLINE_AUTO_TRIGGER / BLOCKED_TEST_BINDING**
-- Offline wiring, runnable automatic entry and focused tests: complete.
+Status: **IMPLEMENTED_OFFLINE_AUTO_TRIGGER / BOOTSTRAP_READY (TEST_ONLY_BINDING_CLAIM) / BLOCKED_TEST_BINDING**
+- Offline wiring, runnable automatic entry, single-command two-phase test
+  bootstrap and focused tests: complete.
 - Real DSH completion → real Chrome → real ChatGPT conversation: **NOT RUN**;
-  test binding prerequisites are absent.
+  the bootstrap entry is ready but the real test still needs the user's bridge
+  `allow`, an isolated test Chrome/extension harness and a dedicated ChatGPT test
+  conversation, so the binding is honestly blocked.
 - Four evidence layers are kept distinct: (1) bridge request completed,
   (2) route queue accepted, (3) Chrome DOM submitted, (4) Web GPT actually
   started replying. Only (1)+(2) are demonstrated offline; (3)+(4) were not
@@ -125,6 +128,72 @@ The route must already be created by the normal browser/WebGPT binding flow;
 the process is armed before the DSH request finishes, so no user command is
 needed after completion.
 
+## 2c. Single-command two-phase test bootstrap (BOOTSTRAP_READY)
+
+The real-wake test is driven by one test-only entry point:
+`src/coach-routes/p6-test-bootstrap.ts` (`startP6TestBootstrap()`) and
+`scripts/p6-dsh-test-bootstrap.ts` (CLI, one JSON line per phase, synchronous
+stdout flush so an operator can `tail -f` the log).
+
+```
+node --import tsx scripts/p6-dsh-test-bootstrap.ts \
+  --bridge-state-dir /Users/liz/.local/share/dsh-session-bridge \
+  --workspace-root <dedicated test workspace> \
+  --workspace-id ws_aaa3fa66-98be-423b-8ba9-36541d8ee089 \
+  --route-state-dir <dedicated test workspace>/routes \
+  --port <unused test port> \
+  --paired-extension-id <measured test extension id> \
+  --pairing-token-file <private 0600 token file> \
+  --session-id <new dedicated DSH session> \
+  --request-id <bridge request id> \
+  --route-wait-ms 900000 --request-wait-ms 900000 \
+  --timeout-ms 600000 --receipt-timeout-ms 300000
+```
+
+Phases (every line carries `TEST_ONLY_BINDING_CLAIM=true`):
+
+1. `READY_FOR_BINDING` — a DEDICATED `ManagedCoachSidecar` (its own port, route
+   state dir and test event DB, real `DshBridgeHttpTransport` injected) is
+   listening; no token is printed.
+2. `PROPOSAL_DETECTED` — the bootstrap **observes** an unclaimed proposal that
+   the *user's* test-extension click created through `POST /route/propose`
+   (in-process `pendingRouteProposals()` view only; it never calls
+   `store.propose`, never fabricates a route/URL/nonce).
+3. `ROUTE_CLAIMED_TEST_ONLY` — `manager.claimExactBrowserRoute({workspaceId,
+   dshSessionId, routeId, nonce, url})`, i.e. the exact same claim gate as the
+   Web GPT MCP tool, including the Sidecar's live bridge-session `allowed`
+   re-check (fail closed on a non-allowed/unknown session). **Test-only:** in
+   production this claim can only be made by
+   `coach_webgpt_claim_browser_route_exact`; `TEST_ONLY_BINDING_CLAIM=true` in
+   every JSON line and in the final outcome.
+4. `ROUTE_ACTIVE` — re-reads the Sidecar snapshot and requires active state plus
+   exact workspace/session/consentRevision match.
+5. `REQUEST_PRESENT` — polls the real bridge `GET /v1/requests/:requestId` until
+   the request exists; it never arms before that.
+6. `LISTENING` — arms `DshBridgeIngress.waitAndIngest(requestId)` and records the
+   bridge request `state` at arm time as the “listen first, finish later”
+   evidence.
+7. `MONITOR_DONE` — only `completed` may call the existing
+   `manager.ingestDshReceipt` sink (same durable route queue); the result
+   reports `enqueued`/`envelope.messageId`. `stopped`/`rejected`/`uncertain`/
+   `timeout`/verification failure fail closed and are never re-sent.
+8. `BROWSER_RECEIPT` — the SAME Sidecar stays alive while the exported
+   `waitForBrowserReceipt` waits for Chrome's delayed ACK:
+   `dom_submitted` → `BROWSER_DOM_SUBMITTED_UNVERIFIED` (exit 0);
+   `needs_attention`/timeout/`manual_sent`/`acked` fail closed (exit 2).
+   `finally` stops only this dedicated test Sidecar.
+
+Exit codes: `0` = `dom_submitted`; `2` = `BLOCKED_TEST_BOOTSTRAP` / `TIMEOUT` /
+`NEEDS_ATTENTION` (or acked-but-unverified); `1` = internal error. Invalid or
+missing CLI arguments fail closed with exit 2 before any Sidecar starts. Error
+output never contains the pairing token.
+
+Minimal additive read-only seam for step 2:
+`RouteRegistry.pendingRouteProposals()` (unclaimed, unexpired proposal metadata
+copies, oldest first) and `ManagedCoachSidecar.pendingRouteProposals?()` /
+implementation. The method is in-process only: it is not exposed over HTTP and
+is never called by the production `server.ts`.
+
 ## 3. Strict preconditions enforced (C)
 
 - Route must be active/exact revision/workspace/session scope.
@@ -159,14 +228,37 @@ automatic enqueue, checks pre-ACK timeout returns `TIMEOUT`, and checks startup
 is BLOCKED when the exact route/session binding is absent. No test calls ingest
 directly. Existing ingress tests cover revoked route and wrong revision before
 queueing; the Chrome gate tests cover wrong tab/URL.
-Command results in `docs/evidence/p6/test.log`:
-`tsc exit 0`, ingress 8/8 PASS, autotrigger 2/2 PASS, existing bridge
+
+The third targeted gate `src/coach-routes/p6-test-bootstrap.test.ts` (new, 3
+checks) exercises the full two-phase bootstrap against a real dedicated Sidecar
+HTTP instance plus a test-only loopback bridge: it creates the proposal with a
+real `POST /route/propose` (Bearer from the Sidecar start, test-extension
+Origin) — exactly what the test-extension click does — then asserts the bootstrap
+observes it, claims it through the live-allow gate, verifies the exact active
+route, arms before the fake request reaches `completed` (asserted request state
+at arm = `executing`), ingests into the durable queue, exposes the fixed
+`DSH_MESSAGE_NOTIFY` via `/routes/:id/next` (no DSH body text leaked), and only
+after a delayed `/ack outcome=dom_submitted` returns
+`BROWSER_DOM_SUBMITTED_UNVERIFIED`. Negatives: no proposal → exit 2
+`BLOCKED_TEST_BOOTSTRAP` (`PROPOSAL_WAIT_TIMEOUT`) with zero routes persisted;
+bridge session not allowed → claim rejected fail closed
+(`ROUTE_DSH_SESSION_NOT_AUTHORIZED`), zero routes persisted, listener never
+armed. The test never calls `ingress.ingest` directly. A CLI fail-closed smoke
+(missing/invalid args and a real 300ms no-click run) also exits 2 without
+leaking the pairing token.
+Command results in `docs/evidence/p6/test.log` (P6 TEST BOOTSTRAP section):
+`tsc exit 0`, bootstrap 3/3 PASS, autotrigger 2/2 PASS, ingress 8/8 PASS,
+CLI fail-closed smokes exit 2 as designed. Earlier sections: existing bridge
 hostile/wiring/principal 13+7+15 exit 0, multiroute core 27+loopback 11 exit 0.
 
 No fake Chrome DOM or real ChatGPT tab was used. The test-only loopback bridge
 is a local test server, not the production bridge.
 
 ## 5. Real wake attempt and blockers (E)
+
+Two-phase test bootstrap status: implemented and covered by a targeted gate;
+the real binding E2E has still **NOT RUN** (no claim/queue/DOM was produced on a
+real Chrome/ChatGPT conversation yet).
 
 Bridge read-only inspection on this machine: the allowed sessions are existing
 sessions (`session-098d80fb…` active; `session-0645ad77…` old sea-battle;
@@ -184,23 +276,30 @@ Minimum user setup required:
    profile with the test Coach extension; click the exact browser binding
    (canonical URL + nonce + route revision). Do not bind the current/old
    conversation.
-4. Two-phase bootstrap: start the runnable entry with `--route-wait-ms`
-   **before** clicking the test binding. It starts its own dedicated Sidecar;
-   the test extension/WebGPT then creates the exact route/revision; the entry
-   waits for that route and arms the listener. Start the DSH request afterwards
-   (or let it complete); no second user command is needed.
-   The pairing bearer must come from a private token file or the normal test
-   handoff path, never argv. If the test Sidecar cannot be paired to the test
-   extension without production access, mark BLOCKED_TEST_BOOTSTRAP.
+4. Single-command two-phase bootstrap: start `scripts/p6-dsh-test-bootstrap.ts`
+   **before** clicking the test binding (see section 2c for the exact flags).
+   It starts its own dedicated Sidecar; the user's test-extension click creates
+   the proposal; the bootstrap observes and claims it test-only, verifies the
+   exact active route, waits for the bridge request, arms before completion,
+   auto-ingests into the durable queue and keeps the same Sidecar alive until
+   Chrome's delayed DOM receipt. Start the DSH bridge request afterwards (or let
+   it complete); no second user/Lead command is needed for enqueue+receipt.
+   The pairing bearer must come from a private 0600 token file, never argv. If
+   the test Sidecar cannot be paired/claimed without production access, the
+   bootstrap exits 2 with `BLOCKED_TEST_BOOTSTRAP`.
 5. Observe four layers separately: bridge completed, queue accepted, Chrome
    dom_submitted, Web GPT actually replying. Only the last observed layer may
    be called REAL_WAKE_VERIFIED by the independent reviewer.
 
 ## 6. Verdict / rollback
 
-**IMPLEMENTED_OFFLINE_AUTO_TRIGGER / BLOCKED_TEST_BINDING.** Offline ingress
-wiring and a runnable in-process automatic trigger are complete and tested; no
+**IMPLEMENTED_OFFLINE_AUTO_TRIGGER / BOOTSTRAP_READY (TEST_ONLY_BINDING_CLAIM) /
+BLOCKED_TEST_BINDING.** Offline ingress wiring, an in-process automatic trigger
+and a single-command two-phase test bootstrap are complete and tested; no
 production change/deploy and no real browser wake was observed because the
-dedicated test session/ChatGPT/Chrome binding is absent.
+dedicated test session/ChatGPT/Chrome binding is not yet available. The bootstrap
+does not self-certify a wake: layer 3 (`BROWSER_DOM_SUBMITTED_UNVERIFIED`) is a DOM
+receipt, and layer 4 (Web GPT actually replying) can only be confirmed by the
+user/independent reviewer.
 Rollback: revert the P6 commit or discard this isolated worktree; no production
 state exists to roll back. The P6 worktree is the only write location.
