@@ -1,0 +1,15 @@
+# During P5 prototype development (not production)
+
+First focused run of src/coach-routes/event-receipt.test.ts exited 1 with two
+real test failures (10/12 passed):
+- "revoked route and stale revision are rejected before issuance/submit":
+  the test left the route at revision 4 before issuing the next challenge, so
+  issueChallenge correctly threw REVISION_STALE instead of reaching the intended
+  submit-time stale check. Fixed the test to reset to revision 3 before issuing.
+- "one-time challenge: exact retry is idempotent...": submitReceipt deleted the
+  live challenge on consumption before checking the retained consumed-challenge
+  map, so an exact ACK-loss retry looked like CHALLENGE_NOT_FOUND. Moved the
+  consumed-challenge/idempotency check ahead of the live-map lookup.
+
+Final run: EVENT_RECEIPT_TEST_PASS 12, exit 0; see test.log. No production code
+or service was involved in either run.
