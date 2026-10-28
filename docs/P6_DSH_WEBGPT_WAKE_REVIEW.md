@@ -79,8 +79,9 @@ single-command runner `scripts/p6-dsh-autotrigger.ts`:
 
 - `startP6AutoTrigger()` starts a **dedicated** `ManagedCoachSidecar` in the
   same process (never the production Sidecar/port), injects the real
-  `DshBridgeHttpTransport`, verifies the exact pre-bound route/session/revision
-  exists in that Sidecar's route store, then arms
+  `DshBridgeHttpTransport`, and can start **before** the route exists for a
+  two-phase test bootstrap (`--route-wait-ms`). It verifies the exact
+  route/session/revision in that Sidecar's route store, then arms
   `DshBridgeIngress.waitAndIngest()` **before** the DSH request completes.
 - The watcher polls the bridge request; on completion it calls the existing
   `RouteBridgeDelivery.ingest` through the Sidecar's own sink, so the message
@@ -90,9 +91,17 @@ single-command runner `scripts/p6-dsh-autotrigger.ts`:
 - It is test-only opt-in and fails closed before startup if the exact route,
   session, revision or pairing is missing; it does not fabricate a route URL,
   does not touch production and exposes no automatic DSH send/reply.
-- Lifecycle: the process stays alive until the bridge request is terminal or
-  the bounded timeout expires; stopping the process stops monitoring and the
-  Sidecar it started. It does not bind to production ports.
+- Lifecycle: after automatic enqueue, the **same** dedicated Sidecar remains
+  alive and `waitForBrowserReceipt()` polls the exact messageId until Chrome
+  ACKs `dom_submitted` (or `manual_sent`/`acked`), or a bounded timeout /
+  `needs_attention` fails closed. `BROWSER_DOM_SUBMITTED_UNVERIFIED` is not a
+  model reply; `REAL_GPT_REPLIED` is never claimed by this harness. The process
+  stops the Sidecar only after that receipt or timeout, and never retries or
+  emits an ACK itself. It does not bind production ports.
+- Pairing secret: no pairing bearer is accepted on argv. Optional
+  `--pairing-token-file` reads a private regular file (owner/mode 0600,
+  base64url 32-byte token) and never logs it; otherwise the Sidecar generates
+  its own token through the normal test pairing/handoff path.
 
 Runnable command (operator supplies the dedicated/test values):
 
@@ -107,7 +116,9 @@ node --import tsx scripts/p6-dsh-autotrigger.ts \
   --session-id <new-dedicated-dsh-session> \
   --route-id <exactly-bound-route-id> \
   --request-id <bridge-request-id> \
-  --consent-revision <route-revision>
+  --consent-revision <route-revision> \
+  [--pairing-token-file <private-0600-file>] \
+  [--route-wait-ms 120000] [--receipt-timeout-ms 120000]
 ```
 
 The route must already be created by the normal browser/WebGPT binding flow;
@@ -142,8 +153,12 @@ needed after completion.
 A second targeted gate `src/coach-routes/p6-autotrigger.test.ts` starts a
 dedicated real Sidecar HTTP instance plus a test-only loopback bridge, pre-binds
 an exact route, arms the monitor, then completes the fake DSH request and
-asserts the existing `/routes/:id/next` returns the fixed DSH message. It also
-asserts startup is BLOCKED when the exact route/session binding is absent.
+asserts the existing `/routes/:id/next` returns the fixed DSH message. It
+delays Chrome's `/next` and ACK to prove the Sidecar stays alive after
+automatic enqueue, checks pre-ACK timeout returns `TIMEOUT`, and checks startup
+is BLOCKED when the exact route/session binding is absent. No test calls ingest
+directly. Existing ingress tests cover revoked route and wrong revision before
+queueing; the Chrome gate tests cover wrong tab/URL.
 Command results in `docs/evidence/p6/test.log`:
 `tsc exit 0`, ingress 8/8 PASS, autotrigger 2/2 PASS, existing bridge
 hostile/wiring/principal 13+7+15 exit 0, multiroute core 27+loopback 11 exit 0.
@@ -169,9 +184,14 @@ Minimum user setup required:
    profile with the test Coach extension; click the exact browser binding
    (canonical URL + nonce + route revision). Do not bind the current/old
    conversation.
-4. Start the runnable entry above against dedicated test state **before** the
-   DSH request completes. It starts its own test Sidecar and arms the listener;
-   no further command is needed when completion arrives.
+4. Two-phase bootstrap: start the runnable entry with `--route-wait-ms`
+   **before** clicking the test binding. It starts its own dedicated Sidecar;
+   the test extension/WebGPT then creates the exact route/revision; the entry
+   waits for that route and arms the listener. Start the DSH request afterwards
+   (or let it complete); no second user command is needed.
+   The pairing bearer must come from a private token file or the normal test
+   handoff path, never argv. If the test Sidecar cannot be paired to the test
+   extension without production access, mark BLOCKED_TEST_BOOTSTRAP.
 5. Observe four layers separately: bridge completed, queue accepted, Chrome
    dom_submitted, Web GPT actually replying. Only the last observed layer may
    be called REAL_WAKE_VERIFIED by the independent reviewer.

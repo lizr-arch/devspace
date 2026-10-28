@@ -39,14 +39,21 @@ async function main(): Promise<void> {
     requestId: required("request-id"),
     consentRevision: integer("consent-revision"),
     timeoutMs: integer("timeout-ms", 120_000),
-    ...(arg("pairing-token") ? { pairingToken: arg("pairing-token") } : {}),
+    receiptTimeoutMs: integer("receipt-timeout-ms", 120_000),
+    routeWaitMs: integer("route-wait-ms", 0),
+    ...(arg("pairing-token-file") ? { pairingTokenFile: arg("pairing-token-file") } : {}),
   });
   console.log(JSON.stringify({ ok: true, phase: "LISTENING", routeId: arg("route-id"),
     port: handle.port, note: "Completion can arrive now; no further command is required." }));
   try {
     const result = await handle.monitor;
     console.log(JSON.stringify({ ok: result.enqueued, phase: "MONITOR_DONE", result }));
-    if (!result.enqueued) process.exitCode = 2;
+    if (!result.enqueued || !result.envelope) { process.exitCode = 2; return; }
+    // Keep the SAME dedicated Sidecar alive: Chrome autoMultiPump polls asynchronously.
+    const receipt = await handle.waitForBrowserReceipt(result.envelope.messageId);
+    console.log(JSON.stringify({ ok: receipt.state === "BROWSER_DOM_SUBMITTED_UNVERIFIED",
+      phase: "BROWSER_RECEIPT", receipt }));
+    if (receipt.state !== "BROWSER_DOM_SUBMITTED_UNVERIFIED") process.exitCode = 2;
   } finally {
     await handle.stop();
   }

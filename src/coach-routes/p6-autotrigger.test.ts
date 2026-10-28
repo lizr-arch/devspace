@@ -93,16 +93,37 @@ await check("automatic trigger: completion after listener arm enters the real Si
       const result = await handle.monitor;
       assert.equal(result.enqueued, true);
       assert.equal(result.state, "completed");
-      // Existing Sidecar /next consumes the same queue; no test call to ingest.
+      assert.ok(result.envelope);
+      // No browser ACK yet: the dedicated Sidecar must fail closed on timeout,
+      // not claim a browser submit and not stop immediately.
+      const timeout = await handle.waitForBrowserReceipt(result.envelope.messageId, 250);
+      assert.equal(timeout.state, "TIMEOUT");
+      // Chrome autoMultiPump normally polls on an asynchronous alarm. The
+      // dedicated Sidecar must remain alive until the delayed /next and ACK.
+      const receiptPromise = handle.waitForBrowserReceipt(result.envelope.messageId, 5_000);
+      await new Promise((resolve) => setTimeout(resolve, 300));
       const response = await fetch(`http://127.0.0.1:${sidecarPort}/routes/${route.routeId}/next?origination=dsh&limit=1`, {
         headers: { Authorization: "Bearer " + handle.token, Origin: "chrome-extension://" + extensionId },
       });
       assert.equal(response.status, 200);
-      const body = await response.json() as { messages: { kind: string; content: string; data: Record<string, unknown> }[] };
+      const body = await response.json() as { messages: { messageId: string; seq: number; contentSha256: string; kind: string; content: string; data: Record<string, unknown> }[] };
       assert.equal(body.messages.length, 1);
       assert.equal(body.messages[0].kind, "DSH_MESSAGE_NOTIFY");
       assert.ok(body.messages[0].content.includes(route.routeId));
       assert.equal(JSON.stringify(body).includes("P6 automatic completion body"), false);
+      const message = body.messages[0];
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const ack = await fetch(`http://127.0.0.1:${sidecarPort}/routes/${route.routeId}/ack`, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + handle.token, Origin: "chrome-extension://" + extensionId,
+          "Content-Type": "application/json" },
+        body: JSON.stringify({ messageId: message.messageId, seq: message.seq,
+          contentSha256: message.contentSha256, outcome: "dom_submitted" }),
+      });
+      assert.equal(ack.status, 200);
+      const receipt = await receiptPromise;
+      assert.equal(receipt.state, "BROWSER_DOM_SUBMITTED_UNVERIFIED");
+      assert.equal(receipt.messageId, message.messageId);
       await handle.stop();
     } finally {
       await handle.stop().catch(() => {});
