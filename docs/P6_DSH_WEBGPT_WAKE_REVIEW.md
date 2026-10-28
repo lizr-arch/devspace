@@ -1,7 +1,7 @@
 # P6 — DSH completion → exact Web GPT conversation wake (one-way)
 
-Status: **IMPLEMENTED_OFFLINE / BLOCKED_TEST_BINDING**
-- Offline wiring and focused tests: complete.
+Status: **IMPLEMENTED_OFFLINE_AUTO_TRIGGER / BLOCKED_TEST_BINDING**
+- Offline wiring, runnable automatic entry and focused tests: complete.
 - Real DSH completion → real Chrome → real ChatGPT conversation: **NOT RUN**;
   test binding prerequisites are absent.
 - Four evidence layers are kept distinct: (1) bridge request completed,
@@ -72,6 +72,48 @@ No production server wiring was enabled. A real test requires injecting this
 transport into a dedicated Sidecar/test process (not the production one); this
 was not done because the required test binding is absent.
 
+## 2b. Runnable automatic entry (REWORK)
+
+The component-only gap is closed by `src/coach-routes/p6-autotrigger.ts` and the
+single-command runner `scripts/p6-dsh-autotrigger.ts`:
+
+- `startP6AutoTrigger()` starts a **dedicated** `ManagedCoachSidecar` in the
+  same process (never the production Sidecar/port), injects the real
+  `DshBridgeHttpTransport`, verifies the exact pre-bound route/session/revision
+  exists in that Sidecar's route store, then arms
+  `DshBridgeIngress.waitAndIngest()` **before** the DSH request completes.
+- The watcher polls the bridge request; on completion it calls the existing
+  `RouteBridgeDelivery.ingest` through the Sidecar's own sink, so the message
+  lands in the same durable route queue. No second queue or DOM inserter is
+  created and the existing Chrome `autoMultiPump` consumes the normal
+  `/routes/:id/next` response.
+- It is test-only opt-in and fails closed before startup if the exact route,
+  session, revision or pairing is missing; it does not fabricate a route URL,
+  does not touch production and exposes no automatic DSH send/reply.
+- Lifecycle: the process stays alive until the bridge request is terminal or
+  the bounded timeout expires; stopping the process stops monitoring and the
+  Sidecar it started. It does not bind to production ports.
+
+Runnable command (operator supplies the dedicated/test values):
+
+```bash
+node --import tsx scripts/p6-dsh-autotrigger.ts \
+  --bridge-state-dir /Users/liz/.local/share/dsh-session-bridge \
+  --workspace-root <dedicated-test-workspace> \
+  --workspace-id ws_aaa3fa66-98be-423b-8ba9-36541d8ee089 \
+  --route-state-dir <dedicated-test-workspace>/routes \
+  --port <unused-test-port> \
+  --paired-extension-id <test-extension-id> \
+  --session-id <new-dedicated-dsh-session> \
+  --route-id <exactly-bound-route-id> \
+  --request-id <bridge-request-id> \
+  --consent-revision <route-revision>
+```
+
+The route must already be created by the normal browser/WebGPT binding flow;
+the process is armed before the DSH request finishes, so no user command is
+needed after completion.
+
 ## 3. Strict preconditions enforced (C)
 
 - Route must be active/exact revision/workspace/session scope.
@@ -97,9 +139,14 @@ was not done because the required test binding is absent.
 8. test-only loopback HTTP bridge validates auth/runtime handling, sessions,
    requests, raw receipt and one-way no-reply.
 
-Command results are in `docs/evidence/p6/test.log`:
-`tsc exit 0`, ingress 8/8 PASS, existing bridge hostile/wiring/principal
-13+7+15 exit 0, multiroute core 27+loopback 11 exit 0.
+A second targeted gate `src/coach-routes/p6-autotrigger.test.ts` starts a
+dedicated real Sidecar HTTP instance plus a test-only loopback bridge, pre-binds
+an exact route, arms the monitor, then completes the fake DSH request and
+asserts the existing `/routes/:id/next` returns the fixed DSH message. It also
+asserts startup is BLOCKED when the exact route/session binding is absent.
+Command results in `docs/evidence/p6/test.log`:
+`tsc exit 0`, ingress 8/8 PASS, autotrigger 2/2 PASS, existing bridge
+hostile/wiring/principal 13+7+15 exit 0, multiroute core 27+loopback 11 exit 0.
 
 No fake Chrome DOM or real ChatGPT tab was used. The test-only loopback bridge
 is a local test server, not the production bridge.
@@ -122,17 +169,18 @@ Minimum user setup required:
    profile with the test Coach extension; click the exact browser binding
    (canonical URL + nonce + route revision). Do not bind the current/old
    conversation.
-4. Provide the resulting routeId/revision and a bridge requestId for that new
-   session, then run the P6 ingress against a dedicated Sidecar/test state (not
-   production). Only after a request is actually completed, accepted, claimed,
-   seenUser and non-truncated will the queue accept one fixed wake.
+4. Start the runnable entry above against dedicated test state **before** the
+   DSH request completes. It starts its own test Sidecar and arms the listener;
+   no further command is needed when completion arrives.
 5. Observe four layers separately: bridge completed, queue accepted, Chrome
    dom_submitted, Web GPT actually replying. Only the last observed layer may
    be called REAL_WAKE_VERIFIED by the independent reviewer.
 
 ## 6. Verdict / rollback
 
-**IMPLEMENTED_OFFLINE / BLOCKED_TEST_BINDING.** Offline ingress wiring is
-complete and tested; no production change/deploy; no real browser wake observed.
+**IMPLEMENTED_OFFLINE_AUTO_TRIGGER / BLOCKED_TEST_BINDING.** Offline ingress
+wiring and a runnable in-process automatic trigger are complete and tested; no
+production change/deploy and no real browser wake was observed because the
+dedicated test session/ChatGPT/Chrome binding is absent.
 Rollback: revert the P6 commit or discard this isolated worktree; no production
 state exists to roll back. The P6 worktree is the only write location.

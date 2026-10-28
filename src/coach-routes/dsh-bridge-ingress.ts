@@ -178,8 +178,11 @@ function defaultRequestText(connection: DshBridgeConnection, path: string, timeo
   });
 }
 
+/** Structural subset used by both RouteBridgeDelivery and a live Sidecar. */
+export type DshIngestSink = Pick<RouteBridgeDelivery, "ingest">;
+
 export interface DshBridgeIngressOptions {
-  delivery: RouteBridgeDelivery;
+  delivery: DshIngestSink;
   transport: BridgeTransport;
   routeId: string;
   sessionId: string;
@@ -199,7 +202,7 @@ export interface DshBridgeIngressResult {
  * retries an uncertain request.
  */
 export class DshBridgeIngress {
-  private readonly delivery: RouteBridgeDelivery;
+  private readonly delivery: DshIngestSink;
   private readonly transport: BridgeTransport;
   private readonly routeId: string;
   private readonly sessionId: string;

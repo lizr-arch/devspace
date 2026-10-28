@@ -1,16 +1,16 @@
-=== P6 final 2026-10-28T05:22:59Z base=5d6a5ce953de3b01f2c25b3238f5a105bb56ab09 ===
+=== P6 REWORK final 2026-10-28T05:27:22Z base=3a162cbc01f191d331a62ae188acc3e91a7122df ===
 --- tsc
-(node:18407) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19911) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 
 > @waishnav/devspace@1.1.0 typecheck
 > tsc -p tsconfig.json --noEmit
 
 tsc_exit=0
---- dsh ingress test
-(node:18566) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+--- ingress
+(node:19942) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
-(node:18566) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19942) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 PASS complete trusted receipt enters the existing durable queue as fixed DSH_MESSAGE_NOTIFY
 PASS duplicate ingest is idempotent; no second queue message
@@ -22,16 +22,25 @@ PASS DSH text injection is data only and cannot change the fixed wake instructio
 PASS real loopback HTTP adapter reads auth/runtime privately and refuses redirects/missing auth
 P6_INGRESS_TEST_PASS 8
 ingress_exit=0
+--- autotrigger
+(node:19950) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:19950) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS automatic trigger: completion after listener arm enters the real Sidecar queue and /next
+PASS automatic trigger fails closed before start when the exact route/session binding is absent
+P6_AUTOTRIGGER_TEST_DONE
+autotrigger_exit=0
 --- bridge
-(node:18573) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19951) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 
 > @waishnav/devspace@1.1.0 test:coach:bridge
 > node --import tsx src/coach-routes/bridge-hostile.test.ts && node --import tsx src/coach-routes/bridge-wiring.test.ts && node --import tsx src/coach-routes/route-principal.test.ts
 
-(node:18595) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19972) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
-(node:18595) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19972) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 PASS three unattended OFFLINE turns: authenticated receipt -> fake Chrome -> verified GPT -> exact DSH
 PASS sender spoof, forged from=dsh, missing/truncated/wrong-session/torn receipts and bad SHA fail closed
@@ -49,9 +58,9 @@ PASS cross-process owner lock rejects second writer; SIGKILL releases OS ownersh
 PASS torn outbound frame and checksum corruption never authorize retry
 PASS fake Chrome worker restart: ACK loss and persisted in_flight both prevent a second DOM submit
 OFFLINE hostile checks: 13 passed; real Chrome/DSH E2E NOT RUN
-(node:18606) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19979) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
-(node:18606) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19979) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 PASS trusted receipt enters actual Sidecar routeStore; forged legacy reply cannot close DSH event
 PASS HTTP handler validates host/origin/bearer; next flattens event identity without source body
@@ -61,9 +70,9 @@ PASS real MCP invocation rejects unverified principal even if body claims truste
 PASS real MCP trusted_reply passes host invocation metadata and dispatches exact session
 PASS no configured transport is explicitly BLOCKED_REAL_E2E, never implicit permission
 OFFLINE in-memory wiring: 7 passed; HTTP SOCKET/REAL E2E NOT RUN
-(node:18614) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19981) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
-(node:18614) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19981) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 PASS enforced mode: no trusted principal => snapshot denied
 PASS enforced mode: missing principal denies admin/claim actions with no side effect
@@ -83,15 +92,15 @@ PASS owner A still sees route A after B revoke; legacy mode is explicit-only
 ROUTE_PRINCIPAL_TEST_PASS 15
 bridge_exit=0
 --- multiroute
-(node:18659) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:19984) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 
 > @waishnav/devspace@1.1.0 test:coach:multiroute
 > node --import tsx src/coach-multiroute.test.ts && node --import tsx src/coach-multiroute.integration.test.ts && node --test src/coach-multiroute-extension.test.cjs
 
-(node:18680) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:20005) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
-(node:18680) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:20005) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 PASS routeId is a random 256-bit value, unguessable and not derived from any identity
 PASS canonicalChatUrl accepts exactly one canonical ChatGPT conversation form
@@ -123,9 +132,9 @@ PASS snapshot exposes identities and queue counters without secrets
 
 COACH_MULTIROUTE_CORE_RESULT passed=27 failed=0
 COACH_MULTIROUTE_CORE_PASS
-(node:18690) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:20020) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
-(node:18690) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:20020) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 PASS startup advertises the three exact-route tools and issues a bearer
 PASS browser challenge -> exact MCP claim binds one unguessable route
@@ -141,75 +150,75 @@ PASS clean shutdown releases locks and is not resurrected
 
 COACH_MULTIROUTE_INTEGRATION_RESULT passed=11
 COACH_MULTIROUTE_INTEGRATION_PASS
-(node:18703) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(node:20022) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 (Use `node --trace-warnings ...` to show where the warning was created)
 TAP version 13
-# (node:18705) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+# (node:20023) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
 # (Use `node --trace-warnings ...` to show where the warning was created)
 # Subtest: all delivery and gate scripts are valid JavaScript and the gate is a classic script
 ok 1 - all delivery and gate scripts are valid JavaScript and the gate is a classic script
   ---
-  duration_ms: 9.470709
+  duration_ms: 3.461208
   type: 'test'
   ...
 # Subtest: the manifest stays a valid MV3 manifest and does not auto-inject the gate
 ok 2 - the manifest stays a valid MV3 manifest and does not auto-inject the gate
   ---
-  duration_ms: 2.016125
+  duration_ms: 0.920416
   type: 'test'
   ...
 # Subtest: worker.js loads the gate before the auto-worker, keeping the legacy key
 ok 3 - worker.js loads the gate before the auto-worker, keeping the legacy key
   ---
-  duration_ms: 0.949959
+  duration_ms: 0.524791
   type: 'test'
   ...
 # Subtest: exact route identity is validated strictly and legacy records are UNROUTABLE
 ok 4 - exact route identity is validated strictly and legacy records are UNROUTABLE
   ---
-  duration_ms: 2.028625
+  duration_ms: 0.8955
   type: 'test'
   ...
 # Subtest: a wake must be the frozen identity tuple; an email body or command is rejected
 ok 5 - a wake must be the frozen identity tuple; an email body or command is rejected
   ---
-  duration_ms: 1.406792
+  duration_ms: 0.534333
   type: 'test'
   ...
 # Subtest: decideDelivery submits exactly once under a bound tab and trusted wake
 ok 6 - decideDelivery submits exactly once under a bound tab and trusted wake
   ---
-  duration_ms: 0.948042
+  duration_ms: 0.275542
   type: 'test'
   ...
 # Subtest: settled or uncertain messages are never resubmitted blindly
 ok 7 - settled or uncertain messages are never resubmitted blindly
   ---
-  duration_ms: 0.586584
+  duration_ms: 0.1865
   type: 'test'
   ...
 # Subtest: outcomes: DOM submission stays unverified and user obstacles need attention
 ok 8 - outcomes: DOM submission stays unverified and user obstacles need attention
   ---
-  duration_ms: 0.769417
+  duration_ms: 0.27775
   type: 'test'
   ...
 # Subtest: review completion requires the tracked GPT reply, never a DOM receipt
 ok 9 - review completion requires the tracked GPT reply, never a DOM receipt
   ---
-  duration_ms: 0.99425
+  duration_ms: 0.335
   type: 'test'
   ...
 # Subtest: contentSha256 binds the rebuilt wake instruction (fixes wrong-SHA transport)
 ok 10 - contentSha256 binds the rebuilt wake instruction (fixes wrong-SHA transport)
   ---
-  duration_ms: 25.768958
+  duration_ms: 6.487625
   type: 'test'
   ...
 # Subtest: canonical chat identity matches the Sidecar core contract
 ok 11 - canonical chat identity matches the Sidecar core contract
   ---
-  duration_ms: 0.600708
+  duration_ms: 0.257
   type: 'test'
   ...
 1..11
@@ -220,5 +229,5 @@ ok 11 - canonical chat identity matches the Sidecar core contract
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 263.906917
+# duration_ms 76.556375
 multiroute_exit=0
