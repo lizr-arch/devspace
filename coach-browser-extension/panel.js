@@ -13,6 +13,9 @@ function el(tag,value,cls){
   if(cls)e.className=cls;
   return e;
 }
+// Delivery event types may appear in the shared observer feed; unknown kinds
+// remain visible instead of being dropped.
+const kindLabel=kind=>kind==="DSH_MAILBOX_WAKE"?"信箱唤醒":kind;
 function time(s){
   const d=new Date(s);
   return Number.isNaN(d.getTime())?"--:--:--":d.toLocaleTimeString("zh-CN",{hour12:false});
@@ -87,7 +90,7 @@ function draw(){
   if(!timeline.length)eventList.append(el("li","等待新事件…","muted"));
   for(const e of timeline){
     const li=el("li",""),top=el("div","","row");
-    top.append(el("span",e.kind,"tag"),el("time",time(e.at),"time"));
+    top.append(el("span",kindLabel(e.kind),"tag"),el("time",time(e.at),"time"));
     li.append(top,el("div",[e.operationId,e.phase,e.status].filter(Boolean).join(" · "),"detail"));
     eventList.append(li);
   }

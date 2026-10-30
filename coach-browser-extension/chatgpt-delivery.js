@@ -1,10 +1,11 @@
 "use strict";
 // Isolated-world script: neither reads the conversation nor contacts the network.
 (() => {
-  // Old V4 scripts may remain in open tabs after extension reload.
-  // V5 is isolated by protocol so they cannot handle newer deliveries.
-  if (globalThis.__devspaceCoachDeliveryV5Installed) return;
-  globalThis.__devspaceCoachDeliveryV5Installed = true;
+  // Old V4/V5 scripts may remain in open tabs after extension reload.
+  // V6 is isolated by protocol so they cannot handle the per-event DSH
+  // messageId instruction, and a stale V5 listener is superseded by reinjection.
+  if (globalThis.__devspaceCoachDeliveryV6Installed) return;
+  globalThis.__devspaceCoachDeliveryV6Installed = true;
   const canonical=url=>{
     try {
       const u=new URL(url);
@@ -12,6 +13,18 @@
         /^\/(?:g\/[^/]+\/)?c\/[A-Za-z0-9_-]{8,128}\/?$/.test(u.pathname) ?
         u.origin+u.pathname.replace(/\/$/,""):null;
     }catch{return null;}
+  };
+  // The only non-review instruction accepted by this content script is the
+  // exact DSH template. Only a validated opaque messageId occupies the slot;
+  // no mailbox body, hash or free text is ever accepted.
+  const DSH_WAKE_PREFIX="请以 Web GPT Coach 身份独立审核。请读取共享信箱 MAILBOX.md 中 messageId=";
+  const DSH_WAKE_SUFFIX=" 的 DSH wake 块，核对 contentSha256 后按 topic 处理。";
+  const DSH_WAKE_ID=/^[a-z0-9-]{16,64}$/;
+  const parseDshInstruction=text=>{
+    if(typeof text!=="string"||!text.startsWith(DSH_WAKE_PREFIX)||
+       !text.endsWith(DSH_WAKE_SUFFIX))return null;
+    const id=text.slice(DSH_WAKE_PREFIX.length,text.length-DSH_WAKE_SUFFIX.length);
+    return DSH_WAKE_ID.test(id)?id:null;
   };
   const visible=el=>!!el && el.isConnected && !el.hidden &&
     getComputedStyle(el).display!=="none" && getComputedStyle(el).visibility!=="hidden";
@@ -77,15 +90,24 @@
   let sending=false;
   async function deliver(msg) {
     if(sending)return {ok:false,notSubmitted:true,reason:"投递正在进行"};
+    const instruction=msg.instruction;
+    const dshMessageId=parseDshInstruction(instruction);
+    // Any text shaped like a DSH wake must match the template exactly; an
+    // ordinary review instruction remains the legacy free-form path.
+    const dshShape=typeof instruction==="string" &&
+      (instruction.startsWith(DSH_WAKE_PREFIX)||instruction.includes("DSH wake 块"));
+    const reviewInstruction=typeof instruction==="string" &&
+      instruction.startsWith("请以 Web GPT Coach 身份独立审核") && !dshShape;
     if(window.top!==window || canonical(location.href)!==msg.url ||
-      canonical(msg.url)===null || typeof msg.instruction!=="string" ||
-      msg.instruction.length>1500 || !msg.instruction.startsWith("请以 Web GPT Coach 身份独立审核"))
+      canonical(msg.url)===null || typeof instruction!=="string" ||
+      instruction.length>1500 ||
+      !(dshMessageId!==null || reviewInstruction))
       return {ok:false,notSubmitted:true,reason:"目标对话不匹配"};
     const editor=findEditor();
     if(!editor)return {ok:false,notSubmitted:true,reason:"找不到唯一的 ChatGPT 编辑器（旧版或带标签的新版输入框）"};
     if(hasDraft(editor))
       return {ok:false,notSubmitted:true,reason:"用户已有草稿，未覆盖"};
-    if(busy())return {ok:false,notSubmitted:true,reason:"Web GPT 正在生成"};
+    if(busy())return {ok:false,notSubmitted:true,busy:true,reason:"Web GPT 正在生成"};
     if(!editor.isConnected)return {ok:false,notSubmitted:true,reason:"编辑器已变化"};
     sending=true;
     try {
@@ -147,11 +169,11 @@
     finally{sending=false;}
   }
   chrome.runtime.onMessage.addListener((msg,_sender,reply)=>{
-    if(msg?.type==="COACH_AUTO_PING_V5") {
-      reply({ok:true,protocol:5,url:canonical(location.href)});
+    if(msg?.type==="COACH_AUTO_PING_V6") {
+      reply({ok:true,protocol:6,url:canonical(location.href)});
       return false;
     }
-    if(msg?.type!=="COACH_AUTO_DELIVER_V5")return false;
+    if(msg?.type!=="COACH_AUTO_DELIVER_V6")return false;
     void deliver(msg).then(reply).catch(()=>reply({ok:false,uncertain:true,reason:"投递异常"}));
     return true;
   });

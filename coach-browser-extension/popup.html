@@ -1,49 +1,128 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DevSpace Coach Watch · 配对版</title>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DevSpace Coach · 当前对话</title>
 <style>
-body{font-family:system-ui,sans-serif;width:330px;padding:16px;margin:0;color:#1c2834}
-h1{font-size:16px;margin:0 0 8px}
-p,label{font-size:12px;line-height:1.5;color:#526275}
-label{display:block;margin-top:8px}
-input{width:100%;box-sizing:border-box;padding:8px;border:1px solid #b7c2cc;border-radius:6px}
-button{padding:8px;cursor:pointer;border:1px solid #b7c2cc;border-radius:6px;background:#fff;margin:5px 3px 0 0}
-#tasks{white-space:pre-wrap;overflow-wrap:anywhere;background:#f0f3f6;border-radius:6px;padding:10px;font-size:12px}
-#status,#feedback{font-size:12px}
+:root{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color-scheme:light;--ink:#182331;--muted:#667485;--line:#e2e7ed;--subtle:#f5f7fa;--accent:#205bc1;--accent-hover:#184a9b;--bg:#fff}
+*{box-sizing:border-box}
+body{width:352px;margin:0;padding:0 15px 14px;color:var(--ink);background:var(--bg)}
+header{display:flex;align-items:center;justify-content:space-between;padding:16px 2px 13px}
+.brand{display:flex;align-items:center;gap:9px}.mark{display:grid;place-items:center;width:28px;height:28px;border-radius:9px;background:#eaf0fc;color:#1c54ae;font-weight:800;font-size:16px}
+h1{margin:0;font-size:15px;letter-spacing:-.25px}h2{font-size:13px;margin:0 0 5px}
+.kicker{font-size:11px;color:var(--muted);margin-top:1px}
+.panel{border:1px solid var(--line);border-radius:13px;padding:15px;background:linear-gradient(165deg,#fbfcff,#f6f9fe)}
+.topline{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.state-dot{height:8px;width:8px;flex:none;border-radius:50%;background:#a9b4c3}
+.state-dot[data-state="connected"]{background:#269765}
+.state-dot[data-state="pending"]{background:#d69b21}
+.state-dot[data-state="error"]{background:#c76343}
+#auto-connection-state{font-size:13px;font-weight:700}
+#auto-current-chat-note{margin:4px 0 13px;color:var(--muted);font-size:12px;line-height:1.55;overflow-wrap:anywhere}
+button{font:inherit;cursor:pointer;border-radius:8px;padding:8px 10px;background:white;border:1px solid #ccd5df;color:var(--ink)}
+button:hover:not(:disabled){background:#edf2f8}
+button:disabled{opacity:.65;cursor:default}
+button.primary{width:100%;min-height:39px;background:var(--accent);color:white;border-color:var(--accent);font-size:13px;font-weight:700}
+button.primary:hover:not(:disabled){background:var(--accent-hover)}
+button.primary:disabled{opacity:1;background:#e6edf5;color:#345271;border-color:#d7e1ec}
+button.tertiary{padding:5px 9px;background:transparent;border:0;color:var(--accent)}
+#auto-one-click-status{margin:11px 0 0;color:var(--muted);font-size:11.5px;line-height:1.55;overflow-wrap:anywhere}
+#auto-feedback{margin:7px 0 0;font-size:11.5px;color:#9b3d26;overflow-wrap:anywhere}
+#auto-feedback:empty{display:none}
+#auto-cancel-pending{display:block;margin:7px auto 0;font-size:11.5px}
+#auto-cancel-pending[hidden]{display:none}
+.quick{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:11px 2px 13px}
+#status{font-size:11px;color:var(--muted);min-width:0}
+.quick button{white-space:nowrap;font-size:11.5px;padding:7px 9px}
+details{border-top:1px solid var(--line);padding:0 1px}
+summary{list-style:none;cursor:pointer;padding:13px 2px;color:#3c5168;font-size:12px;font-weight:650}
+summary::-webkit-details-marker{display:none}
+summary:after{content:"⌄";float:right;color:#8796a5;font-size:13px}
+details[open]>summary:after{content:"⌃"}
+.detail-body{padding:0 2px 12px;font-size:12px}
+p,li{line-height:1.55}p.muted,small{font-size:11px;color:var(--muted)}
+label{display:block;color:var(--muted);font-size:11px;margin:10px 0 5px}
+input{width:100%;border:1px solid #cad4df;border-radius:7px;padding:8px;font:inherit;color:var(--ink);background:white}
+.actions{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.actions button{font-size:11px;padding:7px 8px}
+#tasks{white-space:pre-wrap;overflow-wrap:anywhere;border-radius:8px;padding:10px;max-height:105px;overflow:auto;background:var(--subtle);font:11px/1.6 ui-monospace,monospace;color:#3a4d61}
+#auto-list,#auto-routes{padding-left:16px;overflow-wrap:anywhere;font-size:11px;max-height:126px;overflow-y:auto}
+#auto-list button{font-size:11px;padding:4px}
+#auto-diagnostic,#auto-status,#auto-target,#auto-count,#feedback{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 #extension-id{user-select:all;overflow-wrap:anywhere}
-</style></head>
-<body><h1>DevSpace · 审核队列</h1>
-<p>扩展 ID：<span id="extension-id">—</span></p>
-<p>先用这个扩展 ID 启动已授权的 DevSpace Sidecar，再粘贴一次性配对令牌。令牌只保存在浏览器的当前会话中。</p>
-<label for="port">本机端口</label><input id="port" type="number" min="1" max="65535" value="8765">
-<label for="token">配对令牌</label><input id="token" type="password" autocomplete="off" placeholder="粘贴一次性令牌">
-<button id="pair">配对</button><button id="unpair">清除配对</button>
-<button id="pair-native">从本机安全配对</button>
-<p id="status" role="status">读取中…</p>
-<pre id="tasks">—</pre>
-<button id="refresh">刷新</button><button id="open-panel">打开 Agent 观察面板</button><button id="copy">复制审核指令</button>
-<p><strong>观察范围说明：</strong>观察面板可能显示此 DevSpace 服务启动的所有工作树中 Codex CLI 的脱敏事件、任务 ID 和执行状态。必须由本地 Sidecar 启动时显式授权 <code>all_native_worktrees</code> 范围；既有审核队列配对不会自动获得该权限。</p>
-<p id="feedback" aria-live="polite"></p>
-<hr><h2 style="font-size:14px">Web GPT Coach 自动通知（可选）</h2>
-<p>默认关闭。先打开想接收审核的具体 ChatGPT 对话，再绑定；只发送到这个标签页和这条对话，不读取聊天历史。</p>
-<button id="auto-one-click" style="width:100%;background:#285e97;color:white;font-weight:600">一键启用当前 Web GPT Coach</button>
-<button id="auto-cancel-pending">取消当前对话的待确认绑定</button>
-<p id="auto-one-click-status" role="status">首次点击后，由当前 Web GPT 对话确认自己管理的工作区；不猜测工作区归属。</p>
-<details><summary>高级：手动绑定工作区</summary>
-<label for="auto-workspace">精确工作区 ID</label><input id="auto-workspace" autocomplete="off" placeholder="DevSpace workspaceId">
-<p id="auto-target" style="overflow-wrap:anywhere">未绑定 ChatGPT 对话</p>
-<p id="auto-status">默认关闭</p>
-<ul id="auto-routes" style="font-size:11px;padding-left:16px;overflow-wrap:anywhere"></ul>
-<p id="auto-diagnostic" role="status">尚未检查投递状态</p>
-<button id="auto-bind">绑定当前 ChatGPT 对话</button>
-<button id="auto-enable">启用自动发送</button>
-<button id="auto-pause">暂停</button>
-<button id="auto-unbind">解除绑定</button>
-<button id="auto-check">现在检查一次</button></details>
-<p id="auto-count"></p><p id="auto-feedback" aria-live="polite"></p>
-<ul id="auto-list" style="padding-left:16px;overflow-wrap:anywhere;font-size:11px;max-height:140px;overflow:auto"></ul>
-<p>发送结果只表示网页输入框已提交，不表示 Web GPT 已审核。出现“不确定”时停止自动发送并要求人工核查。</p>
+.compat{padding:9px;background:var(--subtle);border:1px solid var(--line);border-radius:9px;margin:11px 0}
+.compat>p{margin:2px 0 8px}
+.divider{height:1px;background:var(--line);margin:14px 0}
+footer{font-size:10.5px;color:var(--muted);line-height:1.5;padding:9px 2px 1px}
+[hidden]{display:none!important}
+@media(prefers-color-scheme:dark){:root{color-scheme:dark;--ink:#e9eff5;--muted:#a0afc0;--line:#344152;--subtle:#253244;--bg:#182330;--accent:#5289ef;--accent-hover:#3672dd} .panel{background:#202d3d}.mark{background:#304767;color:#a7c3fe}button{background:#253448;color:var(--ink);border-color:#40536a}button.primary{color:#fff}button.primary:disabled{background:#34495e;color:#c8d9ef;border-color:#405369}button:hover:not(:disabled){background:#32445d}input{background:#233246;color:var(--ink);border-color:#4a5b71}.compat{background:#223144}}
+</style>
+</head>
+<body>
+<header>
+ <div class="brand"><div class="mark" aria-hidden="true">D</div><div><h1>DevSpace Coach</h1><div class="kicker">Codex × Web GPT 自动协作</div></div></div>
+ <span class="kicker">v<span id="ui-version">—</span></span>
+</header>
+<main>
+<section class="panel" aria-label="当前对话通信">
+ <div class="topline"><span class="state-dot" id="auto-connection-dot"></span><strong id="auto-connection-state" role="status">正在检查当前对话</strong></div>
+ <p id="auto-current-chat-note">绑定后，Codex 完成任务时自动通知当前 ChatGPT 对话；Web GPT 会独立审核并写回裁决。</p>
+ <button id="auto-one-click" class="primary" disabled>连接当前对话</button>
+ <button id="auto-cancel-pending" class="tertiary" hidden>取消这次连接请求</button>
+ <p id="auto-one-click-status" role="status">需要在 ChatGPT 中确认工作区授权，不读取聊天历史。</p>
+ <p id="auto-feedback" aria-live="polite"></p>
+</section>
+<div class="quick">
+ <span id="status" role="status">检查本机服务…</span>
+ <button id="open-panel">查看 Agent 任务</button>
+</div>
+<details>
+ <summary>审核消息与记录</summary>
+ <div class="detail-body">
+  <pre id="tasks">—</pre>
+  <div class="actions"><button id="refresh">刷新</button><button id="copy">复制审核指令</button></div>
+  <p class="muted">手动复制仅用于故障排查，不是自动通信的必要步骤。</p>
+ </div>
+</details>
+<details>
+ <summary>高级设置与旧版兼容</summary>
+ <div class="detail-body">
+  <p class="muted">日常使用无需填写工作区 ID、端口或配对令牌。以下用于修复连接与旧版 DSH 通信。</p>
+  <div class="compat">
+   <strong>本机 Coach 服务</strong>
+   <div class="actions"><button id="pair-native">从本机安全配对</button><button id="unpair">清除配对</button></div>
+   <label for="port">本机端口</label><input id="port" type="number" min="1" max="65535" value="8765">
+   <label for="token">一次性配对令牌</label><input id="token" type="password" autocomplete="off" placeholder="仅故障恢复时填写">
+   <div class="actions"><button id="pair">手动配对</button></div>
+   <p class="muted">扩展 ID：<span id="extension-id">—</span></p>
+   <p id="feedback" aria-live="polite"></p>
+  </div>
+  <div class="compat">
+   <strong>旧版 DSH 专用连接</strong>
+   <p class="muted">仅兼容旧的固定工作区方式。通常请使用上方“连接当前对话”，不要重复绑定同一对话。</p>
+   <button id="auto-dsh-one-click">旧版 DSH 绑定</button>
+  </div>
+  <div class="compat">
+   <strong>工作区与通知控制</strong>
+   <label for="auto-workspace">精确工作区 ID</label>
+   <input id="auto-workspace" autocomplete="off" placeholder="高级使用">
+   <p id="auto-target">未绑定对话</p>
+   <p id="auto-status">通知未启用</p>
+   <ul id="auto-routes"></ul>
+   <div class="actions">
+    <button id="auto-bind">手动绑定</button><button id="auto-enable">启用通知</button>
+    <button id="auto-pause">暂停通知</button><button id="auto-unbind">解除绑定</button>
+    <button id="auto-check">检查投递</button>
+   </div>
+   <p id="auto-diagnostic" role="status">尚未检查</p>
+   <p id="auto-count"></p>
+   <ul id="auto-list"></ul>
+  </div>
+ </div>
+</details>
+</main>
+<footer>只发送到明确授权的对话。不确定的消息不会自动重发；网页提交成功不代表审核通过。</footer>
 <script src="popup.js"></script>
 <script src="autosend-popup.js"></script>
-</body></html>
+</body>
+</html>
