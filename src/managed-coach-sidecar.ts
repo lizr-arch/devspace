@@ -19,6 +19,24 @@ import {
 const SERVICE_NAME = "coach-feed";
 const PAIRING_EXTENSION_ID = "bapcebjlgncogfpgbhllioaichcldkbl";
 const MAX_EVENTS = 50;
+type FeedCursor={at:string;kind:"c"|"a";id:string};
+const FEED_CURSOR=/^[A-Za-z0-9_-]{8,400}$/;
+function decodeFeedCursor(raw:string):FeedCursor {
+  if(!FEED_CURSOR.test(raw))throw new Error("INVALID_FEED_CURSOR");
+  const data=JSON.parse(Buffer.from(raw,"base64url").toString("utf8")) as Record<string,unknown>;
+  if(!data||Object.keys(data).sort().join(",")!=="at,id,kind,v"||data.v!==1||
+     typeof data.at!=="string"||data.at.length<1||data.at.length>64||
+     (data.kind!=="c"&&data.kind!=="a")||typeof data.id!=="string"||
+     (data.kind==="c"?!/^[1-9][0-9]{0,15}$/.test(data.id):!/^[A-Za-z0-9:._-]{1,128}$/.test(data.id)))
+    throw new Error("INVALID_FEED_CURSOR");
+  const cursor:FeedCursor={at:data.at,kind:data.kind as "c"|"a",id:data.id};
+  if(Buffer.from(JSON.stringify({v:1,...cursor})).toString("base64url")!==raw)
+    throw new Error("INVALID_FEED_CURSOR");
+  return cursor;
+}
+function encodeFeedCursor(cursor:FeedCursor):string{
+  return Buffer.from(JSON.stringify({v:1,...cursor})).toString("base64url");
+}
 const EXTENSION_ID = /^[a-p]{32}$/;
 
 type SidecarInput = {
@@ -31,7 +49,7 @@ type SidecarInput = {
   routeStateDir?: string;
 };
 type EventRow = { event_id: string | number; workspace_id?:string; operation_id: string; event_type: string; created_at: string };
-export type DeliveryReceipt = {event_id:number;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
+export type DeliveryReceipt = {event_id:number|string;workspace_id:string;operation_id:string;result:"dom_submitted";recorded_at:string};
 type Entry = SidecarInput & {
   token: Buffer; server: Server; database: Database.Database;
   receiptDb?:Database.Database; jobId: string; startedAt: string; handoffPath?:string;
@@ -46,9 +64,9 @@ export interface ManagedCoachSidecarControl {
   stop(workspaceId:string):Promise<void>;
   status(workspaceId:string):CoachSidecarStatus|undefined|Promise<CoachSidecarStatus|undefined>;
   activeServiceIdsForRoot(root:string):string[];
-  getDeliveryReceipt?(workspaceId:string,eventId:number):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
+  getDeliveryReceipt?(workspaceId:string,eventId:number|string):DeliveryReceipt|undefined|Promise<DeliveryReceipt|undefined>;
   close():Promise<void>;
-  claimBrowserRoute?(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean;
+  claimBrowserRoute?(workspaceId:string,nonce:string,url:string,persistScope?:(ids:string[])=>void):boolean|Promise<boolean>;
   claimExactBrowserRoute?(input:ExactRouteClaimInput):ExactRouteClaimResult|Promise<ExactRouteClaimResult>;
   revokeBrowserRoute?(input:{routeId:string;expectedConsentRevision?:number;reason?:string}):ExactRouteClaimResult;
   enqueueRouteReviewWake?(input:{routeId:string;messageId:string;eventId:number;operationId:string}):{duplicate:boolean;envelope:RouteEnvelope};
@@ -250,6 +268,7 @@ export class ManagedCoachSidecar {
         receiptDb.exec("CREATE TABLE IF NOT EXISTS delivery_receipts("+
           "event_id INTEGER PRIMARY KEY,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,"+
           "result TEXT NOT NULL CHECK(result='dom_submitted'),recorded_at TEXT NOT NULL)");
+        receiptDb.exec("CREATE TABLE IF NOT EXISTS app_delivery_receipts(event_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,result TEXT NOT NULL CHECK(result='dom_submitted'),recorded_at TEXT NOT NULL)");
       }
       const token = input.pairingToken?Buffer.from(input.pairingToken,"base64url"):randomBytes(32);
       const entry = await new Promise<Entry>((resolve, reject) => {
@@ -393,9 +412,17 @@ export class ManagedCoachSidecar {
     }
     const feedUrl=req.url?new URL(req.url,"http://127.0.0.1"):null;
     if(feedUrl?.pathname!=="/events")return send(res,404,{error:"not found"},cors);
-    if([...feedUrl.searchParams.keys()].some(k=>k!=="workspaceId")||
-       feedUrl.searchParams.getAll("workspaceId").length>1)
+    if([...feedUrl.searchParams.keys()].some(k=>!["workspaceId","cursor","limit"].includes(k))||
+       ["workspaceId","cursor","limit"].some(k=>feedUrl.searchParams.getAll(k).length>1))
       return send(res,400,{error:"invalid feed selector"},cors);
+    const rawLimit=feedUrl.searchParams.get("limit");
+    if(rawLimit!==null&&!/^[1-9][0-9]?$/.test(rawLimit))
+      return send(res,400,{error:"invalid feed limit"},cors);
+    const limit=rawLimit===null?MAX_EVENTS:Number(rawLimit);
+    if(limit<1||limit>MAX_EVENTS)return send(res,400,{error:"invalid feed limit"},cors);
+    let cursor:FeedCursor|null=null;
+    try{const raw=feedUrl.searchParams.get("cursor");if(raw!==null)cursor=decodeFeedCursor(raw);}
+    catch{return send(res,400,{error:"invalid feed cursor"},cors);}
     // No selector returns only the explicitly authorized union. A caller may
     // also request one selected workspace for bounded per-workspace recovery.
     const selected=feedUrl.searchParams.get("workspaceId");
@@ -406,27 +433,64 @@ export class ManagedCoachSidecar {
     try {
       const native = Boolean(this.nativeEventDatabasePath);
       const hasEvidence=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_review_evidence'").get());
+      const hasRoutes=hasEvidence&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_browser_route_claims'").get());
+      // The event identity ALWAYS remains the execution origin. Only the
+      // delivery selector uses the separately claimed immutable grant.
+      const deliveryScope=hasRoutes?"coalesce(json_extract(p.packet_json,'$.delivery.workspaceId'),e.workspace_id)":"e.workspace_id";
+      const validRoute=hasRoutes?" AND (json_type(p.packet_json,'$.delivery') IS NULL OR EXISTS (SELECT 1 FROM coach_browser_route_claims b WHERE b.workspace_id=json_extract(p.packet_json,'$.delivery.workspaceId') AND b.nonce=json_extract(p.packet_json,'$.delivery.nonce'))) ":"";
       const pendingQuery = native
-        ? "from coach_review_events e "+(hasEvidence?"LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id ":"")+"where e.workspace_id IN (" +
+        ? "from coach_review_events e "+(hasEvidence?"LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id ":"")+"where "+deliveryScope+" IN (" +
           ids.map(()=>"?").join(",") + ") and e.event_type = 'READY_FOR_GPT_REVIEW' " +
           (hasEvidence?"AND "+COACH_DELIVERY_SQL+" ":"")+
+          validRoute+
           "and not exists (select 1 from coach_review_decisions r where r.event_id=e.event_id)"
         : "from events e where e.event_type = 'READY_FOR_GPT_REVIEW' " +
           "and not exists (select 1 from review_decisions r where r.event_id = e.event_id)";
       const total = entry.database.prepare("select count(*) as count " + pendingQuery)
         .get(...(native ? ids : [])) as { count: number };
+      const coachAfter=cursor
+        ?cursor.kind==="c"
+          ?" and (e.created_at > ? or (e.created_at = ? and e.event_id > ?))"
+          :" and e.created_at > ?"
+        :"";
+      const coachArgs=cursor?(cursor.kind==="c"
+        ?[cursor.at,cursor.at,Number(cursor.id)]:[cursor.at]):[];
       const rows = entry.database.prepare(
         "select e.event_id as event_id, " +
         (native?"e.workspace_id as workspace_id, ":"") +
         "substr(cast(e.operation_id as text),1,128) as operation_id, " +
         "e.event_type, substr(cast(e.created_at as text),1,64) as created_at " +
-        pendingQuery + " order by e.created_at asc,e.event_id asc limit 50",
-      ).all(...(native ? ids : [])) as EventRow[];
+        pendingQuery+coachAfter+" order by e.created_at asc,e.event_id asc limit ?",
+      ).all(...(native ? ids : []),...coachArgs,limit+1) as EventRow[];
+      const hasAppEvents=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='codex_app_review_events'").get());
+      const appPendingCount=hasAppEvents?(entry.database.prepare("SELECT count(*) AS count FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id IN ("+ids.map(()=>"?").join(",")+") AND d.event_id IS NULL").get(...ids) as {count:number}).count:0;
+      const appAfter=cursor
+        ?cursor.kind==="a"
+          ?" AND (e.created_at > ? OR (e.created_at = ? AND e.event_id > ?))"
+          :" AND e.created_at >= ?"
+        :"";
+      const appArgs=cursor?(cursor.kind==="a"
+        ?[cursor.at,cursor.at,cursor.id]:[cursor.at]):[];
+      const appRows=hasAppEvents?entry.database.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,'CODEX_APP_READY_FOR_GPT_REVIEW' AS event_type,e.thread_id,e.turn_id,e.evidence_sha256,e.created_at FROM codex_app_review_events e LEFT JOIN codex_app_review_decisions d ON d.event_id=e.event_id WHERE e.workspace_id IN ("+ids.map(()=>"?").join(",")+") AND d.event_id IS NULL"+appAfter+" ORDER BY e.created_at,e.event_id LIMIT ?").all(...ids,...appArgs,limit+1) as Array<EventRow&{thread_id:string;turn_id:string;evidence_sha256:string}>:[];
+      const combined=[...rows.map(row=>({row,kind:"c" as const,app:undefined as undefined|{thread_id:string;turn_id:string;evidence_sha256:string}})),...appRows.map(row=>({row,kind:"a" as const,app:row}))].sort((a,b)=>{
+        const at=String(a.row.created_at),bt=String(b.row.created_at);
+        if(at!==bt)return at<bt?-1:1;
+        if(a.kind!==b.kind)return a.kind==="c"?-1:1;
+        return a.kind==="c"?Number(a.row.event_id)-Number(b.row.event_id)
+          :String(a.row.event_id).localeCompare(String(b.row.event_id),"en");
+      });
+      const hasMore=combined.length>limit;
+      const page=combined.slice(0,limit);
+      const last=page[page.length-1];
       return send(res,200,{
-        pending_count:total.count,
-        events:rows.slice(0,MAX_EVENTS).map(row=>{
+        pending_count:total.count+appPendingCount,
+        has_more:hasMore,
+        next_cursor:hasMore&&last?encodeFeedCursor({at:String(last.row.created_at),kind:last.kind,id:String(last.row.event_id)}):null,
+        events:page.map(({row,app})=>{
+          if(app)return {...row,event_type:"CODEX_APP_READY_FOR_GPT_REVIEW",app_kind:"native_chatgpt_app_codex",thread_id:app.thread_id,turn_id:app.turn_id,evidence_sha256:app.evidence_sha256};
           const evidence=hasEvidence?entry.database.prepare("SELECT packet_json,evidence_sha256 FROM coach_review_evidence WHERE event_id=?").get(row.event_id) as {packet_json:string;evidence_sha256:string}|undefined:undefined;
           let report;
+          let deliveryFields={};
           let event_type: string="READY_FOR_GPT_REVIEW";
           if(evidence){
             const {evidenceSha256,...packet}=JSON.parse(evidence.packet_json);
@@ -435,8 +499,9 @@ export class ManagedCoachSidecar {
             const delivery=completionDeliveryType(packet);
             if(!delivery)throw new Error("COACH_DELIVERY_REPORT_INVALID");
             event_type=delivery;
+            if(packet.delivery)deliveryFields={delivery_workspace_id:packet.delivery.workspaceId,delivery_nonce:packet.delivery.nonce};
           }
-          return {...row,event_type,workspace_id:native?row.workspace_id:entry.workspaceId,...(report?{report}:{})};
+          return {...row,event_type,workspace_id:native?row.workspace_id:entry.workspaceId,...deliveryFields,...(report?{report}:{})};
         }),
       },cors);
     } catch {
@@ -836,10 +901,22 @@ export class ManagedCoachSidecar {
       const data=JSON.parse(raw) as Record<string,unknown>;
       if(!data || typeof data!=="object" || Array.isArray(data) ||
           Object.keys(data).sort().join(",")!=="event_id,operation_id,workspace_id" ||
-          !Number.isSafeInteger(data.event_id) || Number(data.event_id)<=0 ||
-          !(entry.authorizedWorkspaceIds??[entry.workspaceId]).includes(String(data.workspace_id)) ||
+          typeof data.workspace_id!=="string" ||
           typeof data.operation_id!=="string" ||
           !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(data.operation_id))
+        return send(res,400,{error:"invalid receipt identity"},cors);
+      if(typeof data.event_id==="string"&&/^app:[a-f0-9]{64}$/.test(data.event_id)){
+        if(!(entry.authorizedWorkspaceIds??[entry.workspaceId]).includes(data.workspace_id))
+          return send(res,400,{error:"invalid receipt identity"},cors);
+        const event=entry.database.prepare("SELECT operation_id FROM codex_app_review_events WHERE event_id=? AND workspace_id=?").get(data.event_id,data.workspace_id) as {operation_id:string}|undefined;
+        if(!event||event.operation_id!==data.operation_id)return send(res,404,{error:"event identity not found"},cors);
+        entry.receiptDb!.prepare("INSERT OR IGNORE INTO app_delivery_receipts VALUES(?,?,?,?,?)").run(data.event_id,data.workspace_id,data.operation_id,"dom_submitted",new Date().toISOString());
+        const row=entry.receiptDb!.prepare("SELECT event_id,workspace_id,operation_id,result,recorded_at FROM app_delivery_receipts WHERE event_id=? AND workspace_id=?").get(data.event_id,data.workspace_id) as DeliveryReceipt|undefined;
+        if(!row||row.operation_id!==data.operation_id)return send(res,409,{error:"receipt identity conflict"},cors);
+        return send(res,200,{ok:true,receipt:row},cors);
+      }
+      if(!Number.isSafeInteger(data.event_id)||Number(data.event_id)<=0)return send(res,400,{error:"invalid receipt identity"},cors);
+      if(!this.receiptScopeAllowed(entry,data.workspace_id,Number(data.event_id)))
         return send(res,400,{error:"invalid receipt identity"},cors);
       const event=entry.database.prepare("SELECT operation_id FROM coach_review_events WHERE event_id=? AND workspace_id=?")
         .get(data.event_id,data.workspace_id) as {operation_id:string}|undefined;
@@ -857,12 +934,32 @@ export class ManagedCoachSidecar {
     }
   }
 
-  getDeliveryReceipt(workspaceId:string,eventId:number):DeliveryReceipt|undefined {
+  getDeliveryReceipt(workspaceId:string,eventId:number|string):DeliveryReceipt|undefined {
     const entry=[...this.services.values()].find(e=>
-      (e.authorizedWorkspaceIds??[e.workspaceId]).includes(workspaceId));
-    if(!entry?.receiptDb || !Number.isSafeInteger(eventId) || eventId<=0)return undefined;
+      typeof eventId==="number"?this.receiptScopeAllowed(e,workspaceId,eventId):
+        (e.authorizedWorkspaceIds??[e.workspaceId]).includes(workspaceId));
+    if(!entry?.receiptDb)return undefined;
+    if(typeof eventId==="string"&&/^app:[a-f0-9]{64}$/.test(eventId))return entry.receiptDb.prepare("SELECT event_id,workspace_id,operation_id,result,recorded_at FROM app_delivery_receipts WHERE event_id=? AND workspace_id=?").get(eventId,workspaceId) as DeliveryReceipt|undefined;
+    if(typeof eventId!=="number"||!Number.isSafeInteger(eventId)||eventId<=0)return undefined;
     return entry.receiptDb.prepare("SELECT event_id,workspace_id,operation_id,result,recorded_at FROM delivery_receipts WHERE event_id=? AND workspace_id=?")
       .get(eventId,workspaceId) as DeliveryReceipt|undefined;
+  }
+
+  private receiptScopeAllowed(entry:Entry,workspaceId:string,eventId:number):boolean {
+    if(!Number.isSafeInteger(eventId)||eventId<=0)return false;
+    try {
+      const row=entry.database.prepare("SELECT p.packet_json,p.evidence_sha256 FROM coach_review_events e JOIN coach_review_evidence p ON p.event_id=e.event_id WHERE e.event_id=? AND e.workspace_id=?")
+        .get(eventId,workspaceId) as {packet_json:string;evidence_sha256:string}|undefined;
+      if(row){
+        const {evidenceSha256,...packet}=JSON.parse(row.packet_json);
+        if(evidenceSha256!==row.evidence_sha256||createHash("sha256").update(JSON.stringify(packet)).digest("hex")!==evidenceSha256)return false;
+        if(packet.delivery){
+          const grant=entry.database.prepare("SELECT nonce FROM coach_browser_route_claims WHERE workspace_id=?").get(packet.delivery.workspaceId) as {nonce:string}|undefined;
+          return grant?.nonce===packet.delivery.nonce && (entry.authorizedWorkspaceIds??[entry.workspaceId]).includes(packet.delivery.workspaceId);
+        }
+      }
+      return (entry.authorizedWorkspaceIds??[entry.workspaceId]).includes(workspaceId);
+    }catch{return false;}
   }
 
   status(workspaceId: string): CoachSidecarStatus | undefined {

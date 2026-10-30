@@ -31,6 +31,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
         workspaceId:id,operationId:operation,
         prompt:z.string().max(10000).default(""),
         task:taskReferenceSchema.optional(),stageId:id.optional(),
+        delivery:z.object({workspaceId:id,nonce:z.string().regex(/^[a-f0-9]{32}$/)}).optional(),
         model:z.enum(CODEX_MODELS),
         reasoningEffort:z.enum(CODEX_EFFORTS),
         sandbox:z.enum(["read-only","workspace-write"]),
@@ -43,6 +44,10 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
     },async(input)=>{
       const workspace=workspaces.getWorkspace(input.workspaceId);
       verifyTask(workspace.root,input.workspaceId,input.task);
+      if(input.delivery){
+        workspaces.getWorkspace(input.delivery.workspaceId);
+        coachReviewEvents.assertDeliveryRoute(input.delivery);
+      }
       const runner=getNativeCodexRunner();
       const status=await runner.start({
         ...input,workspaceRoot:workspace.root,
@@ -220,7 +225,7 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
 
   registerAppTool(server,"codex_agent_evidence",{
     title:"Read trusted Codex evidence",
-    description:"Read an immutable native SQLite review packet scoped to the authorized workspace; contains hashes, not the user prompt. Does not assert claimed tests passed.",
+    description:"Explicitly read an immutable native SQLite review packet scoped to the execution workspace, including hashes and bounded exact agent completion messages. Raw CLI streams are not returned. Does not assert claimed tests passed.",
     inputSchema:{workspaceId:id,operationId:operation},
     outputSchema:resultOutputSchema({evidence:z.unknown().optional(),error:optionalError}),
     _meta:{},
@@ -230,7 +235,8 @@ export function registerCodexAgentTools(server:McpServer,ctx:ServerContext):void
     const packet=coachReviewEvents.getEvidence(workspaceId,operationId) as
       (Record<string,unknown> & {sourceDiff?:unknown})|undefined;
     if(!packet)throw new Error("CODEX_EVIDENCE_NOT_FOUND_OR_NOT_COMPLETE");
-    // Evidence metadata never automatically includes source code or prompts.
+    // Code diff requires a separate explicit read. Bounded final agent messages
+    // belong to the immutable packet and never enter the browser event feed.
     const {sourceDiff,...evidence}=packet;
     const result="Trusted hashed completion metadata for "+operationId+
       " is available. Use codex_agent_source_diff explicitly to inspect code changes.";

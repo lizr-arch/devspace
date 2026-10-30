@@ -5,6 +5,10 @@ const STATUS = "coachStatus";
 const ALARM = "coach-poll";
 const NATIVE_CONSENT = "coachNativePairingConsent";
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
+// DSH mailbox wake identities (identity-only events, see auto-worker.js).
+const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const DSH_WAKE_ID = /^dsh:[1-9][0-9]{0,18}$/;
+const DSH_MESSAGE_ID = /^[a-z0-9-]{16,64}$/;
 const validPort = p => Number.isInteger(p) && p >= 1 && p <= 65535;
 let nativePairingPromise;
 let nativePairingGeneration=0;
@@ -41,14 +45,19 @@ async function feedCheck() {
     const validReport=r=>r?.schema==="DEVSPACE_CODEX_REPORT_CHECK_V1" && r.valid===true &&
       r.code==="REPORT_VALID_UNVERIFIED_CLAIMS" && r.testsIndependentlyVerified===false &&
       typeof r.reportSha256==="string" && /^[a-f0-9]{64}$/.test(r.reportSha256);
-    const events = body.events.filter(e => Number.isSafeInteger(e.event_id) &&
-      e.event_id > 0 && typeof e.operation_id === "string" &&
-      e.operation_id.length <= 128 && (
-        (e.event_type==="READY_FOR_GPT_REVIEW" && (e.report===undefined ||
-          (validReport(e.report) && e.report.status==="READY_FOR_REVIEW"))) ||
-        (e.event_type==="PLAN_CONFLICT" && validReport(e.report) && e.report.status==="PLAN_CONFLICT")) &&
-      typeof e.workspace_id==="string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(e.workspace_id)
-    ).map(e => ({ event_id:e.event_id,operation_id:e.operation_id,workspace_id:e.workspace_id,event_type:e.event_type }));
+    const validDshWake = e => e.event_type==="DSH_MAILBOX_WAKE" &&
+      typeof e.event_id==="string" && DSH_WAKE_ID.test(e.event_id) &&
+      typeof e.operation_id==="string" && DSH_MESSAGE_ID.test(e.operation_id) &&
+      typeof e.created_at==="string" && e.created_at.length<=64;
+    const events = body.events.filter(e => {
+      if (!e || typeof e.workspace_id!=="string" || !ID.test(e.workspace_id)) return false;
+      if (validDshWake(e)) return true;
+      return Number.isSafeInteger(e.event_id) && e.event_id > 0 &&
+        typeof e.operation_id === "string" && e.operation_id.length <= 128 && (
+          (e.event_type==="READY_FOR_GPT_REVIEW" && (e.report===undefined ||
+            (validReport(e.report) && e.report.status==="READY_FOR_REVIEW"))) ||
+          (e.event_type==="PLAN_CONFLICT" && validReport(e.report) && e.report.status==="PLAN_CONFLICT"));
+    }).map(e => ({ event_id:e.event_id,operation_id:e.operation_id,workspace_id:e.workspace_id,event_type:e.event_type }));
     const status = { paired:true, online:true, pending:body.pending_count, events,
       port:pair.port, checkedAt:new Date().toISOString(), message:"connected" };
     await saveStatus(status); return status;

@@ -68,6 +68,8 @@ type Spawn = (file: string, argv: string[], opts: {
   cwd: string; stdio: ["pipe", "pipe", "pipe"] | ["pipe", "pipe", "pipe", "pipe"]; detached: boolean; env?: NodeJS.ProcessEnv;
 }) => ProcessLike;
 export interface RunnerInput {
+  /** Delivery grant is independent of the immutable execution workspace. */
+  delivery?: {workspaceId:string;nonce:string};
   workspaceId: string;
   workspaceRoot: string;
   operationId: string;
@@ -118,6 +120,10 @@ export interface RunnerStatus {
   reason?: string;
 }
 export interface EvidencePacket {
+  delivery?: RunnerInput["delivery"];
+  sourceRoot?: string;
+  runnerSourceSha256?: string;
+  agentMessages?: Array<{text:string;sha256:string}>;
   task?: TaskReference;
   stageId?: string;
   report?: ReportOutcome;
@@ -178,6 +184,7 @@ function assertId(value: unknown, field: string): asserts value is string {
   }
 }
 function validate(input: RunnerInput): void {
+  if(input.delivery && (input.internalReview || !input.task))throw new Error("COACH_DELIVERY_FROZEN_TASK_REQUIRED");
   assertId(input.workspaceId, "workspace_id");
   assertId(input.operationId, "operation_id");
   if(input.stageId!==undefined)assertId(input.stageId,"stage_id");
@@ -495,7 +502,8 @@ export class NativeCodexAgentRunner {
   run(input: RunnerInput): Promise<RunnerStatus> {
     validate(input);
     const root = directory(input.workspaceRoot);
-    const canonical = { ...input, ...(input.task?{task:{...input.task}}:{}), workspaceRoot:root };
+    const canonical = { ...input, ...(input.task?{task:{...input.task}}:{}),
+      ...(input.delivery?{delivery:{...input.delivery}}:{}),workspaceRoot:root };
     const old = this.records.get(input.operationId);
     if (old) {
       if (operationIdentity(old.input) !== operationIdentity(canonical))
@@ -511,6 +519,7 @@ export class NativeCodexAgentRunner {
       return Promise.resolve(this.status(input.operationId,input.workspaceId));
     }
     if(!input.internalReview || input.task)verifyTask(root,input.workspaceId,input.task);
+    if(input.delivery)this.options.events.assertDeliveryRoute(input.delivery);
     if(this.options.events.hasInterruptedRun(input.workspaceId))
       throw new Error("CODEX_WORKSPACE_QUARANTINED_UNRESOLVED_AGENT");
     const record: RecordEntry = {
@@ -648,6 +657,8 @@ export class NativeCodexAgentRunner {
     let completed=false, failed=false, oversize=false, threadId:string|undefined, usage:unknown;
     let malformedEvents=false, agentErrorEvent=false;
     const types:string[]=[];
+    const agentMessages:Array<{text:string;sha256:string}>=[];
+    let messageBytes=0;
     const auditTrace: AuditTrace[]=[];
     let beforeSha:string|undefined, afterSha:string|undefined;
     let controls:string|undefined;
@@ -665,6 +676,14 @@ export class NativeCodexAgentRunner {
         const type=typeof raw.type==="string" ? raw.type : "";
         if (!type) {failed=true;malformedEvents=true;return;}
         types.push(type);
+        if(input.delivery && type==="item.completed" && raw.item && typeof raw.item==="object"){
+          const item=raw.item as Record<string,unknown>;
+          if(item.type==="agent_message" && typeof item.text==="string"){
+            messageBytes+=Buffer.byteLength(item.text);
+            if(messageBytes>MAX_INLINE_DIFF_BYTES){failed=true;oversize=true;return;}
+            agentMessages.push({text:item.text,sha256:hash(item.text)});
+          }
+        }
         if(input.internalReview && type==="item.completed") {
           const item=raw.item;
           if(item && typeof item==="object" && !Array.isArray(item)) {
@@ -760,6 +779,7 @@ export class NativeCodexAgentRunner {
         : await captureCodexFingerprint(input.workspaceRoot);
       if(input.expectedFingerprint && before.sha!==input.expectedFingerprint)
         throw new Error("CODEX_REWORK_STALE_WORKTREE");
+      if(input.delivery)this.options.events.assertDeliveryRoute(input.delivery);
       if(!input.internalReview || input.task)verifyTask(input.workspaceRoot,input.workspaceId,input.task);
       if(!input.internalReview){
         prepareTaskResults(input.workspaceRoot,input.task!);
@@ -842,7 +862,7 @@ export class NativeCodexAgentRunner {
         : await captureCodexFingerprint(input.workspaceRoot);
       beforeSha=before.sha; afterSha=after.sha;
       const success= !r.stop && !failed && !oversize && code===0 &&
-        completed && Boolean(threadId);
+        completed && Boolean(threadId) && (!input.delivery || agentMessages.length>0);
       if(success) {
         r.status.executionCompleted=true;
         r.status.evidenceState="PENDING";
@@ -850,6 +870,10 @@ export class NativeCodexAgentRunner {
         if(controls!==undefined && controls!==taskControlSnapshot(input.workspaceRoot,reportPath(input.task!,input.operationId),proofs))throw new Error("CODEX_TASK_CONTROL_MUTATED");
         const sourceDiff = captureCodexSourceDiff(input.workspaceRoot,before.changedFiles??{},after.changedFiles??{},proofs);
         const evidenceBase={
+          sourceRoot:input.workspaceRoot,
+          runnerSourceSha256:hash(readFileSync(new URL(import.meta.url))),
+          ...(input.delivery?{delivery:input.delivery}:{}),
+          ...(agentMessages.length?{agentMessages}:{}),
           ...(input.task?{task:input.task,stageId:input.stageId??"development"}:{}),
           ...(report?{report}:{}),
           ...(proofs.length?{operationProofs:proofs}:{}),

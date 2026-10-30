@@ -18,6 +18,19 @@ try {
  assert.notEqual(e.event_id,e2.event_id);
  assert.equal(store.listPending("ws-a").pending_count,1);
  assert.equal(store.listPending("ws-b").pending_count,1);
+ const app=store.registerAppTurn({workspaceId:"ws-a",operationId:"app-op-1",workspaceRoot:"/workspace/a",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf",requestSha256:hash,taskId:"DEVSPACE_TASK",taskSha256:hash2});
+ assert.equal(app.state,"PENDING");
+ assert.equal(store.listPendingAppEvents("ws-a").length,0);
+ const completed=store.updateAppTurn({workspaceId:"ws-a",operationId:"app-op-1",state:"COMPLETED",turnId:"turn-1"});
+ assert.match(completed.event_id!,/^app:[a-f0-9]{64}$/);
+ assert.equal(store.updateAppTurn({workspaceId:"ws-a",operationId:"app-op-1",state:"COMPLETED",turnId:"turn-1"}).event_id,completed.event_id);
+ const appEvent=store.listPendingAppEvents("ws-a")[0]!;
+ assert.equal(appEvent.thread_id,app.thread_id);assert.equal(appEvent.turn_id,"turn-1");
+ assert.throws(()=>store.submitAppReview({workspaceId:"ws-b",eventId:appEvent.event_id,decision:"APPROVED",evidenceSha256:appEvent.evidence_sha256,reason:"wrong workspace"}),/NOT_FOUND/);
+ assert.throws(()=>store.submitAppReview({workspaceId:"ws-a",eventId:appEvent.event_id,decision:"APPROVED",evidenceSha256:hash,reason:"wrong evidence"}),/MISMATCH/);
+ store.submitAppReview({workspaceId:"ws-a",eventId:appEvent.event_id,decision:"REWORK",evidenceSha256:appEvent.evidence_sha256,reason:"specific fix"});
+ assert.equal(store.listPendingAppEvents("ws-a").length,0);
+ assert.equal(store.countAppReworks("ws-a","DEVSPACE_TASK",hash2),1);
  assert.throws(()=>store.submitReview({workspaceId:"ws-b",eventId:e.event_id,decision:"APPROVED",evidenceSha256:hash}),/MISMATCH/);
  assert.throws(()=>store.submitReview({workspaceId:"ws-a",eventId:e.event_id,decision:"APPROVED",evidenceSha256:hash2}),/MISMATCH/);
  const receipt=store.submitReview({workspaceId:"ws-a",eventId:e.event_id,decision:"APPROVED",evidenceSha256:hash});
@@ -36,6 +49,8 @@ try {
  store.close();
  const restored=new CoachReviewEventStore(state);
  assert.equal(restored.listPending("ws-b").events[0]?.operation_id,"codex-1");
+ assert.equal(restored.getAppTurn("ws-a","app-op-1")?.state,"COMPLETED");
+ assert.equal(restored.listPendingAppEvents("ws-a").length,0,"review verdict remains durable after store restart");
  restored.close();
  const malicious=join(root,"symlink-state");
  mkdirSync(malicious);

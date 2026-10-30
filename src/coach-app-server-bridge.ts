@@ -8,6 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { lstatSync, statSync, realpathSync, mkdirSync, readFileSync, openSync, closeSync, writeFileSync, renameSync } from "node:fs";
+import { readNativeCodexThread } from "./coach-codex-native-continuity.js";
 
 export const APP_THREAD_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 const MAX_FRAME = 2_097_152;
@@ -192,12 +193,62 @@ async function withConnection<T>(socketPath:string|undefined,fn:(conn:SharedAppC
   try{await connection.open();return await fn(connection);}finally{connection.close();}
 }
 export interface ThreadInfo { threadId:string; source:string; cwd:string; turns:number; status?:string }
+/**
+ * Where the returned turn history came from.
+ *  - "live": the connected App server returned the turns itself.
+ *  - "local_rollout": the live full-history frame exceeded the bridge's 2 MiB
+ *    frame limit, so turns were reconstructed from the exact persisted rollout
+ *    after live id/status/cwd metadata was re-verified with includeTurns:false.
+ */
+export type SharedThreadOrigin = "live" | "local_rollout";
+export interface SharedThreadRead {
+  thread:ThreadInfo;
+  /**
+   * True only when the returned messages are a trustworthy history: either the
+   * live server listed turns, or a verified local rollout supplied them.
+   * False means the live build can read metadata but cannot list past turns.
+   */
+  historyAvailable:boolean;
+  messages:Array<{role:"user"|"assistant";text:string}>;
+  origin:SharedThreadOrigin;
+}
+export interface ReadSharedThreadInput {
+  root:string;threadId:string;socketPath?:string;limit?:number;
+  /** Optional Codex home override for diagnostics/tests. Production uses ~/.codex. */
+  codexHome?:string;
+}
+/** Native reader errors that mean the rollout describes a different thread/workspace. */
+const NATIVE_IDENTITY_CODES=new Set(["CODEX_NATIVE_HISTORY_IDENTITY_INVALID","CODEX_APP_THREAD_WORKSPACE_MISMATCH","CODEX_APP_THREAD_MISMATCH"]);
+/** Oversize-frame failures are recoverable; every other transport/rpc error is not. */
+const FRAME_LIMIT_CODES=new Set(["CODEX_APP_FRAME_LIMIT","CODEX_APP_BUFFER_LIMIT"]);
+function clampMessageLimit(limit:number|undefined):number{return Math.min(Math.max(limit??8,1),20);}
 export async function sharedAppStatus(socketPath?:string):Promise<{connected:boolean;error?:string}>{
   try{await withConnection(socketPath,async()=>undefined);return{connected:true};}
   catch(error){return{connected:false,error:error instanceof AppBridgeError?error.code:"CODEX_APP_UNAVAILABLE"};}
 }
-export async function readSharedThread(input:{root:string;threadId:string;socketPath?:string;limit?:number}):Promise<{thread:ThreadInfo;historyAvailable:boolean;messages:Array<{role:"user"|"assistant";text:string}>}>{
+/**
+ * Read one authorized App-visible thread without touching its writer lock.
+ *
+ * The connected app server is authoritative for identity/metadata. A thread with
+ * a very large history (e.g. a 14 MB rollout) makes `thread/read includeTurns:true`
+ * exceed the bridge's MAX_FRAME, which closes that connection with
+ * CODEX_APP_FRAME_LIMIT before any JSON can be parsed. For only those oversize
+ * errors we fall back to (a) a fresh `thread/read {includeTurns:false}` for live
+ * id/status/cwd and (b) the exact persisted native rollout for messages/turns.
+ * Any other error - including disconnect, timeout, and every identity mismatch -
+ * propagates unchanged and is never swallowed into an empty success.
+ */
+export async function readSharedThread(input:ReadSharedThreadInput):Promise<SharedThreadRead>{
   if(!APP_THREAD_ID.test(input.threadId))throw new AppBridgeError("CODEX_APP_THREAD_ID_INVALID");
+  try {
+    return await readSharedThreadLive(input);
+  } catch(error) {
+    if(!(error instanceof AppBridgeError)||!FRAME_LIMIT_CODES.has(error.code))throw error;
+  }
+  return readSharedThreadFromNativeRollout(input);
+}
+/** Live read: full turns when the daemon supports them, metadata-only otherwise. */
+async function readSharedThreadLive(input:ReadSharedThreadInput):Promise<SharedThreadRead>{
   return withConnection(input.socketPath,async c=>{
     let data:any,historyAvailable=true;
     try {data=await c.request("thread/read",{threadId:input.threadId,includeTurns:true});}
@@ -219,8 +270,46 @@ export async function readSharedThread(input:{root:string;threadId:string;socket
       }
     }
     return{thread:{threadId:thread.id as string,source:"vscode",cwd:thread.cwd as string,turns:turns.length,status:(thread.status as {type?:string}|undefined)?.type},
-      historyAvailable,messages:messages.slice(-(input.limit??8))};
+      historyAvailable,messages:messages.slice(-clampMessageLimit(input.limit)),origin:"live"};
   });
+}
+/**
+ * Frame-limited fallback. This is deliberately fail-closed: live metadata must
+ * still verify the exact thread/workspace, the persisted rollout must exist and
+ * describe the same identity, and it must contain at least one real user or
+ * assistant message. Anything less throws instead of returning an empty success.
+ */
+async function readSharedThreadFromNativeRollout(input:ReadSharedThreadInput):Promise<SharedThreadRead>{
+  // Step (a): live metadata only. The oversize connection is already closed by
+  // the frame-limit failure, so this opens a fresh connection.
+  const data=await withConnection(input.socketPath,async c=>c.request("thread/read",{threadId:input.threadId,includeTurns:false}));
+  const live=data?.thread;
+  assertThread(live,input.root,input.threadId);
+  // Step (b): exact persisted rollout for messages/turns. It re-verifies
+  // session_meta id/source/cwd against the requested thread and root.
+  let native:ReturnType<typeof readNativeCodexThread>;
+  try{
+    native=readNativeCodexThread({threadId:input.threadId,root:input.root,limit:input.limit,
+      ...(input.codexHome?{codexHome:input.codexHome}:{})});
+  }catch(error){
+    if(error instanceof AppBridgeError&&NATIVE_IDENTITY_CODES.has(error.code))
+      throw new AppBridgeError("CODEX_APP_NATIVE_HISTORY_IDENTITY_MISMATCH");
+    throw new AppBridgeError("CODEX_APP_NATIVE_HISTORY_UNAVAILABLE");
+  }
+  // Cross-check the two independent sources; they must describe one identity.
+  let liveCwd:string,nativeCwd:string;
+  try{liveCwd=realpathSync(String(live.cwd));nativeCwd=realpathSync(native.thread.cwd);}
+  catch{throw new AppBridgeError("CODEX_APP_NATIVE_HISTORY_IDENTITY_MISMATCH");}
+  if(native.thread.threadId!==live.id||native.thread.threadId!==input.threadId||
+     native.thread.source!=="vscode"||liveCwd!==nativeCwd)
+    throw new AppBridgeError("CODEX_APP_NATIVE_HISTORY_IDENTITY_MISMATCH");
+  const messages=(Array.isArray(native.messages)?native.messages:[])
+    .filter(m=>m&&(m.role==="user"||m.role==="assistant")&&typeof m.text==="string"&&m.text.trim().length>0)
+    .map(m=>({role:m.role,text:m.text.slice(0,MAX_REPLY)}));
+  if(!messages.length)throw new AppBridgeError("CODEX_APP_NATIVE_HISTORY_UNAVAILABLE");
+  return{thread:{threadId:live.id as string,source:"vscode",cwd:live.cwd as string,
+      turns:native.thread.turns,status:(live.status as {type?:string}|undefined)?.type??native.thread.status},
+    historyAvailable:true,messages:messages.slice(-clampMessageLimit(input.limit)),origin:"local_rollout"};
 }
 export async function createSharedThread(input:{root:string;socketPath?:string}):Promise<ThreadInfo>{
   return withConnection(input.socketPath,async c=>{
@@ -250,29 +339,74 @@ export function boundSharedThread(stateDir:string,workspaceId:string):string|und
     throw new AppBridgeError("CODEX_APP_BINDING_UNREADABLE");
   }
 }
+export function assertSharedThreadOwnership(stateDir:string,workspaceId:string,root:string,threadId:string):void {
+  if(boundSharedThread(stateDir,workspaceId)!==threadId)throw new AppBridgeError("CODEX_APP_THREAD_NOT_BOUND");
+  const path=join(stateDir,"coach-app-thread-owners",threadId+".json");
+  try{
+    const st=lstatSync(path),canonical=realpathSync(path),stateRoot=realpathSync(stateDir);
+    // The state directory itself may be reached through an alias (macOS /var ->
+    // /private/var), so compare the canonicalized owner path against the
+    // canonical state root. A symlinked owner file or parent still fails.
+    if(st.isSymbolicLink()||!st.isFile()||canonical!==join(stateRoot,"coach-app-thread-owners",threadId+".json"))throw new AppBridgeError("CODEX_APP_THREAD_OWNER_UNSAFE");
+    const owner=JSON.parse(readFileSync(path,"utf8")) as {workspaceId:string;root:string};
+    if(owner.workspaceId!==workspaceId||owner.root!==safeRoot(root))throw new AppBridgeError("CODEX_APP_THREAD_OWNERSHIP_CHANGED");
+  }catch(error){if(error instanceof AppBridgeError)throw error;throw new AppBridgeError("CODEX_APP_THREAD_OWNER_UNAVAILABLE");}
+}
 /** The result of a previously submitted operation, safe to query after a client timeout. */
 export function sharedTurnReceipt(stateDir:string,workspaceId:string,operationId:string):
-  {state:"PENDING"|"UNCERTAIN"|"COMPLETED";receipt?:TurnReceipt}|undefined {
+  {state:"PENDING"|"UNCERTAIN"|"COMPLETED"|"FAILED"|"BLOCKED_PENDING_CONNECTION";receipt?:TurnReceipt;acceptedTurnId?:string}|undefined {
   if(!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(workspaceId)||
     !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(operationId))
     throw new AppBridgeError("CODEX_APP_OPERATION_ID_INVALID");
   const key=createHash("sha256").update(workspaceId+"\0"+operationId).digest("hex");
   try{
     const raw=JSON.parse(readFileSync(join(stateDir,"coach-app-turns",key+".json"),"utf8")) as
-      {workspaceId:string;state:"PENDING"|"UNCERTAIN"|"COMPLETED";receipt?:TurnReceipt};
-    if(raw.workspaceId!==workspaceId||!["PENDING","UNCERTAIN","COMPLETED"].includes(raw.state))
+      {workspaceId:string;state:"PENDING"|"UNCERTAIN"|"COMPLETED"|"FAILED"|"BLOCKED_PENDING_CONNECTION";receipt?:TurnReceipt;acceptedTurnId?:string};
+    if(raw.workspaceId!==workspaceId||!["PENDING","UNCERTAIN","COMPLETED","FAILED","BLOCKED_PENDING_CONNECTION"].includes(raw.state))
       throw new AppBridgeError("CODEX_APP_RECEIPT_INVALID");
-    return {state:raw.state,...(raw.receipt?{receipt:raw.receipt}:{})};
+    return {state:raw.state,...(raw.receipt?{receipt:raw.receipt}:{}),...(typeof raw.acceptedTurnId==="string"?{acceptedTurnId:raw.acceptedTurnId}:{})};
   }catch(e){
     if((e as NodeJS.ErrnoException).code==="ENOENT")return undefined;
     if(e instanceof AppBridgeError)throw e;
     throw new AppBridgeError("CODEX_APP_RECEIPT_UNREADABLE");
   }
 }
+/** Reconcile only the exact turn ID accepted for this operation; never infer from latest assistant text. */
+export async function reconcileSharedTurn(input:{root:string;stateDir:string;workspaceId:string;operationId:string;threadId:string;socketPath?:string}):Promise<TurnReceipt|undefined>{
+  const current=sharedTurnReceipt(input.stateDir,input.workspaceId,input.operationId);
+  if(!current||current.state==="COMPLETED"||current.state==="FAILED"||!current.acceptedTurnId)return current?.receipt;
+  assertSharedThreadOwnership(input.stateDir,input.workspaceId,input.root,input.threadId);
+  const turns=await withConnection(input.socketPath,async c=>{
+    const data=await c.request("thread/read",{threadId:input.threadId,includeTurns:true},20000);
+    assertThread(data?.thread,input.root,input.threadId);
+    return Array.isArray(data.thread.turns)?data.thread.turns:[];
+  });
+  const turn=turns.find((candidate:any)=>candidate?.id===current.acceptedTurnId);
+  if(!turn)return undefined;
+  const status=typeof turn.status==="string"?turn.status:turn.status?.type;
+  if(status==="failed"||status==="error"){
+    persistTurnState(input.stateDir,input.workspaceId,input.operationId,"FAILED",current.acceptedTurnId);
+    return undefined;
+  }
+  if(status!=="completed")return undefined;
+  const reply=(Array.isArray(turn.items)?turn.items:[]).filter((item:any)=>item?.type==="agentMessage").map((item:any)=>String(item.text||"")).join("\n").slice(0,MAX_REPLY);
+  if(!reply)return undefined;
+  const receipt:TurnReceipt={state:"COMPLETED",threadId:input.threadId,operationId:input.operationId,turnId:current.acceptedTurnId,reply,durationMs:0};
+  persistTurnState(input.stateDir,input.workspaceId,input.operationId,"COMPLETED",current.acceptedTurnId,receipt);
+  return receipt;
+}
+function persistTurnState(stateDir:string,workspaceId:string,operationId:string,state:"PENDING"|"UNCERTAIN"|"COMPLETED"|"FAILED",acceptedTurnId?:string,receipt?:TurnReceipt):void{
+  const key=createHash("sha256").update(workspaceId+"\0"+operationId).digest("hex"),store=join(stateDir,"coach-app-turns"),path=join(store,key+".json");
+  const temp=join(store,key+"."+randomBytes(6).toString("hex")+".tmp");
+  const old=JSON.parse(readFileSync(path,"utf8"));
+  writeFileSync(temp,JSON.stringify({...old,state,acceptedTurnId,...(receipt?{receipt}:{})}),{mode:0o600});renameSync(temp,path);
+}
 /** Exact workspace-to-thread pin. Never guesses a ChatGPT tab or silently rebinds. */
-export async function bindSharedThread(input:{workspaceId:string;root:string;threadId:string;stateDir:string;socketPath?:string}):Promise<string> {
+export async function bindSharedThread(input:{workspaceId:string;root:string;threadId:string;stateDir:string;socketPath?:string;codexHome?:string}):Promise<string> {
   if(!APP_THREAD_ID.test(input.threadId))throw new AppBridgeError("CODEX_APP_THREAD_ID_INVALID");
-  // Verify ownership on the real live app service before persisting.
+  // Verify ownership on the real live app service before persisting. Large-history
+  // threads are verified through the fail-closed native-rollout fallback, so
+  // binding no longer fails with CODEX_APP_FRAME_LIMIT.
   await readSharedThread({...input,limit:1});
   const existing=boundSharedThread(input.stateDir,input.workspaceId);
   if(existing){
@@ -311,7 +445,7 @@ export async function bindSharedThread(input:{workspaceId:string;root:string;thr
 }
 
 export interface SendRequest {
-  root:string;workspaceId:string;threadId:string;operationId:string;prompt:string;
+  root:string;workspaceId:string;threadId:string;operationId:string;prompt:string;onAccepted?:(turnId:string)=>void|Promise<void>;
   sandbox:"read-only"|"workspace-write";stateDir:string;socketPath?:string;timeoutMs?:number;
 }
 export interface TurnReceipt {state:"COMPLETED";threadId:string;operationId:string;turnId:string;reply:string;durationMs:number}
@@ -343,9 +477,10 @@ export async function sendSharedTurn(input:SendRequest):Promise<TurnReceipt>{
     const fd=openSync(path,"wx",0o600);
     try{writeFileSync(fd,JSON.stringify({fingerprint,state:"PENDING",threadId:input.threadId,workspaceId:input.workspaceId}));}
     finally{closeSync(fd);}
+    let acceptedTurnId:string|undefined;
     const save=(state:string,receipt?:TurnReceipt)=>{
       const temp=join(store,key+"."+randomBytes(6).toString("hex")+".tmp");
-      writeFileSync(temp,JSON.stringify({fingerprint,state,threadId:input.threadId,workspaceId:input.workspaceId,receipt}),{mode:0o600});
+      writeFileSync(temp,JSON.stringify({fingerprint,state,threadId:input.threadId,workspaceId:input.workspaceId,acceptedTurnId,...(receipt?{receipt}:{})}),{mode:0o600});
       renameSync(temp,path);
     };
     const start=Date.now();
@@ -384,6 +519,7 @@ export async function sendSharedTurn(input:SendRequest):Promise<TurnReceipt>{
             input:[{type:"text",text:input.prompt}]},20000);
           turnId=res?.turn?.id;
           if(typeof turnId!=="string")throw new AppBridgeError("CODEX_APP_TURN_NOT_ACCEPTED");
+          acceptedTurnId=turnId;save("PENDING");await input.onAccepted?.(turnId);
           await Promise.race([completion,new Promise<void>((_,reject)=>{completionTimer=setTimeout(()=>reject(new AppBridgeError("CODEX_APP_TURN_TIMEOUT")),timeoutMs);})]);
           if(failed||final?.params?.turn?.status!=="completed")throw new AppBridgeError("CODEX_APP_TURN_FAILED");
           const turn=final.params.turn;
@@ -396,7 +532,10 @@ export async function sendSharedTurn(input:SendRequest):Promise<TurnReceipt>{
       });
       save("COMPLETED",receipt);return receipt;
     }catch(e){
-      save("UNCERTAIN");throw e;
+      const code=e instanceof AppBridgeError?e.code:"";
+      if(!acceptedTurnId&&code.startsWith("CODEX_APP_RPC_REJECTED:thread already has an active writer"))save("FAILED");
+      else save("UNCERTAIN");
+      throw e;
     }
   });
 }

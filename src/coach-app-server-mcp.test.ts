@@ -11,7 +11,8 @@ const dir=mkdtempSync(join(tmpdir(),"app-bridge-mcp-")),root=join(dir,"workspace
 mkdirSync(root);
 const fakeContext=(readOnly:boolean)=>({config:{readOnly,stateDir:join(dir,"state")},
   workspaces:{getWorkspace(id:string){if(id!=="own_workspace")throw Error("WORKSPACE_NOT_AUTHORIZED");return{root};}},
-  coachReviewEvents:{hasInterruptedRun(){return false;}}
+  managedCoachSidecar:{status(){return undefined;}},
+  coachReviewEvents:{hasInterruptedRun(){return false;},getAppTurn(){return undefined;}}
 } as unknown as ServerContext);
 async function pair(readOnly:boolean){
  const server=new McpServer({name:"app-bridge-mcp-test",version:"1.0"});
@@ -23,15 +24,28 @@ async function pair(readOnly:boolean){
 try{
  const ro=await pair(true);
  const namesRo=(await ro.client.listTools()).tools.map(t=>t.name).sort();
- assert.deepEqual(namesRo,["codex_app_shared_status","codex_app_thread_current","codex_app_thread_read","codex_app_turn_receipt"].sort());
+ assert.deepEqual(namesRo,["codex_app_shared_status","codex_app_thread_current","codex_app_thread_read","codex_app_turn_receipt","codex_app_native_receipt"].sort());
  const blocked=await ro.client.callTool({name:"codex_app_thread_read",arguments:{workspaceId:"other_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf"}});
  assert.equal(blocked.isError,true);
  await ro.client.close();await ro.server.close();
  const rw=await pair(false);
  const namesRw=(await rw.client.listTools()).tools.map(t=>t.name);
- for(const name of ["codex_app_thread_bind","codex_app_thread_create","codex_app_thread_send"])
+ for(const name of ["codex_app_thread_bind","codex_app_thread_create","codex_app_thread_open","codex_app_thread_send","codex_app_native_send","codex_app_native_rework"])
    assert.ok(namesRw.includes(name));
- const unauthorized=await rw.client.callTool({name:"codex_app_thread_send",arguments:{
+ assert.ok(namesRw.includes("codex_app_review"));assert.ok(namesRw.includes("codex_app_thread_rework"));
+ // App-native ownership safety: no new invisible thread and no competing
+ // writer, even if the old daemon socket comes back after a reboot.
+ const openOther=await rw.client.callTool({name:"codex_app_thread_open",arguments:{workspaceId:"other_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf"}});
+ assert.equal(openOther.isError,true);
+ const creation=await rw.client.callTool({name:"codex_app_thread_create",arguments:{workspaceId:"own_workspace"}});
+ assert.equal(creation.isError,true);
+ assert.match(JSON.stringify(creation),/CODEX_APP_NATIVE_THREAD_CREATION_REQUIRED/);
+ const suspended=await rw.client.callTool({name:"codex_app_thread_send",arguments:{
+   workspaceId:"own_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf",
+   operationId:"safe_existing",prompt:"just say hello",sandbox:"read-only",
+ }});
+ assert.equal(suspended.isError,true);
+ assert.match(JSON.stringify(suspended),/CODEX_APP_SHARED_WRITES_PAUSED_UNTIL_OWNER_VERIFIED/); const unauthorized=await rw.client.callTool({name:"codex_app_thread_send",arguments:{
    workspaceId:"other_workspace",threadId:"01a16969-677a-7033-9acd-a77503a7aeaf",operationId:"test",
    prompt:"do not send",sandbox:"read-only"
  }});

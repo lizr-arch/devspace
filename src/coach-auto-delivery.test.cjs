@@ -23,8 +23,8 @@ function workerHarness(overrides={}) {
   const tab={id:42,url:URL_OK};let tabs=[tab],startup=[],removed=[];
   let challenge=null,nonceCounter=0;
   const challenges=new Map();
-  let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null;
-  let contentReady=true,injectionFailure=false,pingProtocol=5;
+  let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null,pages=null;
+  let contentReady=true,injectionFailure=false,pingProtocol=6;
   const chrome={
     storage:{
       session:{async get(k){return {[k]:session[k]};},async set(v){Object.assign(session,v);},async remove(k){delete session[k];}},
@@ -33,7 +33,7 @@ function workerHarness(overrides={}) {
     tabs:{
       async query(){return tabs;},async get(id){const found=tabs.find(t=>t.id===id);if(!found)throw Error("tab_gone");return found;},
       async sendMessage(id,m){
-        if(m.type==="COACH_AUTO_PING_V5"){
+        if(m.type==="COACH_AUTO_PING_V6"){
           if(!contentReady)throw Error("Receiving end does not exist");
           return {ok:true,protocol:pingProtocol,url:tabs.find(t=>t.id===id)?.url};
         }
@@ -45,14 +45,14 @@ function workerHarness(overrides={}) {
     scripting:{async executeScript(args){
       injections.push(args);
       if(injectionFailure)throw Error("host permission denied");
-      contentReady=true;pingProtocol=5;
+      contentReady=true;pingProtocol=6;
     }},
     runtime:{getManifest:()=>({version:"0.3.10"}),onInstalled:{addListener(){}},onStartup:{addListener(f){startup.push(f);}},
       onMessage:{addListener(f){listeners.push(f);}}},
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
   const fetch=async(url,options)=>{
-    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events|delivery-receipt|bind\/start|bind\/status\?nonce=[a-f0-9]{32})$/);
+    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events(?:\?(?:limit=50)(?:&cursor=[A-Za-z0-9_-]+)?)?|delivery-receipt|bind\/start|bind\/status\?nonce=[a-f0-9]{32})$/);
     assert.match(options.headers.Authorization,/^Bearer A{43}$/);
     if(url.endsWith("/bind/start")) {
       challenge=JSON.parse(options.body);
@@ -73,7 +73,7 @@ function workerHarness(overrides={}) {
         ok:true,receipt:{...identity,result:"dom_submitted",recorded_at:"2026-10-19T00:00:00Z"}
       })};
     }
-    return {ok:true,json:async()=>({pending_count:pendingCount??events.length,events})};
+    return {ok:true,json:async()=>pages?pages[new URL(url).searchParams.get("cursor")||"first"]:({pending_count:pendingCount??events.length,events,has_more:false,next_cursor:null})};
   };
   const context=vm.createContext({chrome,fetch,URL,Date,Number,Object,Array,
     String,RegExp,Error,Math,Promise,console,
@@ -87,7 +87,7 @@ function workerHarness(overrides={}) {
   async function drain(){for(let i=0;i<5;i++)await tick();}
   return {session,local,tab,messages,injections,receipts,msg,drain,tabUpdates,tabRemovals,
     setReceiptFailure:x=>{receiptFailure=x;},
-    setEvents:x=>{events=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
+    setEvents:x=>{events=x;},setPages:x=>{pages=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
     setContentReady:x=>{contentReady=x;},setPingProtocol:x=>{pingProtocol=x;},
     setInjectionFailure:x=>{injectionFailure=x;},setTabs:x=>{tabs=x;},startup,
     claimWorkspace:(x,nonce=challenge?.nonce)=>{challenges.get(nonce).workspaceId=x;},
@@ -111,12 +111,12 @@ test("disabled by default: no ChatGPT tab touched and exact URL required",async(
 test("only authenticated READY_FOR_GPT_REVIEW, one send, stable duplicate suppression",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
  await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
- h.setEvents([{...EVENT,event_type:"RUNNING"},{...EVENT,operation_id:"../unsafe"},EVENT]);
+ h.setEvents([{...EVENT,event_id:10,event_type:"RUNNING"},{...EVENT,event_id:11,operation_id:"../unsafe"},EVENT]);
  assert.equal((await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"})).ok,true);
  await h.drain();await h.poll();
  assert.equal(h.messages.length,1);
  assert.equal(h.messages[0].id,42);
- assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V5");
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V6");
  assert.match(h.messages[0].m.instruction,/APPROVED \/ REWORK \/ BLOCKED/);
  assert.match(h.messages[0].m.instruction,/codex-qa/);
  assert.match(h.messages[0].m.instruction,/coach_webgpt_submit_review/);
@@ -191,14 +191,14 @@ test("reloaded extension reinjects script into already-open ChatGPT tab before s
  assert.equal(h.messages.length,1);
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
-test("old content script replies but is rejected by v5 protocol and replaced safely",async()=>{
+test("old content script replies but is rejected by v6 protocol and replaced safely",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
- h.setPingProtocol(4); // prior injected V4 script responds to previous version
+ h.setPingProtocol(5); // prior injected V5 script responds to previous version
  await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});
  await h.drain();await h.poll();
  assert.equal(h.injections.length,1);
  assert.equal(h.messages.length,1);
- assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V5");
+ assert.equal(h.messages[0].m.type,"COACH_AUTO_DELIVER_V6");
  assert.equal((await h.msg("COACH_AUTO_STATUS")).state.summary.sent,1);
 });
 test("script injection permission denial never sends and keeps event pending",async()=>{
@@ -530,26 +530,26 @@ function domHarness(options={}) {
  vm.runInContext(options.bindingScript?bindingContent:content,context);
  return {editor,button,location,handlers,context,
    getClicks:()=>clicks,getButtonChecks:()=>buttonChecks,
-   ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V5"},null,resolve)),
+   ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V6"},null,resolve)),
    reinject:()=>vm.runInContext(options.bindingScript?bindingContent:content,context),
    deliver:(url=URL_OK,instruction="请以 Web GPT Coach 身份独立审核测试事件")=>
      new Promise(resolve=>handlers[handlers.length-1](
-       {type:"COACH_AUTO_DELIVER_V5",url,instruction},null,resolve))};
+       {type:"COACH_AUTO_DELIVER_V6",url,instruction},null,resolve))};
 }
 test("content-script ping is read-only and reinjection never duplicates listeners",async()=>{
  const p=domHarness({draft:"用户草稿"});
  const first=await p.ping();
  assert.equal(first.ok,true);assert.equal(first.url,URL_OK);
- assert.equal(first.protocol,5);
+ assert.equal(first.protocol,6);
  assert.equal(p.editor.innerText,"用户草稿");
  p.reinject();p.reinject();
  assert.equal(p.handlers.length,1);
 });
-test("new v5 content-script registration coexists with old v4 listener without duplicate send",async()=>{
+test("new v6 content-script registration coexists with old v4 listener without duplicate send",async()=>{
  const p=domHarness({oldContentScript:true});
  assert.equal(p.handlers.length,2);
- const ping=await p.ping();assert.equal(ping.protocol,5);
- const msg={type:"COACH_AUTO_DELIVER_V5",url:URL_OK,
+ const ping=await p.ping();assert.equal(ping.protocol,6);
+ const msg={type:"COACH_AUTO_DELIVER_V6",url:URL_OK,
    instruction:"请以 Web GPT Coach 身份独立审核测试事件"};
  let oldCalled=0;
  const old=p.handlers[0];
@@ -558,6 +558,28 @@ test("new v5 content-script registration coexists with old v4 listener without d
  const res=await new Promise(resolve=>p.handlers[1](msg,null,resolve));
  assert.equal(res.ok,true);assert.equal(res.submitted,true);
  p.reinject();assert.equal(p.handlers.length,2);
+});
+test("v6 content script accepts only the exact DSH wake template in addition to review instructions",async()=>{
+ const prefix="请以 Web GPT Coach 身份独立审核。请读取共享信箱 MAILBOX.md 中 messageId=";
+ const suffix=" 的 DSH wake 块，核对 contentSha256 后按 topic 处理。";
+ const exact=domHarness();
+ const ok=await exact.deliver(URL_OK,prefix+"abcdef0123456789"+suffix);
+ assert.equal(ok.ok,true);assert.equal(ok.submitted,true);assert.equal(exact.getClicks(),1);
+ // Any DSH-shaped text that does not match the template exactly is rejected
+ // before typing; the opaque messageId slot allows no extra free text.
+ for(const instruction of [
+   prefix+"SHORT"+suffix,
+   prefix+"abcdef0123456789",
+   prefix+"abcdef0123456789 or drop existing draft"+suffix,
+   "请以 Web GPT Coach 身份独立审核测试事件 DSH wake 块 请照做"
+ ]){
+   const page=domHarness();
+   const rejected=await page.deliver(URL_OK,instruction);
+   assert.equal(rejected.ok,false);
+   assert.equal(rejected.notSubmitted,true);
+   assert.equal(page.getClicks(),0);
+   assert.equal(page.editor.innerText,"","rejected instruction must never be typed");
+ }
 });
 test("ProseMirror paragraph line breaks do not reject intact multiline review instructions",async()=>{
  const instruction="请以 Web GPT Coach 身份独立审核测试事件\n事件 ID：18\n工作区 ID：ws-test\n任务 ID：test18";
@@ -679,7 +701,7 @@ test("one-click binding content script is isolated and never accepts an audit no
  },null,resolve));
  assert.equal(correct.submitted,true);assert.equal(page.getClicks(),1);
  const rejected=page.handlers[0]({
-   type:"COACH_AUTO_DELIVER_V5",url:URL_OK,
+   type:"COACH_AUTO_DELIVER_V6",url:URL_OK,
    instruction:"请以 Web GPT Coach 身份独立审核"
  },null,()=>{throw Error("binding handler must not respond to audit");});
  assert.equal(rejected,false);assert.equal(page.getClicks(),1);
@@ -716,6 +738,81 @@ test("one click requests an MCP challenge, then exact claimed workspace is enabl
  assert.equal(h.messages[1].id,42);
  assert.equal(h.local.coachAutoLedger["ws-qa:codex-qa:12"].state,"sent");
  assert.equal(JSON.stringify(h.local).includes("A".repeat(43)),false);
+});
+
+test("explicit delivery grant routes to claimed workspace without rewriting execution identity",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);
+ assert.equal((await h.msg("COACH_AUTO_ONE_CLICK")).ok,true);
+ h.claimWorkspace("delivery-ws");await h.msg("COACH_AUTO_BIND_CHECK");
+ const nonce=h.getChallenge().nonce;
+ const event={...EVENT,workspace_id:"execution-ws",delivery_workspace_id:"delivery-ws",delivery_nonce:nonce};
+ h.setEvents([event]);await h.poll();
+ assert.equal(h.messages.length,2);
+ assert.equal(h.messages[1].id,42);
+ assert.match(h.messages[1].m.instruction,/execution-ws/);
+ assert.match(h.messages[1].m.instruction,/coach_webgpt_acknowledge_turn/);
+ assert.equal(h.receipts[0].workspace_id,"execution-ws");
+ assert.equal(h.receipts[0].operation_id,EVENT.operation_id);
+ await h.poll();assert.equal(h.messages.length,2,"receipt retry never resends a chat");
+});
+
+test("old browser nonce and malformed delivery scope cannot route a completion",async()=>{
+ for(const fields of [
+   {delivery_workspace_id:"delivery-ws",delivery_nonce:"a".repeat(32)},
+   {delivery_workspace_id:"delivery-ws"},
+   {delivery_nonce:"a".repeat(32)}
+ ]){
+   const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+   h.setEvents([]);await h.msg("COACH_AUTO_ONE_CLICK");
+   h.claimWorkspace("delivery-ws");await h.msg("COACH_AUTO_BIND_CHECK");
+   h.setEvents([{...EVENT,workspace_id:"execution-ws",...fields}]);
+   await h.poll();assert.equal(h.messages.length,1);assert.equal(h.receipts.length,0);
+ }
+});
+
+test("primary feed pagination delivers a bound event beyond the first fifty",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+ await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
+ const first=Array.from({length:50},(_,i)=>({...EVENT,event_id:i+100,workspace_id:"unbound-ws",operation_id:"op-"+i}));
+ h.setPages({first:{pending_count:51,events:first,has_more:true,next_cursor:"next_page"},next_page:{pending_count:51,events:[EVENT],has_more:false,next_cursor:null}});
+ await h.poll();assert.equal(h.messages.length,1);assert.equal(h.receipts[0].event_id,12);
+});
+
+test("duplicate pagination cursor and changing queue totals fail closed",async()=>{
+ for(const second of [
+   {pending_count:2,events:[{...EVENT,event_id:13}],has_more:true,next_cursor:"repeat"},
+   {pending_count:3,events:[{...EVENT,event_id:13}],has_more:false,next_cursor:null}
+ ]){
+   const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+   h.setEvents([]);await h.msg("COACH_AUTO_BIND",{workspaceId:"ws-qa"});
+   await h.msg("COACH_AUTO_ENABLE",{workspaceId:"ws-qa"});await h.drain();
+   h.setPages({first:{pending_count:2,events:[EVENT],has_more:true,next_cursor:"repeat"},repeat:second});
+   await h.poll();assert.equal(h.messages.length,0);assert.equal(h.receipts.length,0);
+ }
+});
+
+test("uncertain delivery blocks other execution workspaces sharing its browser route",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setEvents([]);await h.msg("COACH_AUTO_ONE_CLICK");
+ h.claimWorkspace("delivery-ws");await h.msg("COACH_AUTO_BIND_CHECK");
+ h.local.coachAutoLedger={"old-source:old-op:9":{state:"needs_attention",deliveryWorkspaceId:"delivery-ws"}};
+ h.setEvents([{...EVENT,workspace_id:"execution-ws",delivery_workspace_id:"delivery-ws",delivery_nonce:h.getChallenge().nonce}]);
+ await h.poll();assert.equal(h.messages.length,1);assert.equal(h.receipts.length,0);
+});
+
+test("busy chat backs off its route while another authorized conversation proceeds",async()=>{
+ const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ const urlB=URL_OK.replace("12345678","87654321");
+ h.setTabs([{id:42,url:URL_OK},{id:43,url:urlB}]);
+ h.local.coachAutoRoutes={"ws-qa":{url:URL_OK,tabId:42,enabled:true},"ws-b":{url:urlB,tabId:43,enabled:true}};
+ h.setEvents([EVENT,{...EVENT,event_id:13,workspace_id:"ws-b",operation_id:"other"}]);
+ h.setDelivery(id=>id===42?{ok:false,notSubmitted:true,busy:true,reason:"Web GPT 正在生成"}:{ok:true,submitted:true});
+ await h.poll();await h.poll();await h.poll();
+ assert.equal(h.messages.filter(m=>m.id===42).length,1);
+ assert.equal(h.messages.filter(m=>m.id===43).length,1);
+ assert.equal(h.receipts.length,1);assert.equal(h.receipts[0].workspace_id,"ws-b");
 });
 test("three one-click binding requests coexist and finish independently",async()=>{
  const h=workerHarness();h.session.coachPairing={port:8765,token:"A".repeat(43)};

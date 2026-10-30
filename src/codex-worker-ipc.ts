@@ -29,10 +29,11 @@ type RpcRequest=
   | {version:1;token:string;op:"queue";input:{workspaceId:string;operationId:string;expectedRevision:number;selection:{model:string;reasoningEffort:string}}};
 type CoachStartInput={workspaceId:string;workspaceRoot:string;port:number;pairedExtensionId?:string;observeAllNativeAgents?:boolean;authorizedWorkspaceIds?:string[]};
 type RpcRequestWithCoach=RpcRequest
+  | {version:1;token:string;op:"coach_claim";workspaceId:string;nonce:string;url:string}
   | {version:1;token:string;op:"coach_start";input:CoachStartInput}
   | {version:1;token:string;op:"coach_stop";workspaceId:string}
   | {version:1;token:string;op:"coach_status";workspaceId:string}
-  | {version:1;token:string;op:"coach_delivery_receipt";workspaceId:string;eventId:number};
+  | {version:1;token:string;op:"coach_delivery_receipt";workspaceId:string;eventId:number|string};
 type RpcCall=RpcRequestWithCoach extends infer T?T extends RpcRequestWithCoach?Omit<T,"version"|"token">:never:never;
 
 function secretAt(path:string,create:boolean):Buffer {
@@ -145,6 +146,15 @@ export function createCodexWorkerDispatcher(input:{runner:NativeCodexAgentRunner
       case "coach_delivery_receipt": {
         authorizeWorkspace(request.workspaceId,input.workspaceStore.getSession(request.workspaceId)?.root??"");
         return input.coach.getDeliveryReceipt(request.workspaceId,request.eventId);
+      }
+      case "coach_claim": {
+        authorizeWorkspace(request.workspaceId,input.workspaceStore.getSession(request.workspaceId)?.root??"");
+        return input.coach.claimBrowserRoute(request.workspaceId,request.nonce,request.url,ids=>{
+          const saved=input.events.coachFeedConfig();
+          if(!saved)throw new Error("COACH_BIND_SCOPE_PERSISTENCE_DENIED");
+          for(const id of ids)authorizeWorkspace(id,input.workspaceStore.getSession(id)?.root??"");
+          input.events.saveCoachFeedConfig({...saved,authorizedWorkspaceIds:ids});
+        });
       }
       case "coach_status": {
         const current=input.coach.status(request.workspaceId);
@@ -365,9 +375,10 @@ export class CodexWorkerClient implements CodexAgentControl {
   coachStart(input:CoachStartInput):Promise<CoachSidecarStartResult>{return this.call({op:"coach_start",input});}
   coachStop(workspaceId:string):Promise<void>{return this.call({op:"coach_stop",workspaceId}).then(()=>{});}
   coachStatus(workspaceId:string):Promise<CoachSidecarStatus|undefined>{return this.call({op:"coach_status",workspaceId});}
-  coachDeliveryReceipt(workspaceId:string,eventId:number):Promise<DeliveryReceipt|undefined>{
+  coachDeliveryReceipt(workspaceId:string,eventId:number|string):Promise<DeliveryReceipt|undefined>{
     return this.call({op:"coach_delivery_receipt",workspaceId,eventId});
   }
+  coachClaim(workspaceId:string,nonce:string,url:string):Promise<boolean>{return this.call({op:"coach_claim",workspaceId,nonce,url});}
 }
 
 export class CodexWorkerCoachClient implements ManagedCoachSidecarControl {
@@ -376,9 +387,10 @@ export class CodexWorkerCoachClient implements ManagedCoachSidecarControl {
   start(input:CoachStartInput):Promise<CoachSidecarStartResult>{return this.worker.coachStart(input);}
   stop(workspaceId:string):Promise<void>{return this.worker.coachStop(workspaceId);}
   status(workspaceId:string):Promise<CoachSidecarStatus|undefined>{return this.worker.coachStatus(workspaceId);}
-  getDeliveryReceipt(workspaceId:string,eventId:number):Promise<DeliveryReceipt|undefined>{
+  getDeliveryReceipt(workspaceId:string,eventId:number|string):Promise<DeliveryReceipt|undefined>{
     return this.worker.coachDeliveryReceipt(workspaceId,eventId);
   }
+  claimBrowserRoute(workspaceId:string,nonce:string,url:string):Promise<boolean>{return this.worker.coachClaim(workspaceId,nonce,url);}
   activeServiceIdsForRoot(root:string):string[]{return this.events.coachFeedWorkspaceIdsForRoot(root);}
   // Route authorization must happen against the HOST-side Sidecar, not this
   // remote worker proxy; fail closed rather than forward unverified principals.
