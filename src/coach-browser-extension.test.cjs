@@ -38,12 +38,14 @@ function harness(){
     action:{async setBadgeText(o){badge=o.text;},async setBadgeBackgroundColor(){}}
   };
   let healthy=true,activeBearer=token;
+  let feedEvents=[{event_id:2,operation_id:"real-event",workspace_id:"ws-qa",event_type:"READY_FOR_GPT_REVIEW"}];
   const fetch=async(url,options)=>{
     history.push({url,options});
     const authorized=options?.headers?.Authorization==="Bearer "+activeBearer;
     if(url.endsWith("/health"))return {ok:healthy&&authorized,status:healthy&&authorized?200:401,json:async()=>({ok:healthy&&authorized,service:"coach-feed"})};
-    if(url.endsWith("/events"))return {ok:healthy&&authorized,status:healthy&&authorized?200:401,json:async()=>({
-      pending_count:1,events:[{event_id:2,operation_id:"real-event",workspace_id:"ws-qa",event_type:"READY_FOR_GPT_REVIEW"}]
+    if(url.startsWith("http://127.0.0.1:8765/events"))return {ok:healthy&&authorized,status:healthy&&authorized?200:401,json:async()=>({
+      pending_count:feedEvents.length,events:feedEvents,
+      has_more:false,next_cursor:null
     })};
     throw new Error("unexpected request");
   };
@@ -54,6 +56,7 @@ function harness(){
     assert.equal(ret,true);
   });
   return {send,records,localRecords,history,getBadge:()=>badge,setHealthy:v=>healthy=v,setActiveBearer:v=>activeBearer=v,
+    setFeedEvents:v=>{feedEvents=v;},
     setNativeAvailable:v=>nativeAvailable=v,setNativeReply:v=>nativeReply=v,setNativeDelay:v=>nativeDelay=v,
     nativeCalls:()=>nativeCalls,listeners,context,drain:async()=>{for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));}};
 }
@@ -64,6 +67,24 @@ test("manifest narrow localhost plus opt-in ChatGPT content script",()=>{
  assert.deepEqual(manifest.content_scripts[0].matches,["https://chatgpt.com/*"]);
  assert.equal(manifest.content_scripts[0].js[0],"chatgpt-delivery.js");
  assert.match(code,/importScripts\("auto-worker.js"\)/);
+});
+test("native ChatGPT App Codex event gets a distinct bounded Web GPT review instruction",()=>{
+ const h=harness();
+ const workerSource=fs.readFileSync(path.join(extension,"auto-worker.js"),"utf8");
+ const pure=workerSource.slice(workerSource.indexOf("function autoValid(e)"),workerSource.indexOf("async function autoState()"));
+ vm.runInContext('const AUTO_ID=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;'+pure,h.context);
+ const event={event_id:"app:"+"a".repeat(64),workspace_id:"ws-qa",operation_id:"app-op",event_type:"CODEX_APP_READY_FOR_GPT_REVIEW",
+   app_kind:"native_chatgpt_app_codex",thread_id:"01a16969-677a-7033-9acd-a77503a7aeaf",turn_id:"turn-1",evidence_sha256:"b".repeat(64)};
+ h.context.event=event;
+ assert.equal(vm.runInContext("autoValid(event)",h.context),true);
+ const instruction=vm.runInContext("autoInstruction(event)",h.context);
+ assert.match(instruction,/ChatGPT App 原生 Codex/);
+ assert.match(instruction,/codex_app_review/);
+ assert.match(instruction,/app:[a-f0-9]{64}/);
+ assert.match(instruction,/01a16969-677a-7033-9acd-a77503a7aeaf/);
+ assert.doesNotMatch(instruction,/local Codex CLI/);
+ event.thread_id="another-thread";
+ assert.equal(vm.runInContext("autoValid(event)",h.context),false);
 });
 test("no token means no fetch and explicit pairing required",async()=>{
  const h=harness();
@@ -186,6 +207,29 @@ test("HTTP authorization failure rejected without storing token",async()=>{
  const result=await h.send({type:"COACH_PAIR",port:8765,token});
  assert.equal(result.ok,false);
  assert.equal(h.records.coachPairing,undefined);
+});
+test("feed check accepts a DSH mailbox wake only in exact validated form",async()=>{
+ const h=harness();
+ const wake={event_id:"dsh:42",workspace_id:"ws-qa",operation_id:"abcdef0123456789",
+   event_type:"DSH_MAILBOX_WAKE",created_at:"2026-10-30T00:00:00Z"};
+ h.setFeedEvents([wake]);
+ assert.equal((await h.send({type:"COACH_PAIR",port:8765,token})).ok,true);
+ const state=await h.send({type:"COACH_STATUS"});
+ assert.equal(state.status.events.length,1);
+ assert.equal(state.status.events[0].event_id,"dsh:42");
+ assert.equal(state.status.events[0].event_type,"DSH_MAILBOX_WAKE");
+ for(const bad of [
+   {...wake,event_id:"dsh:0"},
+   {...wake,event_id:"dsh:abc"},
+   {...wake,operation_id:"SHORT"},
+   {...wake,operation_id:"UPPER-case-operation"},
+   {...wake,created_at:undefined},
+   {...wake,workspace_id:"-invalid"}
+ ]){
+   h.setFeedEvents([bad]);
+   const refreshed=await h.send({type:"COACH_REFRESH"});
+   assert.equal(refreshed.events.length,0,"malformed DSH wake must never be accepted");
+ }
 });
 test("explicit pair, scoped localhost requests, UI status hides token",async()=>{
  const h=harness();

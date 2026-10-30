@@ -182,7 +182,10 @@ const DevSpaceRouteGate = (() => {
       key: route.routeId + ":" + wake.messageId,
       instruction,
       command: {
-        type: "COACH_AUTO_DELIVER_V5",
+        // Delivery protocol is V6 end-to-end (worker autoReady/deliver + content
+        // script). This command is consumed by chatgpt-delivery.js, which only
+        // accepts COACH_AUTO_DELIVER_V6; a V5 command here is silently dropped.
+        type: "COACH_AUTO_DELIVER_V6",
         url: route.url,
         routeId: route.routeId,
         messageId: wake.messageId,
