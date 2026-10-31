@@ -64,6 +64,11 @@ const dispatcher=createCodexWorkerDispatcher({runner,events,coach:manager,stateD
 const proxy={
   start:manager.start.bind(manager),stop:manager.stop.bind(manager),status:manager.status.bind(manager),
   getDeliveryReceipt:manager.getDeliveryReceipt.bind(manager),
+  // Browser-origin scope authorization is exercised by the real server; this
+  // fixture already pins the exact one-click identity, so the scope hook is a
+  // no-op stub here.
+  authorizeRouteClaim:async()=>{},
+  claimExactBrowserRoute:async()=>false,
   claimBrowserRoute:async(workspaceId:string,nonce:string,url:string)=>
     await dispatcher({version:1,token:"dispatcher-fixture",op:"coach_claim",workspaceId,nonce,url}) as boolean,
 };
@@ -124,8 +129,13 @@ try {
   assert.equal((await call("codex_agent_start",input)).isError,true,"unclaimed delivery must not spawn");
   assert.equal(invocations.length,0);
   assert.equal((await post("/bind/start",{nonce,url:chatUrl})).status,200);
+  // Contract: a non-canonical URL is fail-closed at the tool boundary. The
+  // correct behavior is an explicit error AND no persisted route claim; it is
+  // not required to return a structured claimed=false.
   const badClaim=await call("coach_webgpt_claim_browser_route",{workspaceId:deliveryId,nonce,url:chatUrl+"/wrong"});
-  assert.equal((badClaim.structuredContent as {claimed?:boolean})?.claimed,false,"async false must not become truthy success");
+  assert.equal(badClaim.isError,true,"non-canonical URL must be rejected, not silently accepted");
+  assert.match(JSON.stringify(badClaim.structuredContent??badClaim.content),/ROUTE_INVALID_INPUT|GENERIC_TOOL_ERROR/i,"rejection must carry an explicit fail-closed error");
+  assert.equal(events.browserRouteClaim(deliveryId),undefined,"an invalid claim must not persist a browser route");
   const claim=await call("coach_webgpt_claim_browser_route",{workspaceId:deliveryId,nonce,url:chatUrl});
   assert.equal((claim.structuredContent as {claimed?:boolean})?.claimed,true,JSON.stringify(claim));
   assert.equal(events.browserRouteClaim(deliveryId)?.nonce,nonce);
