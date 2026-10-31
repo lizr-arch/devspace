@@ -42,6 +42,8 @@ export interface HistoricalReviewReceipt {
   evidence_sha256: string;
   frozen_fingerprint: string;
   current_fingerprint: string;
+  /** Algorithm used for the current fingerprint: full ref snapshot or bounded git coarse. */
+  current_fingerprint_algorithm: string;
   drift: 0 | 1;
   reviewed_at: string;
   source: string;
@@ -194,11 +196,15 @@ export class CoachReviewEventStore {
         "decision TEXT NOT NULL CHECK(decision IN ('BLOCKED','REWORK_RECOMMENDED'))," +
         "reason TEXT NOT NULL, evidence_sha256 TEXT NOT NULL," +
         "frozen_fingerprint TEXT NOT NULL, current_fingerprint TEXT NOT NULL," +
+        "current_fingerprint_algorithm TEXT NOT NULL DEFAULT 'full-snapshot-v1'," +
         "drift INTEGER NOT NULL CHECK(drift IN (0,1)), reviewed_at TEXT NOT NULL," +
         "source TEXT NOT NULL, UNIQUE(workspace_id,operation_id));" +
         "CREATE INDEX IF NOT EXISTS coach_historical_reviews_ws_idx " +
         "ON coach_historical_reviews(workspace_id,event_id);"
       );
+      const hf=new Set((this.db.pragma("table_info(coach_historical_reviews)") as {name:string}[]).map(x=>x.name));
+      if(!hf.has("current_fingerprint_algorithm"))
+        this.db.exec("ALTER TABLE coach_historical_reviews ADD COLUMN current_fingerprint_algorithm TEXT NOT NULL DEFAULT 'full-snapshot-v1'");
       this.db.pragma("user_version = 5");
     }).immediate();
   }
@@ -383,6 +389,11 @@ export class CoachReviewEventStore {
         .get(input.eventId,input.workspaceId) as {evidence_sha256:string}|undefined;
       if (!original || original.evidence_sha256 !== input.evidenceSha256)
         throw new Error("COACH_REVIEW_EVIDENCE_MISMATCH");
+      // Two-way mutual exclusion: an archived historical event can never acquire
+      // a normal authoritative decision afterwards (or race past it).
+      const archived = this.db.prepare("SELECT 1 AS archived FROM coach_historical_reviews WHERE event_id=?")
+        .get(input.eventId) as {archived:number}|undefined;
+      if (archived) throw new Error("COACH_REVIEW_HISTORICAL_ARCHIVED_CONFLICT");
       this.db.prepare("INSERT OR IGNORE INTO coach_review_decisions " +
         "(event_id,decision,evidence_sha256,reviewed_at) VALUES (?,?,?,?)")
         .run(input.eventId,input.decision,input.evidenceSha256,new Date().toISOString());
@@ -398,7 +409,8 @@ export class CoachReviewEventStore {
     if(!ID.test(workspaceId)||!Number.isSafeInteger(eventId)||eventId<=0)
       throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
     return this.db.prepare("SELECT event_id,workspace_id,operation_id,decision,reason," +
-      "evidence_sha256,frozen_fingerprint,current_fingerprint,drift,reviewed_at,source " +
+      "evidence_sha256,frozen_fingerprint,current_fingerprint,current_fingerprint_algorithm," +
+      "drift,reviewed_at,source " +
       "FROM coach_historical_reviews WHERE workspace_id=? AND event_id=?")
       .get(workspaceId,eventId) as HistoricalReviewReceipt|undefined;
   }
@@ -407,7 +419,8 @@ export class CoachReviewEventStore {
     if(!ID.test(workspaceId)||!Number.isInteger(limit)||limit<1||limit>50)
       throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
     return this.db.prepare("SELECT event_id,workspace_id,operation_id,decision,reason," +
-      "evidence_sha256,frozen_fingerprint,current_fingerprint,drift,reviewed_at,source " +
+      "evidence_sha256,frozen_fingerprint,current_fingerprint,current_fingerprint_algorithm," +
+      "drift,reviewed_at,source " +
       "FROM coach_historical_reviews WHERE workspace_id=? ORDER BY event_id DESC LIMIT ?")
       .all(workspaceId,limit) as HistoricalReviewReceipt[];
   }
@@ -421,7 +434,8 @@ export class CoachReviewEventStore {
   recordHistoricalReview(input: {
     workspaceId:string; operationId:string; eventId:number;
     decision:HistoricalDecision; reason:string; evidenceSha256:string;
-    frozenFingerprint:string; currentFingerprint:string; drift:0|1; source:string;
+    frozenFingerprint:string; currentFingerprint:string;
+    currentFingerprintAlgorithm:string; drift:0|1; source:string;
   }): {receipt:HistoricalReviewReceipt; created:boolean} {
     const reasonOk = typeof input.reason==="string" && input.reason.length>=16 &&
       input.reason.length<=1200 && ![...input.reason].some(ch=>ch.charCodeAt(0)<32);
@@ -429,8 +443,12 @@ export class CoachReviewEventStore {
        !Number.isSafeInteger(input.eventId)||input.eventId<=0||
        !["BLOCKED","REWORK_RECOMMENDED"].includes(input.decision)||!reasonOk||
        !SHA.test(input.evidenceSha256)||!SHA.test(input.frozenFingerprint)||
-       !SHA.test(input.currentFingerprint)||(input.drift!==0&&input.drift!==1)||
-       !ID.test(input.source))
+       !SHA.test(input.currentFingerprint)||
+       !["full-snapshot-v1","git-coarse-v1"].includes(input.currentFingerprintAlgorithm)||
+       (input.drift!==0&&input.drift!==1)||!ID.test(input.source))
+      throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
+    // Drift must be derived from the recorded values, never trusted blindly.
+    if(input.drift !== (input.frozenFingerprint===input.currentFingerprint?0:1))
       throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
     return this.db.transaction(()=>{
       const event = this.db.prepare("SELECT operation_id,evidence_sha256 FROM coach_review_events " +
@@ -444,22 +462,24 @@ export class CoachReviewEventStore {
       if(normal) throw new Error("COACH_HISTORICAL_ALREADY_REVIEWED");
       const existing = this.getHistoricalReview(input.workspaceId,input.eventId);
       if(existing){
+        // Idempotency is keyed to the archival inputs only. The current
+        // fingerprint is a point-in-time observation and must not turn an
+        // identical replay into a conflict after further workspace drift.
         const identical = existing.operation_id===input.operationId &&
           existing.decision===input.decision && existing.reason===input.reason &&
           existing.evidence_sha256===input.evidenceSha256 &&
           existing.frozen_fingerprint===input.frozenFingerprint &&
-          existing.current_fingerprint===input.currentFingerprint &&
-          existing.drift===input.drift && existing.source===input.source;
+          existing.source===input.source;
         if(!identical) throw new Error("COACH_HISTORICAL_REVIEW_CONFLICT");
         return {receipt:existing,created:false};
       }
       this.db.prepare("INSERT INTO coach_historical_reviews " +
         "(event_id,workspace_id,operation_id,decision,reason,evidence_sha256," +
-        "frozen_fingerprint,current_fingerprint,drift,reviewed_at,source) " +
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
+        "frozen_fingerprint,current_fingerprint,current_fingerprint_algorithm," +
+        "drift,reviewed_at,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(
         input.eventId,input.workspaceId,input.operationId,input.decision,input.reason,
-        input.evidenceSha256,input.frozenFingerprint,input.currentFingerprint,input.drift,
-        new Date().toISOString(),input.source);
+        input.evidenceSha256,input.frozenFingerprint,input.currentFingerprint,
+        input.currentFingerprintAlgorithm,input.drift,new Date().toISOString(),input.source);
       return {receipt:this.getHistoricalReview(input.workspaceId,input.eventId)!,created:true};
     }).immediate();
   }

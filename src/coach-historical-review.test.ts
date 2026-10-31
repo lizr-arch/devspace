@@ -70,25 +70,63 @@ try {
   assert.equal(first.receipt.drift, 1);
   assert.equal(first.receipt.frozen_fingerprint, frozen);
   assert.equal(first.receipt.current_fingerprint, drift);
+  assert.equal(first.receipt.current_fingerprint_algorithm, "full-snapshot-v1");
   assert.equal(first.receipt.event_id, event.event_id);
   assert.equal(first.receipt.operation_id, "historical-op-219");
   assert.equal(first.receipt.source, "codex_agent_submit_historical_review");
   assert.equal(events.listPending("ws-hist").pending_count, 0);
   assert.equal(service.list("ws-hist").length, 1);
 
+  // 1b. Reverse mutual exclusion: once archived, a normal decision is refused.
+  assert.throws(
+    () => events.submitReview({
+      workspaceId: "ws-hist",
+      eventId: event.event_id,
+      decision: "BLOCKED",
+      evidenceSha256: p.evidenceSha256,
+    }),
+    /COACH_REVIEW_HISTORICAL_ARCHIVED_CONFLICT/,
+  );
+
+  // 1c. Identical replay stays idempotent even after further workspace drift
+  //     (the current fingerprint is a snapshot, not part of request identity).
+  const laterDrift = new CoachHistoricalReview({
+    events,
+    fingerprint: async () => ({ sha: "c".repeat(64), gitSummary: null }),
+  });
+  const laterReplay = await laterDrift.submit({
+    workspaceId: "ws-hist",
+    workspaceRoot: workspace,
+    operationId: "historical-op-219",
+    eventId: event.event_id,
+    decision: "BLOCKED",
+    evidenceSha256: p.evidenceSha256,
+    reason: "Historical read-only task completed but no verifiable deliverable or test evidence was found.",
+  });
+  assert.equal(laterReplay.idempotent, true);
+  assert.equal(laterReplay.receipt.current_fingerprint, drift,
+    "replay must return the originally archived observation");
+
   // 2. Equal fingerprints must not use (or bypass) the archival path.
+  const equalQ = packetFor("ws-equal", "historical-op-equal", frozen);
+  const equalEvent = events.recordCompletedWithEvidence({
+    workspaceId: "ws-equal",
+    operationId: "historical-op-equal",
+    evidenceSha256: equalQ.evidenceSha256,
+    packetJson: equalQ.packetJson,
+  });
   const equalService = new CoachHistoricalReview({
     events,
     fingerprint: async () => ({ sha: frozen, gitSummary: null }),
   });
   await assert.rejects(
     () => equalService.submit({
-      workspaceId: "ws-hist",
+      workspaceId: "ws-equal",
       workspaceRoot: workspace,
-      operationId: "historical-op-219",
-      eventId: event.event_id,
+      operationId: "historical-op-equal",
+      eventId: equalEvent.event_id,
       decision: "BLOCKED",
-      evidenceSha256: p.evidenceSha256,
+      evidenceSha256: equalQ.evidenceSha256,
       reason: "Normal review must be used when the frozen fingerprint is unchanged.",
     }),
     /COACH_HISTORICAL_REVIEW_NOT_REQUIRED/,
@@ -274,6 +312,33 @@ try {
     /COACH_EVIDENCE_INTEGRITY_FAILURE/,
   );
 
+  // 6d. Oversized workspaces fall back to the bounded git coarse algorithm.
+  const coarseQ = packetFor("ws-coarse", "historical-op-oversize", frozen);
+  const coarseEvent = events.recordCompletedWithEvidence({
+    workspaceId: "ws-coarse",
+    operationId: "historical-op-oversize",
+    evidenceSha256: coarseQ.evidenceSha256,
+    packetJson: coarseQ.packetJson,
+  });
+  const coarseService = new CoachHistoricalReview({
+    events,
+    fingerprint: async () => { throw new Error("CODEX_SNAPSHOT_TOO_MANY_FILES"); },
+    coarseFingerprint: () => ({ sha: "d".repeat(64), gitSummary: "HEAD=deadbee; algorithm=git-coarse-v1" }),
+  });
+  const coarse = await coarseService.submit({
+    workspaceId: "ws-coarse",
+    workspaceRoot: workspace,
+    operationId: "historical-op-oversize",
+    eventId: coarseEvent.event_id,
+    decision: "BLOCKED",
+    evidenceSha256: coarseQ.evidenceSha256,
+    reason: "Oversized drift class: full snapshot unavailable, coarse bounded digest archived.",
+  });
+  assert.equal(coarse.receipt.current_fingerprint_algorithm, "git-coarse-v1");
+  assert.equal(coarse.receipt.current_fingerprint, "d".repeat(64));
+  assert.equal(coarse.receipt.drift, 1);
+  assert.equal(events.getHistoricalReview("ws-coarse", coarseEvent.event_id)?.decision, "BLOCKED");
+
   // 7. An operation owned by an active auto plan must use the plan path.
   const activePlanService = new CoachHistoricalReview({
     events,
@@ -370,8 +435,9 @@ try {
 
   // 10. Archival never mutates the frozen evidence or the workspace.
   const packetBefore = JSON.parse(p.packetJson) as Record<string, unknown>;
-  const evidenceBefore = events.getHistoricalReview("ws-hist", event.event_id)?.evidence_sha256;
-  assert.equal(evidenceBefore, p.evidenceSha256);
+  const archivedFirst = events.getHistoricalReview("ws-hist", event.event_id);
+  assert.equal(archivedFirst?.evidence_sha256, p.evidenceSha256);
+  assert.equal(archivedFirst?.current_fingerprint_algorithm, "full-snapshot-v1");
   const db = new Database(join(state, "coach-review-events.sqlite"), { readonly: true, fileMustExist: true });
   try {
     const row = db.prepare(

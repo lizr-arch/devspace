@@ -51,7 +51,7 @@ const [a,b]=InMemoryTransport.createLinkedPair();
 await mp.connect(b);await client.connect(a);
 try {
  const names=(await client.listTools()).tools.map(t=>t.name).sort();
- assert.deepEqual(names,["codex_agent_start_rework","codex_agent_submit_review","codex_agent_verify_test","codex_task_freeze","codex_agent_clear_quarantine","codex_agent_evidence","codex_agent_observe","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_start","codex_agent_status","codex_agent_stop","codex_agent_update_config"].sort());
+ assert.deepEqual(names,["codex_agent_start_rework","codex_agent_submit_review","codex_agent_submit_historical_review","codex_agent_historical_reviews","codex_agent_verify_test","codex_task_freeze","codex_agent_clear_quarantine","codex_agent_evidence","codex_agent_observe","codex_agent_quarantine_status","codex_agent_source_diff","codex_agent_start","codex_agent_status","codex_agent_stop","codex_agent_update_config"].sort());
  const denied=await client.callTool({name:"codex_agent_start",arguments:{
   workspaceId:"untrusted",operationId:"denied",prompt:"edit",model:"gpt-6-luna",
   reasoningEffort:"none",sandbox:"workspace-write"

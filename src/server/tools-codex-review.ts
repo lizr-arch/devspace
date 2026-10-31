@@ -11,6 +11,30 @@ import { checkManifestIntegrity, isTaskApproved } from "../task-manifest.js";
 
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 export function registerCodexReviewTools(server: McpServer, ctx: ServerContext): void {
+  // Archival-only channel for completed historical events whose workspace has
+  // drifted. It never returns/records APPROVED, never grants rework authority,
+  // never wakes a plan and never mutates the original evidence.
+  const historical = new CoachHistoricalReview({
+    events: ctx.coachReviewEvents,
+    activePlans: () => ctx.coachRealtime.all().map((plan) => ({
+      workspaceId: plan.workspaceId,
+      currentOperationId: plan.currentOperationId,
+      phase: plan.phase,
+    })),
+  });
+  // Read-only audit query stays available in read-only servers.
+  registerAppTool(server, "codex_agent_historical_reviews", {
+    title: "List archived historical Codex reviews",
+    description: "Read the bounded historical review archive for one workspace. Entries are audit-only and never imply APPROVED or rework authorization.",
+    inputSchema: { workspaceId: id },
+    outputSchema: resultOutputSchema({ reviews: z.unknown() }),
+    _meta: {}, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ workspaceId }) => {
+    // Same workspace authorization contract as codex_agent_evidence/observe.
+    ctx.workspaces.getWorkspace(workspaceId);
+    const reviews = historical.list(workspaceId);
+    return { content: [textBlock(`Archived historical reviews: ${reviews.length}`)], structuredContent: { result: "ok", reviews } };
+  });
   if (ctx.config.readOnly) return;
   const gate = new CoachReviewGate({ events: ctx.coachReviewEvents, tasks: ctx.tasks });
   registerAppTool(server, "codex_agent_verify_test", {
@@ -78,17 +102,6 @@ export function registerCodexReviewTools(server: McpServer, ctx: ServerContext):
     const receipt = await gate.submit({ workspaceId, workspaceRoot: workspace.root, operationId, eventId, decision, evidenceSha256 });
     return { content: [textBlock(`Review event ${eventId}: ${decision}.`)], structuredContent: { result: decision, receipt } };
   });
-  // Archival-only channel for completed historical events whose workspace has
-  // drifted. It never returns/records APPROVED, never grants rework authority,
-  // never wakes a plan and never mutates the original evidence.
-  const historical = new CoachHistoricalReview({
-    events: ctx.coachReviewEvents,
-    activePlans: () => ctx.coachRealtime.all().map((plan) => ({
-      workspaceId: plan.workspaceId,
-      currentOperationId: plan.currentOperationId,
-      phase: plan.phase,
-    })),
-  });
   registerAppTool(server, "codex_agent_submit_historical_review", {
     title: "Archive a historical Codex review decision",
     description: "Archive BLOCKED or REWORK_RECOMMENDED for a completed event whose frozen evidence no longer matches the drifted workspace. Exact workspace/operation/event/evidence identity is required. This never approves work, starts Codex, dispatches rework, advances a plan, or replaces the normal review path.",
@@ -117,15 +130,5 @@ export function registerCodexReviewTools(server: McpServer, ctx: ServerContext):
       ? `Historical review event ${eventId} already archived: ${decision}.`
       : `Historical review event ${eventId} archived as ${decision}; this is not a normal approval and grants no rework authority.`;
     return { content: [textBlock(text)], structuredContent: { result: "archived", receipt: result.receipt, idempotent: result.idempotent } };
-  });
-  registerAppTool(server, "codex_agent_historical_reviews", {
-    title: "List archived historical Codex reviews",
-    description: "Read the bounded historical review archive for one workspace. Entries are audit-only and never imply APPROVED or rework authorization.",
-    inputSchema: { workspaceId: id },
-    outputSchema: resultOutputSchema({ reviews: z.unknown() }),
-    _meta: {}, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ workspaceId }) => {
-    const reviews = historical.list(workspaceId);
-    return { content: [textBlock(`Archived historical reviews: ${reviews.length}`)], structuredContent: { result: "ok", reviews } };
   });
 }

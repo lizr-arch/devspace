@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { captureCodexFingerprint } from "./codex-agent-runner.js";
 import type {
   CoachReviewEventStore,
@@ -9,6 +11,31 @@ const SHA = /^[a-f0-9]{64}$/;
 /** Plan phases that still own the operation and must use the plan review path. */
 const ACTIVE_PLAN_PHASES = new Set(["ACTIVE", "AWAITING_WEBGPT", "REVIEWING", "DISPATCHING", "PAUSED"]);
 export const HISTORICAL_REVIEW_SOURCE = "codex_agent_submit_historical_review";
+export const FULL_FINGERPRINT_ALGORITHM = "full-snapshot-v1";
+export const COARSE_FINGERPRINT_ALGORITHM = "git-coarse-v1";
+
+/**
+ * Bounded fallback fingerprint for workspaces whose full snapshot exceeds the
+ * 2000-file / 32MiB evidence caps. It hashes HEAD plus the complete porcelain
+ * status stream (paths included) so drift remains detectable without reading
+ * every file; the algorithm is recorded in the audit row.
+ */
+export function coarseWorkspaceFingerprint(root: string): HistoricalFingerprint {
+  const run = (...args: string[]) => execFileSync("/usr/bin/git", args, {
+    cwd: root, timeout: 5000, maxBuffer: 8 * 1024 * 1024, encoding: "buffer",
+    stdio: ["ignore", "pipe", "ignore"],
+  }) as Buffer;
+  let head = "UNBORN_HEAD";
+  try { head = run("rev-parse", "HEAD").toString("utf8").trim(); } catch { /* unborn */ }
+  let status: Buffer;
+  try { status = run("status", "--porcelain=v1", "-z", "--untracked-files=all"); }
+  catch { status = Buffer.alloc(0); }
+  const statusDigest = createHash("sha256").update(status).digest("hex");
+  const sha = createHash("sha256")
+    .update(COARSE_FINGERPRINT_ALGORITHM + "\0" + head + "\0" + statusDigest)
+    .digest("hex");
+  return { sha, gitSummary: `HEAD=${head}; algorithm=${COARSE_FINGERPRINT_ALGORITHM}; status_sha256=${statusDigest.slice(0, 16)}` };
+}
 
 export interface HistoricalPlanView {
   workspaceId: string;
@@ -23,6 +50,8 @@ export interface CoachHistoricalReviewOptions {
   events: CoachReviewEventStore;
   /** Injectable for deterministic tests; defaults to the real bounded snapshot. */
   fingerprint?: (root: string) => Promise<HistoricalFingerprint>;
+  /** Fallback used only when the full snapshot exceeds its file/byte caps. */
+  coarseFingerprint?: (root: string) => HistoricalFingerprint;
   /** Injectable for deterministic tests; defaults to no plans. */
   activePlans?: () => HistoricalPlanView[];
 }
@@ -50,11 +79,13 @@ export interface HistoricalReviewResult {
 export class CoachHistoricalReview {
   private readonly events: CoachReviewEventStore;
   private readonly fingerprint: (root: string) => Promise<HistoricalFingerprint>;
+  private readonly coarseFingerprint: (root: string) => HistoricalFingerprint;
   private readonly activePlans: () => HistoricalPlanView[];
 
   constructor(options: CoachHistoricalReviewOptions) {
     this.events = options.events;
     this.fingerprint = options.fingerprint ?? captureCodexFingerprint;
+    this.coarseFingerprint = options.coarseFingerprint ?? coarseWorkspaceFingerprint;
     this.activePlans = options.activePlans ?? (() => []);
   }
 
@@ -101,22 +132,51 @@ export class CoachHistoricalReview {
     if (this.events.getReview(input.workspaceId, input.operationId))
       throw new Error("COACH_HISTORICAL_ALREADY_REVIEWED");
 
-    // 6. Capture the current fingerprint; refuse to guess when unavailable.
+    // 6. Idempotent/conflict replay is decided from archival inputs only, before
+    //    touching the workspace again. The current fingerprint is a snapshot,
+    //    not part of the request identity.
+    const existing = this.events.getHistoricalReview(input.workspaceId, input.eventId);
+    if (existing) {
+      const identical = existing.operation_id === input.operationId &&
+        existing.decision === input.decision && existing.reason === input.reason &&
+        existing.evidence_sha256 === input.evidenceSha256 &&
+        existing.frozen_fingerprint === frozen &&
+        existing.source === (input.source ?? HISTORICAL_REVIEW_SOURCE);
+      if (!identical) throw new Error("COACH_HISTORICAL_REVIEW_CONFLICT");
+      return { receipt: existing, idempotent: true };
+    }
+
+    // 7. Capture the current fingerprint. Oversized workspaces (the event-219
+    //    failure class) fall back to the bounded git coarse algorithm; any other
+    //    capture failure is fail-closed.
     let current: HistoricalFingerprint;
+    let algorithm = FULL_FINGERPRINT_ALGORITHM;
     try {
       current = await this.fingerprint(input.workspaceRoot);
     } catch (error) {
-      const wrapped = new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
-      (wrapped as Error & { cause?: unknown }).cause = error;
-      throw wrapped;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/CODEX_SNAPSHOT_TOO_MANY_FILES|CODEX_SNAPSHOT_TOO_LARGE/.test(message)) {
+        const wrapped = new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
+        (wrapped as Error & { cause?: unknown }).cause = error;
+        throw wrapped;
+      }
+      try { current = this.coarseFingerprint(input.workspaceRoot); }
+      catch (coarseError) {
+        const wrapped = new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
+        (wrapped as Error & { cause?: unknown }).cause = coarseError;
+        throw wrapped;
+      }
+      algorithm = COARSE_FINGERPRINT_ALGORITHM;
     }
     if (!current || typeof current.sha !== "string" || !SHA.test(current.sha))
       throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
 
-    // 7. Same fingerprint means normal review is required (never bypass it).
-    if (current.sha === frozen) throw new Error("COACH_HISTORICAL_REVIEW_NOT_REQUIRED");
+    // 8. Same full fingerprint means normal review is required (never bypass it).
+    //    Coarse digests are not comparable to the frozen full snapshot.
+    if (algorithm === FULL_FINGERPRINT_ALGORITHM && current.sha === frozen)
+      throw new Error("COACH_HISTORICAL_REVIEW_NOT_REQUIRED");
 
-    // 8. Persist the archival journal entry only (idempotent / conflict-safe).
+    // 9. Persist the archival journal entry only (idempotent / conflict-safe).
     const { receipt, created } = this.events.recordHistoricalReview({
       workspaceId: input.workspaceId,
       operationId: input.operationId,
@@ -126,6 +186,7 @@ export class CoachHistoricalReview {
       evidenceSha256: input.evidenceSha256,
       frozenFingerprint: frozen,
       currentFingerprint: current.sha,
+      currentFingerprintAlgorithm: algorithm,
       drift: 1,
       source: input.source ?? HISTORICAL_REVIEW_SOURCE,
     });

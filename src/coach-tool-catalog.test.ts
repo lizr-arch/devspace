@@ -45,6 +45,6 @@ assert.ok(!ro.includes("codex_app_thread_bind"));
 assert.ok(!ro.includes("codex_app_thread_send"));
 assert.ok(!ro.includes("codex_task_freeze"));
 assert.ok(!ro.includes("codex_agent_submit_historical_review"));
-assert.ok(!ro.includes("codex_agent_historical_reviews"));
+assert.ok(ro.includes("codex_agent_historical_reviews"));
 assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001\+codex-app-shared-001\+coach-historical-review-001$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");

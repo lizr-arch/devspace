@@ -278,10 +278,14 @@ export class ManagedCoachSidecar {
     try {
       const native = Boolean(this.nativeEventDatabasePath);
       const hasEvidence=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_review_evidence'").get());
+      // Archived historical reviews are terminal for delivery exactly like a
+      // normal decision: the browser feed must never re-push them.
+      const hasHistorical=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_historical_reviews'").get());
       const pendingQuery = native
         ? "from coach_review_events e "+(hasEvidence?"LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id ":"")+"where e.workspace_id IN (" +
           ids.map(()=>"?").join(",") + ") and e.event_type = 'READY_FOR_GPT_REVIEW' " +
           (hasEvidence?"AND "+COACH_DELIVERY_SQL+" ":"")+
+          (hasHistorical?"and not exists (select 1 from coach_historical_reviews h where h.event_id=e.event_id) ":"")+
           "and not exists (select 1 from coach_review_decisions r where r.event_id=e.event_id)"
         : "from events e where e.event_type = 'READY_FOR_GPT_REVIEW' " +
           "and not exists (select 1 from review_decisions r where r.event_id = e.event_id)";
