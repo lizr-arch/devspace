@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { captureCodexFingerprint } from "./codex-agent-runner.js";
 import type {
@@ -25,19 +26,35 @@ export function coarseWorkspaceFingerprint(root: string): HistoricalFingerprint 
     cwd: root, timeout: 5000, maxBuffer: 8 * 1024 * 1024, encoding: "buffer",
     stdio: ["ignore", "pipe", "ignore"],
   }) as Buffer;
-  // Fail closed: without a trusted Git work tree and a readable status stream
-  // there is no coarse fingerprint at all. An empty status must never stand in
-  // for an unreadable one.
+  // Fail closed: without a trusted Git work tree, a matching Git root and a
+  // readable status stream there is no coarse fingerprint at all. An empty
+  // status or an unreadable HEAD must never stand in for a trusted one.
   let inside: string;
   try { inside = run("rev-parse", "--is-inside-work-tree").toString("utf8").trim(); }
   catch {
     throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
   }
   if (inside !== "true") throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
-  let head = "UNBORN_HEAD";
-  try { head = run("rev-parse", "HEAD").toString("utf8").trim(); } catch { /* unborn HEAD is valid */ }
-  // Any git failure here propagates; the service wraps it as unavailable.
-  const status = run("status", "--porcelain=v1", "-z", "--untracked-files=all");
+  // The coarse digest must describe EXACTLY this workspace root, not an
+  // enclosing repository: normalize both paths and require equality.
+  let topLevel: string;
+  let workspaceRoot: string;
+  try {
+    topLevel = realpathSync(run("rev-parse", "--show-toplevel").toString("utf8").trim());
+    workspaceRoot = realpathSync(root);
+  } catch {
+    throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
+  }
+  if (topLevel !== workspaceRoot) throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
+  // A valid committed HEAD is required; corrupted/missing HEAD fails closed
+  // instead of being silently treated as an unborn repository.
+  let head: string;
+  try { head = run("rev-parse", "--verify", "HEAD^{commit}").toString("utf8").trim(); }
+  catch { throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE"); }
+  // An unreadable status stream is never replaced with an empty one.
+  let status: Buffer;
+  try { status = run("status", "--porcelain=v1", "-z", "--untracked-files=all"); }
+  catch { throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE"); }
   const statusDigest = createHash("sha256").update(status).digest("hex");
   const sha = createHash("sha256")
     .update(COARSE_FINGERPRINT_ALGORITHM + "\0" + head + "\0" + statusDigest)

@@ -362,6 +362,23 @@ try {
   const coarseChanged = coarseWorkspaceFingerprint(gitWorkspace);
   assert.notEqual(coarseChanged.sha, coarseOne.sha,
     "coarse digest must change when the porcelain status stream changes");
+  // H1a: an unborn repository has no valid committed HEAD -> reject.
+  const unbornWorkspace = join(root, "unborn-git-workspace");
+  mkdirSync(unbornWorkspace);
+  execFileSync("/usr/bin/git", ["init", "-q"], { cwd: unbornWorkspace });
+  assert.throws(
+    () => coarseWorkspaceFingerprint(unbornWorkspace),
+    /COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE/,
+    "unborn HEAD must fail closed, not be reported as a valid coarse digest",
+  );
+  // H1b: a subdirectory of a repo is not the workspace root -> reject.
+  const subDir = join(gitWorkspace, "nested");
+  mkdirSync(subDir);
+  assert.throws(
+    () => coarseWorkspaceFingerprint(subDir),
+    /COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE/,
+    "the coarse digest must describe exactly the requested workspace root",
+  );
 
   // 6f. If both the full and the coarse capture fail, archival is refused.
   const failQ = packetFor("ws-nofp", "historical-op-nofp", frozen);
