@@ -8,6 +8,9 @@ const root=join(__dirname,"../coach-browser-extension");
 const code=readFileSync(join(root,"auto-worker.js"),"utf8");
 const content=readFileSync(join(root,"chatgpt-delivery.js"),"utf8");
 const bindingContent=readFileSync(join(root,"chatgpt-binding.js"),"utf8");
+const gateCode=readFileSync(join(root,"multiroute-gate.js"),"utf8");
+const gate=require(join(root,"multiroute-gate.js"));
+const {createHash,webcrypto}=require("node:crypto");
 const URL_OK="https://chatgpt.com/c/12345678-abcd-1234-abcd-123456789abc";
 const EVENT={event_id:12,workspace_id:"ws-qa",operation_id:"codex-qa",event_type:"READY_FOR_GPT_REVIEW"};
 const tick=()=>new Promise(r=>setImmediate(r));
@@ -25,6 +28,8 @@ function workerHarness(overrides={}) {
   const challenges=new Map();
   let events=[EVENT],delivered={ok:true,submitted:true},pendingCount=null,pages=null;
   let contentReady=true,injectionFailure=false,pingProtocol=6;
+  let multiWakeQueue=[];
+  const acks=[];
   const chrome={
     storage:{
       session:{async get(k){return {[k]:session[k]};},async set(v){Object.assign(session,v);},async remove(k){delete session[k];}},
@@ -52,7 +57,7 @@ function workerHarness(overrides={}) {
     alarms:{create(){},onAlarm:{addListener(f){alarms.push(f);}}}
   };
   const fetch=async(url,options)=>{
-    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events(?:\?(?:limit=50)(?:&cursor=[A-Za-z0-9_-]+)?)?|delivery-receipt|bind\/start|bind\/status\?nonce=[a-f0-9]{32})$/);
+    assert.match(url,/^http:\/\/127\.0\.0\.1:8765\/(events(?:\?(?:limit=50)(?:&cursor=[A-Za-z0-9_-]+)?)?|delivery-receipt|bind\/start|bind\/status\?nonce=[a-f0-9]{32}|routes\/[A-Za-z0-9_-]+\/(?:next\?origination=dsh&limit=1|ack|revoke))$/);
     assert.match(options.headers.Authorization,/^Bearer A{43}$/);
     if(url.endsWith("/bind/start")) {
       challenge=JSON.parse(options.body);
@@ -73,11 +78,28 @@ function workerHarness(overrides={}) {
         ok:true,receipt:{...identity,result:"dom_submitted",recorded_at:"2026-10-19T00:00:00Z"}
       })};
     }
+    if(overrides.gate && url.includes("/routes/")){
+      const matched=/\/routes\/([A-Za-z0-9_-]+)\/(next\?origination=dsh&limit=1|ack|revoke)$/.exec(url);
+      assert.ok(matched,"unexpected exact-route request "+url);
+      if(matched[2].startsWith("next"))return {ok:true,json:async()=>({messages:multiWakeQueue})};
+      if(matched[2]==="ack"){
+        acks.push({routeId:matched[1],body:JSON.parse(options.body)});
+        return {ok:true,json:async()=>({ok:true})};
+      }
+      return {ok:true,json:async()=>({ok:true})};
+    }
     return {ok:true,json:async()=>pages?pages[new URL(url).searchParams.get("cursor")||"first"]:({pending_count:pendingCount??events.length,events,has_more:false,next_cursor:null})};
   };
+  const cryptoImpl=overrides.gate?
+    {getRandomValues:webcrypto.getRandomValues.bind(webcrypto),subtle:webcrypto.subtle}:
+    {getRandomValues(a){const seed=++nonceCounter;for(let i=0;i<a.length;i++)a[i]=(i+seed)%256;return a;}};
   const context=vm.createContext({chrome,fetch,URL,Date,Number,Object,Array,
-    String,RegExp,Error,Math,Promise,console,
-    crypto:{getRandomValues(a){const seed=++nonceCounter;for(let i=0;i<a.length;i++)a[i]=(i+seed)%256;return a;}}});
+    String,RegExp,Error,Math,Promise,console,TextEncoder,TextDecoder,
+    crypto:cryptoImpl});
+  // Load the real route gate classic script first: worker.js does
+  // importScripts("multiroute-gate.js") before importScripts("auto-worker.js"),
+  // so auto-worker captures the real DevSpaceRouteGate as its ROUTE_GATE.
+  if(overrides.gate)vm.runInContext(gateCode,context);
   vm.runInContext(code,context);
   async function msg(type,extra={}) {
     const fn=listeners[0];
@@ -85,8 +107,9 @@ function workerHarness(overrides={}) {
     return new Promise(resolve=>fn({type,...extra},null,resolve));
   }
   async function drain(){for(let i=0;i<5;i++)await tick();}
-  return {session,local,tab,messages,injections,receipts,msg,drain,tabUpdates,tabRemovals,
+  return {session,local,tab,messages,injections,receipts,acks,msg,drain,tabUpdates,tabRemovals,
     setReceiptFailure:x=>{receiptFailure=x;},
+    setWakeQueue:x=>{multiWakeQueue=x;},setMultiRoutes:x=>{local.coachMultiRoutes=x;},
     setEvents:x=>{events=x;},setPages:x=>{pages=x;},setPendingCount:x=>{pendingCount=x;},setDelivery:x=>{delivered=x;},
     setContentReady:x=>{contentReady=x;},setPingProtocol:x=>{pingProtocol=x;},
     setInjectionFailure:x=>{injectionFailure=x;},setTabs:x=>{tabs=x;},startup,
@@ -471,7 +494,7 @@ test("unpairing sidecar removes ability to send new events",async()=>{
 });
 function domHarness(options={}) {
  const handlers=[];
- let buttonChecks=0,clicks=0;
+ let buttonChecks=0,clicks=0,lastTyped="";
  const editor={isConnected:true,hidden:false,innerText:options.draft||"",
    textContent:options.draft||"",isContentEditable:!options.noEditable,
    getAttribute:name=>name==="contenteditable"&&!options.noEditable?"true":null,
@@ -480,7 +503,8 @@ function domHarness(options={}) {
  const button={isConnected:true,hidden:false,
    get disabled(){return !!options.disabled;},
    getAttribute:()=>null,
-   click(){clicks++;if(!options.noClear){editor.innerText="";editor.textContent="";}}};
+   click(){clicks++;lastTyped=editor.innerText;
+     if(!options.noClear){editor.innerText="";editor.textContent="";}}};
  const form={querySelectorAll:q=>q==='button[type="submit"]'?[button]:[]};
  const document={
    querySelectorAll(q){
@@ -529,7 +553,7 @@ function domHarness(options={}) {
    setTimeout:(fn)=>fn(),Promise,Error,String,Array,Number});
  vm.runInContext(options.bindingScript?bindingContent:content,context);
  return {editor,button,location,handlers,context,
-   getClicks:()=>clicks,getButtonChecks:()=>buttonChecks,
+   getClicks:()=>clicks,getButtonChecks:()=>buttonChecks,getLastTyped:()=>lastTyped,
    ping:()=>new Promise(resolve=>handlers[handlers.length-1]({type:"COACH_AUTO_PING_V6"},null,resolve)),
    reinject:()=>vm.runInContext(options.bindingScript?bindingContent:content,context),
    deliver:(url=URL_OK,instruction="请以 Web GPT Coach 身份独立审核测试事件")=>
@@ -904,4 +928,90 @@ test("content script only confirms composer DOM submission, not completed AI rev
  assert.equal(result.ok,true);assert.equal(result.submitted,true);
  const uncertain=await domHarness({noClear:true}).deliver();
  assert.equal(uncertain.ok,false);assert.equal(uncertain.uncertain,true);
+});
+
+// --- Cross-module delivery protocol seam (P0: gate -> worker -> content script) ---
+// A V5/V6 mismatch between these three files silently drops every exact-route
+// delivery command, so it must fail here even though each module's own tests pass.
+test("delivery protocol literals are one identical version across gate, worker and content script",()=>{
+ const modules={
+   gate:readFileSync(join(root,"multiroute-gate.js"),"utf8"),
+   worker:readFileSync(join(root,"auto-worker.js"),"utf8"),
+   content:readFileSync(join(root,"chatgpt-delivery.js"),"utf8")
+ };
+ const collect=(source,pattern)=>[...new Set([...source.matchAll(pattern)].map(m=>m[1]))];
+ const deliver={},ping={};
+ for(const [name,source] of Object.entries(modules)){
+   deliver[name]=collect(source,/COACH_AUTO_DELIVER_V(\d+)/g);
+   ping[name]=collect(source,/COACH_AUTO_PING_V(\d+)/g);
+   assert.equal(deliver[name].length,1,
+     name+" must reference exactly one COACH_AUTO_DELIVER_V<n>; found "+JSON.stringify(deliver[name]));
+ }
+ const deliverVersions=new Set([...deliver.gate,...deliver.worker,...deliver.content]);
+ assert.equal(deliverVersions.size,1,
+   "cross-module COACH_AUTO_DELIVER version drift: "+JSON.stringify(deliver));
+ assert.deepEqual([...deliverVersions],["6"],
+   "gate/worker/content-script delivery protocol must be V6");
+ // Gate carries no ping (it is a pure decision module); worker emits the ping
+ // exactly once and the content script answers that exact version.
+ assert.deepEqual(ping.gate,[],"gate must not implement a ping protocol");
+ assert.equal(ping.worker.length,1);
+ assert.equal(ping.content.length,1);
+ assert.deepEqual([...new Set([...ping.worker,...ping.content])],[deliver.worker[0]],
+   "worker ping and content-script ping must match the delivery protocol version");
+ assert.deepEqual([...new Set([...ping.worker,...ping.content])],["6"]);
+});
+test("gate-built exact-route command is submitted by the real V6 content script and ACKed",async()=>{
+ const routeId="rt_"+"b".repeat(43);
+ const workspaceId="ws_58c90da6-696f-4cc3-bb62-c13436cde99c";
+ const dshSessionId="session-0645ad77-b57a-40d6-a2fa-448824ec5007";
+ const messageId="wake-p0-seam-1";
+ const route={routeId,workspaceId,dshSessionId,url:URL_OK,tabId:42,consentRevision:1,enabled:true};
+ // The gate rebuilds the fixed instruction locally; the wake only carries its
+ // sha256. This is the same digest check auto-worker performs before sending.
+ const instruction=gate.buildReviewWakeInstruction({
+   routeId,messageId,eventId:12,operationId:"codex-qa",workspaceId
+ });
+ const wake={kind:"REVIEW_WAKE",origination:"dsh",routeId,messageId,seq:1,
+   eventId:12,operationId:"codex-qa",workspaceId,
+   contentSha256:createHash("sha256").update(instruction,"utf8").digest("hex")};
+ const page=domHarness();
+ const h=workerHarness({gate:true});
+ h.session.coachPairing={port:8765,token:"A".repeat(43)};
+ h.setMultiRoutes({[routeId]:route});
+ h.setWakeQueue([wake]);
+ // Deliver through the real content script listeners, exactly like Chrome
+ // tabs.sendMessage reaches chatgpt-delivery.js. A command the content script
+ // does not recognise is dropped (V5 was silently discarded before the fix).
+ h.setDelivery((_tabId,command)=>new Promise((resolve,reject)=>{
+   const handled=page.handlers[page.handlers.length-1](command,null,result=>resolve(result));
+   if(handled!==true)reject(new Error("content script dropped command type "+String(command?.type)));
+ }));
+ await h.poll();
+ // Gate -> worker seam: the command really left auto-worker towards the tab.
+ assert.equal(h.messages.length,1);
+ const command=h.messages[0].m;
+ assert.equal(command.type,"COACH_AUTO_DELIVER_V6",
+   "auto-worker must forward the gate command type unchanged (V6)");
+ assert.equal(command.url,URL_OK);
+ assert.equal(command.routeId,routeId);
+ assert.equal(command.messageId,messageId);
+ assert.equal(command.instruction,instruction);
+ // Worker -> content script seam: the real script accepted it and submitted once.
+ assert.equal(page.getClicks(),1,"the real V6 content script must click send exactly once");
+ assert.equal(page.getLastTyped(),instruction,"typed text must be the locally rebuilt instruction");
+ assert.equal(h.injections.length,0,"an already-ready V6 script must not be re-injected");
+ // Durable state is UNVERIFIED submission (never "reviewed") and the ACK carries
+ // the exact routeId/messageId identity with outcome=dom_submitted.
+ assert.equal(h.local.coachAutoLedger["route:"+routeId+":"+messageId].state,
+   "dom_submitted_unverified");
+ assert.equal(h.acks.length,1);
+ assert.equal(h.acks[0].routeId,routeId);
+ assert.equal(h.acks[0].body.messageId,messageId);
+ assert.equal(h.acks[0].body.contentSha256,wake.contentSha256);
+ assert.equal(h.acks[0].body.outcome,"dom_submitted");
+ // Same poll again: an already settled messageId is never re-sent.
+ await h.poll();
+ assert.equal(h.messages.length,1);
+ assert.equal(page.getClicks(),1);
 });

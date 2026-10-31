@@ -266,6 +266,7 @@ export function exposedToolNames(
     "codex_agent_evidence",
     "codex_agent_source_diff",
     "get_agent_efficiency_audit",
+    "codex_agent_historical_reviews",
     "coach_realtime_status",
   ];
   if (!config.readOnly) {
@@ -327,6 +328,7 @@ export function exposedToolNames(
       "codex_agent_start_rework",
       "codex_agent_verify_test",
       "codex_agent_submit_review",
+      "codex_agent_submit_historical_review",
       "coach_realtime_register",
       "coach_webgpt_register",
       "coach_webgpt_submit_review",
@@ -503,6 +505,7 @@ export function requiredCapabilityForTool(tool: string): ToolCapability {
       "codex_agent_start_rework",
       "codex_agent_verify_test",
       "codex_agent_submit_review",
+      "codex_agent_submit_historical_review",
       "coach_realtime_register",
       "coach_webgpt_register",
       "coach_webgpt_submit_review",

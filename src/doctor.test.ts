@@ -27,7 +27,9 @@ assert.equal(
   TOOL_SCHEMA_REVISION,
   // Pinned deliberately: any change to the exposed tool surface must be an
   // explicit, reviewable bump of TOOL_SCHEMA_REVISION.
-  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-14+coach-runtime-dynamic-observe-v2+agent-efficiency-audit-v1+coach-realtime-001+coach-webgpt-loop-001+delivery-receipt-001+coach-tool-catalog-v037+coach-sidecar-scope-v1+coach-oneclick-v0310+coach-contract-001+codex-app-shared-001+coach-multiroute-v1",
+
+  "devspacemac-approved-asset-intake-p1.5-houdini-security-python-bootstrap-p0-workspace-resume-p0.5-asset-download-timeout-p0-additional-root-permissions-shell-tasks-p0-job-wait-resume-p0.1-task-wait-resume-p0.1-cnb-git-remote-godot-import-v1-git-lifecycle-cleanup-p0.1-coach-feed-p0.2-codex-agent-b1-review-b2-recovery-b3-guardian-os001.2026-10-14+coach-runtime-dynamic-observe-v2+agent-efficiency-audit-v1+coach-realtime-001+coach-webgpt-loop-001+delivery-receipt-001+coach-tool-catalog-v037+coach-sidecar-scope-v1+coach-oneclick-v0310+coach-contract-001+codex-app-shared-001+coach-multiroute-v1+coach-historical-review-001",
+
 );
 
 try {
@@ -412,9 +414,9 @@ async function testPublicExternalClientProbe(
     assert.equal(probe.sessionReuseCreatedDelta, 0);
     assert.equal(probe.sessionReuseTotalCreatedDelta, 0);
     // Locked against the independently reviewed B1/B2/B3 + Sidecar + Coach
-    // event-driven review surface present on current main, plus the exact
-    // multi-route candidate surface (claim_exact / route_state / route_admin).
-    assert.equal(probe.toolNames?.length, 97);
+    // event-driven review surface present on current main, plus exact
+    // multi-route candidate surface and historical archival tools.
+    assert.equal(probe.toolNames?.length, 99);
     for (const approved of [
       "coach_webgpt_claim_browser_route_exact", "coach_route_state", "coach_route_admin",
       "codex_agent_start", "codex_agent_status", "codex_agent_stop",

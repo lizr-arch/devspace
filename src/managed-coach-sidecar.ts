@@ -438,11 +438,18 @@ export class ManagedCoachSidecar {
       // delivery selector uses the separately claimed immutable grant.
       const deliveryScope=hasRoutes?"coalesce(json_extract(p.packet_json,'$.delivery.workspaceId'),e.workspace_id)":"e.workspace_id";
       const validRoute=hasRoutes?" AND (json_type(p.packet_json,'$.delivery') IS NULL OR EXISTS (SELECT 1 FROM coach_browser_route_claims b WHERE b.workspace_id=json_extract(p.packet_json,'$.delivery.workspaceId') AND b.nonce=json_extract(p.packet_json,'$.delivery.nonce'))) ":"";
+
+      // Archived historical reviews are terminal for delivery exactly like a
+      // normal decision: the browser feed must never re-push them.
+      const hasHistorical=native&&Boolean(entry.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='coach_historical_reviews'").get());
+
       const pendingQuery = native
         ? "from coach_review_events e "+(hasEvidence?"LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id ":"")+"where "+deliveryScope+" IN (" +
           ids.map(()=>"?").join(",") + ") and e.event_type = 'READY_FOR_GPT_REVIEW' " +
           (hasEvidence?"AND "+COACH_DELIVERY_SQL+" ":"")+
           validRoute+
+          (hasHistorical?"and not exists (select 1 from coach_historical_reviews h where h.event_id=e.event_id) ":"")+
+
           "and not exists (select 1 from coach_review_decisions r where r.event_id=e.event_id)"
         : "from events e where e.event_type = 'READY_FOR_GPT_REVIEW' " +
           "and not exists (select 1 from review_decisions r where r.event_id = e.event_id)";

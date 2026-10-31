@@ -105,7 +105,7 @@ test("a wake must be the frozen identity tuple; an email body or command is reje
   const valid = gate.validateWake(wake(), gate.validateRoute(ROUTE).route);
   assert.equal(valid.ok, true);
   assert.equal(valid.instruction, instruction(), "the instruction is rebuilt locally, not taken from the wire");
-  assert.equal(valid.command.type, "COACH_AUTO_DELIVER_V5");
+  assert.equal(valid.command.type, "COACH_AUTO_DELIVER_V6");
   assert.equal(valid.command.url, URL_1);
   assert.ok(valid.command.instruction.startsWith("请以 Web GPT Coach 身份独立审核"));
   assert.ok(valid.command.instruction.length <= 1500);

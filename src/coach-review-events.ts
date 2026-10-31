@@ -29,6 +29,25 @@ export function completionDeliveryType(packet?:{task?:unknown;report?:unknown}):
   return report.status==="READY_FOR_REVIEW"?"READY_FOR_GPT_REVIEW":report.status==="PLAN_CONFLICT"?"PLAN_CONFLICT":undefined;
 }
 type Decision = "APPROVED" | "REWORK" | "BLOCKED";
+/** Historical archival decisions are deliberately separate from normal review
+ * decisions: they can never approve work, grant rework authority, or advance a
+ * plan. Only BLOCKED / REWORK_RECOMMENDED are representable. */
+export type HistoricalDecision = "BLOCKED" | "REWORK_RECOMMENDED";
+export interface HistoricalReviewReceipt {
+  event_id: number;
+  workspace_id: string;
+  operation_id: string;
+  decision: HistoricalDecision;
+  reason: string;
+  evidence_sha256: string;
+  frozen_fingerprint: string;
+  current_fingerprint: string;
+  /** Algorithm used for the current fingerprint: full ref snapshot or bounded git coarse. */
+  current_fingerprint_algorithm: string;
+  drift: 0 | 1;
+  reviewed_at: string;
+  source: string;
+}
 /** Queued selection is applied only when a new explicitly reviewed turn starts.
  * Changes to a running process never mutate its CLI argv or restart the process.
  */
@@ -176,6 +195,24 @@ export class CoachReviewEventStore {
       );
       this.db.exec("CREATE TABLE IF NOT EXISTS coach_agent_quarantine_audit (audit_id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, action TEXT NOT NULL, explanation TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(workspace_id, operation_id, action)); CREATE TABLE IF NOT EXISTS agent_efficiency_audits (workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL, snapshot_json TEXT NOT NULL, snapshot_sha256 TEXT, created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, operation_id));");
       const af=new Set((this.db.pragma("table_info(agent_efficiency_audits)") as {name:string}[]).map(x=>x.name)); if(!af.has("snapshot_sha256")) this.db.exec("ALTER TABLE agent_efficiency_audits ADD COLUMN snapshot_sha256 TEXT");
+      // Additive historical archival journal. It is intentionally NOT part of
+      // coach_review_decisions, so the scheduler/rework paths cannot consume it.
+      this.db.exec(
+        "CREATE TABLE IF NOT EXISTS coach_historical_reviews (" +
+        "event_id INTEGER PRIMARY KEY REFERENCES coach_review_events(event_id)," +
+        "workspace_id TEXT NOT NULL, operation_id TEXT NOT NULL," +
+        "decision TEXT NOT NULL CHECK(decision IN ('BLOCKED','REWORK_RECOMMENDED'))," +
+        "reason TEXT NOT NULL, evidence_sha256 TEXT NOT NULL," +
+        "frozen_fingerprint TEXT NOT NULL, current_fingerprint TEXT NOT NULL," +
+        "current_fingerprint_algorithm TEXT NOT NULL DEFAULT 'full-snapshot-v1'," +
+        "drift INTEGER NOT NULL CHECK(drift IN (0,1)), reviewed_at TEXT NOT NULL," +
+        "source TEXT NOT NULL, UNIQUE(workspace_id,operation_id));" +
+        "CREATE INDEX IF NOT EXISTS coach_historical_reviews_ws_idx " +
+        "ON coach_historical_reviews(workspace_id,event_id);"
+      );
+      const hf=new Set((this.db.pragma("table_info(coach_historical_reviews)") as {name:string}[]).map(x=>x.name));
+      if(!hf.has("current_fingerprint_algorithm"))
+        this.db.exec("ALTER TABLE coach_historical_reviews ADD COLUMN current_fingerprint_algorithm TEXT NOT NULL DEFAULT 'full-snapshot-v1'");
       this.db.pragma("user_version = 5");
     }).immediate();
   }
@@ -405,6 +442,11 @@ export class CoachReviewEventStore {
         .get(input.eventId,input.workspaceId) as {evidence_sha256:string}|undefined;
       if (!original || original.evidence_sha256 !== input.evidenceSha256)
         throw new Error("COACH_REVIEW_EVIDENCE_MISMATCH");
+      // Two-way mutual exclusion: an archived historical event can never acquire
+      // a normal authoritative decision afterwards (or race past it).
+      const archived = this.db.prepare("SELECT 1 AS archived FROM coach_historical_reviews WHERE event_id=?")
+        .get(input.eventId) as {archived:number}|undefined;
+      if (archived) throw new Error("COACH_REVIEW_HISTORICAL_ARCHIVED_CONFLICT");
       this.db.prepare("INSERT OR IGNORE INTO coach_review_decisions " +
         "(event_id,decision,evidence_sha256,reviewed_at) VALUES (?,?,?,?)")
         .run(input.eventId,input.decision,input.evidenceSha256,new Date().toISOString());
@@ -415,12 +457,95 @@ export class CoachReviewEventStore {
       return receipt;
     }).immediate();
   }
+  /** Read one archived historical review by exact event identity. */
+  getHistoricalReview(workspaceId:string,eventId:number): HistoricalReviewReceipt|undefined {
+    if(!ID.test(workspaceId)||!Number.isSafeInteger(eventId)||eventId<=0)
+      throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
+    return this.db.prepare("SELECT event_id,workspace_id,operation_id,decision,reason," +
+      "evidence_sha256,frozen_fingerprint,current_fingerprint,current_fingerprint_algorithm," +
+      "drift,reviewed_at,source " +
+      "FROM coach_historical_reviews WHERE workspace_id=? AND event_id=?")
+      .get(workspaceId,eventId) as HistoricalReviewReceipt|undefined;
+  }
+  /** Bounded historical audit query; archived events stay readable forever. */
+  listHistoricalReviews(workspaceId:string,limit=50): HistoricalReviewReceipt[] {
+    if(!ID.test(workspaceId)||!Number.isInteger(limit)||limit<1||limit>50)
+      throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
+    return this.db.prepare("SELECT event_id,workspace_id,operation_id,decision,reason," +
+      "evidence_sha256,frozen_fingerprint,current_fingerprint,current_fingerprint_algorithm," +
+      "drift,reviewed_at,source " +
+      "FROM coach_historical_reviews WHERE workspace_id=? ORDER BY event_id DESC LIMIT ?")
+      .all(workspaceId,limit) as HistoricalReviewReceipt[];
+  }
+  /**
+   * Persist one historical archival decision. Identity/evidence must match the
+   * immutable event row; one normal review and one historical review are
+   * mutually exclusive. Identical replays are idempotent, any differing replay
+   * is a conflict. This writes ONLY to coach_historical_reviews; it never
+   * touches coach_review_decisions, evidence, tests, runs, or plans.
+   */
+  recordHistoricalReview(input: {
+    workspaceId:string; operationId:string; eventId:number;
+    decision:HistoricalDecision; reason:string; evidenceSha256:string;
+    frozenFingerprint:string; currentFingerprint:string;
+    currentFingerprintAlgorithm:string; drift:0|1; source:string;
+  }): {receipt:HistoricalReviewReceipt; created:boolean} {
+    const reasonOk = typeof input.reason==="string" && input.reason.length>=16 &&
+      input.reason.length<=1200 && ![...input.reason].some(ch=>ch.charCodeAt(0)<32);
+    if(!ID.test(input.workspaceId)||!ID.test(input.operationId)||
+       !Number.isSafeInteger(input.eventId)||input.eventId<=0||
+       !["BLOCKED","REWORK_RECOMMENDED"].includes(input.decision)||!reasonOk||
+       !SHA.test(input.evidenceSha256)||!SHA.test(input.frozenFingerprint)||
+       !SHA.test(input.currentFingerprint)||
+       !["full-snapshot-v1","git-coarse-v1"].includes(input.currentFingerprintAlgorithm)||
+       (input.drift!==0&&input.drift!==1)||!ID.test(input.source))
+      throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
+    // Drift must be derived from the recorded values, never trusted blindly.
+    if(input.drift !== (input.frozenFingerprint===input.currentFingerprint?0:1))
+      throw new TypeError("COACH_HISTORICAL_REVIEW_INVALID_INPUT");
+    return this.db.transaction(()=>{
+      const event = this.db.prepare("SELECT operation_id,evidence_sha256 FROM coach_review_events " +
+        "WHERE event_id=? AND workspace_id=?").get(input.eventId,input.workspaceId) as
+        {operation_id:string;evidence_sha256:string}|undefined;
+      if(!event) throw new Error("COACH_HISTORICAL_EVENT_NOT_FOUND");
+      if(event.operation_id!==input.operationId) throw new Error("COACH_HISTORICAL_IDENTITY_MISMATCH");
+      if(event.evidence_sha256!==input.evidenceSha256) throw new Error("COACH_HISTORICAL_EVIDENCE_MISMATCH");
+      const normal = this.db.prepare("SELECT 1 AS reviewed FROM coach_review_decisions WHERE event_id=?")
+        .get(input.eventId) as {reviewed:number}|undefined;
+      if(normal) throw new Error("COACH_HISTORICAL_ALREADY_REVIEWED");
+      const existing = this.getHistoricalReview(input.workspaceId,input.eventId);
+      if(existing){
+        // Idempotency is keyed to the archival inputs only. The current
+        // fingerprint is a point-in-time observation and must not turn an
+        // identical replay into a conflict after further workspace drift.
+        const identical = existing.operation_id===input.operationId &&
+          existing.decision===input.decision && existing.reason===input.reason &&
+          existing.evidence_sha256===input.evidenceSha256 &&
+          existing.frozen_fingerprint===input.frozenFingerprint &&
+          existing.source===input.source;
+        if(!identical) throw new Error("COACH_HISTORICAL_REVIEW_CONFLICT");
+        return {receipt:existing,created:false};
+      }
+      this.db.prepare("INSERT INTO coach_historical_reviews " +
+        "(event_id,workspace_id,operation_id,decision,reason,evidence_sha256," +
+        "frozen_fingerprint,current_fingerprint,current_fingerprint_algorithm," +
+        "drift,reviewed_at,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(
+        input.eventId,input.workspaceId,input.operationId,input.decision,input.reason,
+        input.evidenceSha256,input.frozenFingerprint,input.currentFingerprint,
+        input.currentFingerprintAlgorithm,input.drift,new Date().toISOString(),input.source);
+      return {receipt:this.getHistoricalReview(input.workspaceId,input.eventId)!,created:true};
+    }).immediate();
+  }
   listPending(workspaceId: string, limit=50): { pending_count:number; events:CoachEvent[] } {
     if (!ID.test(workspaceId) || !Number.isInteger(limit) || limit < 1 || limit > 50)
       throw new TypeError("COACH_QUERY_INVALID_INPUT");
+    // Archived historical reviews are terminal for delivery purposes: they must
+    // never be pushed to a browser conversation again, but remain queryable via
+    // listHistoricalReviews()/getHistoricalReview().
     const pending = "FROM coach_review_events e LEFT JOIN coach_review_decisions d " +
-      "ON d.event_id=e.event_id LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id " +
-      "WHERE e.workspace_id=? AND d.event_id IS NULL AND "+COACH_DELIVERY_SQL;
+      "ON d.event_id=e.event_id LEFT JOIN coach_historical_reviews h ON h.event_id=e.event_id " +
+      "LEFT JOIN coach_review_evidence p ON p.event_id=e.event_id " +
+      "WHERE e.workspace_id=? AND d.event_id IS NULL AND h.event_id IS NULL AND "+COACH_DELIVERY_SQL;
     const count = this.db.prepare("SELECT count(*) AS n "+pending).get(workspaceId) as {n:number};
     const events = this.db.prepare("SELECT e.event_id,e.workspace_id,e.operation_id,e.event_type,e.created_at "+
       pending+" ORDER BY e.event_id LIMIT ?").all(workspaceId,limit) as CoachEvent[];

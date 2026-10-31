@@ -347,6 +347,22 @@ try {
     assert.equal(data.events[0]?.event_id, eventA.event_id);
     assert.equal(data.events[0]?.operation_id, "native-completed");
     assert.ok(!text.includes("cross-workspace-secret"));
+    // H2: archived historical reviews must not reappear in the browser feed,
+    // while a normal pending event in the same workspace still does.
+    const archivedEvent = native.recordCompleted({
+      workspaceId: "native-ws", operationId: "native-archived", evidenceSha256: "d".repeat(64) });
+    native.recordHistoricalReview({
+      workspaceId: "native-ws", operationId: "native-archived", eventId: archivedEvent.event_id,
+      decision: "BLOCKED", reason: "Historical archival must never be re-delivered to the browser feed.",
+      evidenceSha256: "d".repeat(64), frozenFingerprint: "1".repeat(64),
+      currentFingerprint: "2".repeat(64), currentFingerprintAlgorithm: "full-snapshot-v1",
+      drift: 1, source: "codex_agent_submit_historical_review" });
+    const afterArchive = await fetch("http://127.0.0.1:" + nativePort + "/events", { headers });
+    const afterArchiveBody = await afterArchive.json() as { pending_count:number; events:{event_id:number}[] };
+    assert.equal(afterArchiveBody.pending_count, 1,
+      "the archived event must not count as pending in the real browser feed");
+    assert.deepEqual(afterArchiveBody.events.map((event) => event.event_id), [eventA.event_id],
+      "the real /events feed must return only the normal pending event");
     const endpoint="http://127.0.0.1:"+nativePort+"/delivery-receipt";
     const receiptPayload={workspace_id:"native-ws",event_id:eventA.event_id,operation_id:"native-completed"};
     const payloadHeaders={...headers,Origin:"chrome-extension://"+id,"Content-Type":"application/json"};
