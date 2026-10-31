@@ -4,6 +4,7 @@ import * as z from "zod/v4";
 import { resultOutputSchema, type ServerContext } from "./server-types.js";
 import { registerAppTool, textBlock } from "./server-helpers.js";
 import { CoachReviewGate } from "../coach-review-gate.js";
+import { CoachHistoricalReview } from "../coach-historical-review.js";
 import { captureCodexFingerprint } from "../codex-agent-runner.js";
 import { CODEX_MODELS, CODEX_EFFORTS } from "../coach-model-policy.js";
 import { checkManifestIntegrity, isTaskApproved } from "../task-manifest.js";
@@ -76,5 +77,55 @@ export function registerCodexReviewTools(server: McpServer, ctx: ServerContext):
     const workspace = ctx.workspaces.getWorkspace(workspaceId);
     const receipt = await gate.submit({ workspaceId, workspaceRoot: workspace.root, operationId, eventId, decision, evidenceSha256 });
     return { content: [textBlock(`Review event ${eventId}: ${decision}.`)], structuredContent: { result: decision, receipt } };
+  });
+  // Archival-only channel for completed historical events whose workspace has
+  // drifted. It never returns/records APPROVED, never grants rework authority,
+  // never wakes a plan and never mutates the original evidence.
+  const historical = new CoachHistoricalReview({
+    events: ctx.coachReviewEvents,
+    activePlans: () => ctx.coachRealtime.all().map((plan) => ({
+      workspaceId: plan.workspaceId,
+      currentOperationId: plan.currentOperationId,
+      phase: plan.phase,
+    })),
+  });
+  registerAppTool(server, "codex_agent_submit_historical_review", {
+    title: "Archive a historical Codex review decision",
+    description: "Archive BLOCKED or REWORK_RECOMMENDED for a completed event whose frozen evidence no longer matches the drifted workspace. Exact workspace/operation/event/evidence identity is required. This never approves work, starts Codex, dispatches rework, advances a plan, or replaces the normal review path.",
+    inputSchema: {
+      workspaceId: id,
+      operationId: id,
+      eventId: z.number().int().positive(),
+      decision: z.enum(["BLOCKED", "REWORK_RECOMMENDED"]),
+      evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      reason: z.string().min(16).max(1200).refine((value) => ![...value].some((ch) => ch.charCodeAt(0) < 32)),
+    },
+    outputSchema: resultOutputSchema({ receipt: z.unknown().optional(), idempotent: z.boolean().optional(), error: z.unknown().optional() }),
+    _meta: {}, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ workspaceId, operationId, eventId, decision, evidenceSha256, reason }) => {
+    const workspace = ctx.workspaces.getWorkspace(workspaceId);
+    const result = await historical.submit({
+      workspaceId,
+      workspaceRoot: workspace.root,
+      operationId,
+      eventId,
+      decision,
+      evidenceSha256,
+      reason,
+    });
+    const text = result.idempotent
+      ? `Historical review event ${eventId} already archived: ${decision}.`
+      : `Historical review event ${eventId} archived as ${decision}; this is not a normal approval and grants no rework authority.`;
+    return { content: [textBlock(text)], structuredContent: { result: "archived", receipt: result.receipt, idempotent: result.idempotent } };
+  });
+  registerAppTool(server, "codex_agent_historical_reviews", {
+    title: "List archived historical Codex reviews",
+    description: "Read the bounded historical review archive for one workspace. Entries are audit-only and never imply APPROVED or rework authorization.",
+    inputSchema: { workspaceId: id },
+    outputSchema: resultOutputSchema({ reviews: z.unknown() }),
+    _meta: {}, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ workspaceId }) => {
+    const reviews = historical.list(workspaceId);
+    return { content: [textBlock(`Archived historical reviews: ${reviews.length}`)], structuredContent: { result: "ok", reviews } };
   });
 }

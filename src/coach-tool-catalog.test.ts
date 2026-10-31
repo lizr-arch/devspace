@@ -20,6 +20,10 @@ for(const tool of ["coach_realtime_status","coach_realtime_register","coach_real
 for(const tool of ["coach_realtime_register","coach_realtime_pause","coach_realtime_resume","coach_webgpt_claim_browser_route"])
  assert.equal(requiredCapabilityForTool(tool),"runner.execute");
 assert.equal(requiredCapabilityForTool("coach_realtime_status"),"workspace.read");
+for(const tool of ["codex_agent_submit_historical_review","codex_agent_historical_reviews"])
+ assert.equal(names.filter(n=>n===tool).length,1);
+assert.equal(requiredCapabilityForTool("codex_agent_submit_historical_review"),"runner.execute");
+assert.equal(requiredCapabilityForTool("codex_agent_historical_reviews"),"workspace.read");
 assert.equal(requiredCapabilityForTool("codex_agent_update_config"),"runner.execute");
 assert.equal(requiredCapabilityForTool("codex_agent_observe"),"workspace.read");
 const readOnly=config(true);
@@ -40,5 +44,7 @@ assert.ok(!ro.includes("codex_app_thread_create"));
 assert.ok(!ro.includes("codex_app_thread_bind"));
 assert.ok(!ro.includes("codex_app_thread_send"));
 assert.ok(!ro.includes("codex_task_freeze"));
-assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001\+codex-app-shared-001$/);
+assert.ok(!ro.includes("codex_agent_submit_historical_review"));
+assert.ok(!ro.includes("codex_agent_historical_reviews"));
+assert.match(TOOL_SCHEMA_REVISION,/coach-webgpt-loop-001\+delivery-receipt-001\+coach-tool-catalog-v037\+coach-sidecar-scope-v1\+coach-oneclick-v0310\+coach-contract-001\+codex-app-shared-001\+coach-historical-review-001$/);
 console.log("COACH_PUBLIC_TOOL_CATALOG_V2_PASS",names.length,"tools");
