@@ -25,11 +25,19 @@ export function coarseWorkspaceFingerprint(root: string): HistoricalFingerprint 
     cwd: root, timeout: 5000, maxBuffer: 8 * 1024 * 1024, encoding: "buffer",
     stdio: ["ignore", "pipe", "ignore"],
   }) as Buffer;
+  // Fail closed: without a trusted Git work tree and a readable status stream
+  // there is no coarse fingerprint at all. An empty status must never stand in
+  // for an unreadable one.
+  let inside: string;
+  try { inside = run("rev-parse", "--is-inside-work-tree").toString("utf8").trim(); }
+  catch {
+    throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
+  }
+  if (inside !== "true") throw new Error("COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE");
   let head = "UNBORN_HEAD";
-  try { head = run("rev-parse", "HEAD").toString("utf8").trim(); } catch { /* unborn */ }
-  let status: Buffer;
-  try { status = run("status", "--porcelain=v1", "-z", "--untracked-files=all"); }
-  catch { status = Buffer.alloc(0); }
+  try { head = run("rev-parse", "HEAD").toString("utf8").trim(); } catch { /* unborn HEAD is valid */ }
+  // Any git failure here propagates; the service wraps it as unavailable.
+  const status = run("status", "--porcelain=v1", "-z", "--untracked-files=all");
   const statusDigest = createHash("sha256").update(status).digest("hex");
   const sha = createHash("sha256")
     .update(COARSE_FINGERPRINT_ALGORITHM + "\0" + head + "\0" + statusDigest)

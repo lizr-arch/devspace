@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { CoachReviewEventStore } from "./coach-review-events.js";
-import { CoachHistoricalReview } from "./coach-historical-review.js";
+import { CoachHistoricalReview, coarseWorkspaceFingerprint } from "./coach-historical-review.js";
 import { CoachReviewGate } from "./coach-review-gate.js";
 import { JobResourceLocks } from "./job-resource-locks.js";
 
@@ -338,6 +339,55 @@ try {
   assert.equal(coarse.receipt.current_fingerprint, "d".repeat(64));
   assert.equal(coarse.receipt.drift, 1);
   assert.equal(events.getHistoricalReview("ws-coarse", coarseEvent.event_id)?.decision, "BLOCKED");
+
+  // 6e. Coarse fallback fails closed without a trusted Git work tree, and is
+  //     deterministic/change-sensitive on a real Git workspace.
+  assert.throws(
+    () => coarseWorkspaceFingerprint(workspace),
+    /COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE/,
+    "a plain directory has no trusted git state and must never yield a coarse digest",
+  );
+  const gitWorkspace = join(root, "git-workspace");
+  mkdirSync(gitWorkspace);
+  execFileSync("/usr/bin/git", ["init", "-q"], { cwd: gitWorkspace });
+  writeFileSync(join(gitWorkspace, "tracked.txt"), "one\n");
+  execFileSync("/usr/bin/git", ["add", "tracked.txt"], { cwd: gitWorkspace });
+  execFileSync("/usr/bin/git", ["-c", "user.email=t@example.test", "-c", "user.name=t",
+    "commit", "-qm", "init"], { cwd: gitWorkspace });
+  const coarseOne = coarseWorkspaceFingerprint(gitWorkspace);
+  const coarseAgain = coarseWorkspaceFingerprint(gitWorkspace);
+  assert.match(coarseOne.sha, /^[a-f0-9]{64}$/);
+  assert.equal(coarseAgain.sha, coarseOne.sha, "coarse digest must be deterministic");
+  writeFileSync(join(gitWorkspace, "untracked.txt"), "two\n");
+  const coarseChanged = coarseWorkspaceFingerprint(gitWorkspace);
+  assert.notEqual(coarseChanged.sha, coarseOne.sha,
+    "coarse digest must change when the porcelain status stream changes");
+
+  // 6f. If both the full and the coarse capture fail, archival is refused.
+  const failQ = packetFor("ws-nofp", "historical-op-nofp", frozen);
+  const failEvent = events.recordCompletedWithEvidence({
+    workspaceId: "ws-nofp",
+    operationId: "historical-op-nofp",
+    evidenceSha256: failQ.evidenceSha256,
+    packetJson: failQ.packetJson,
+  });
+  const noFingerprint = new CoachHistoricalReview({
+    events,
+    fingerprint: async () => { throw new Error("CODEX_SNAPSHOT_TOO_MANY_FILES"); },
+    coarseFingerprint: () => { throw new Error("git status unavailable"); },
+  });
+  await assert.rejects(
+    () => noFingerprint.submit({
+      workspaceId: "ws-nofp",
+      workspaceRoot: workspace,
+      operationId: "historical-op-nofp",
+      eventId: failEvent.event_id,
+      decision: "BLOCKED",
+      evidenceSha256: failQ.evidenceSha256,
+      reason: "No trusted current fingerprint means no archive may be created.",
+    }),
+    /COACH_HISTORICAL_FINGERPRINT_UNAVAILABLE/,
+  );
 
   // 7. An operation owned by an active auto plan must use the plan path.
   const activePlanService = new CoachHistoricalReview({
