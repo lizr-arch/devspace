@@ -231,7 +231,11 @@ try {
   assert.equal(invocations.length,2);
   await manager.stop(deliveryId);
   await manager.start({workspaceId:deliveryId,workspaceRoot:destination,port,pairedExtensionId:extension});
-  assert.equal((await fetch(url+"/events",{headers})).status,401,"rotated pairing token fails closed");
+  assert.equal((await fetch(url+"/events",{headers})).status,200,"pairing token survives a service restart");
+  // An explicit rotation (e.g. operator re-key) must still fail the old token closed.
+  await manager.stop(deliveryId);
+  await manager.start({workspaceId:deliveryId,workspaceRoot:destination,port,pairedExtensionId:extension,pairingToken:"B".repeat(43)} as never);
+  assert.equal((await fetch(url+"/events",{headers})).status,401,"explicitly rotated pairing token fails closed");
   await engine.close();await runner.close();await manager.close();
   events.close();events=new CoachReviewEventStore(state);
   assert.ok(events.webGptTurnAck(workspaceId,first.eventId!));

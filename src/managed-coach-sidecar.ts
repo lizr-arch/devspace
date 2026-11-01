@@ -3,7 +3,7 @@ import { RouteAccessController, type RouteAccessAction, type RouteAccessMode, ty
 import { safeReportOutcome } from "./coach-result-contract.js";
 import { COACH_DELIVERY_SQL, completionDeliveryType } from "./coach-review-events.js";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, realpathSync, statSync, lstatSync, chmodSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync } from "node:fs";
+import { existsSync, realpathSync, statSync, lstatSync, chmodSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { isPathInsideRoot } from "./roots.js";
@@ -203,6 +203,36 @@ export class ManagedCoachSidecar {
     if(st.isSymbolicLink()||!st.isFile()||realpathSync(path)!==path||(process.getuid&&st.uid!==process.getuid()))throw new Error("COACH_PAIRING_HANDOFF_UNSAFE");unlinkSync(path);
   }
 
+  // The browser feed token is long-lived across service restarts. Handoff JSON
+  // is deleted on stop, but this owner-only secret file is intentionally kept
+  // so a normal restart/upgrade does not force the extension to re-pair. It is
+  // only replaced on an explicit rotate (caller passes pairingToken) or when
+  // the file is missing/invalid.
+  private pairingTokenPath():string|undefined {
+    const path=this.handoffPath;if(!path)return undefined;
+    const dir=dirname(path),ds=lstatSync(dir);
+    if(ds.isSymbolicLink()||!ds.isDirectory()||realpathSync(dir)!==dir||(process.getuid&&ds.uid!==process.getuid())||(process.platform!=="win32"&&(ds.mode&0o077)!==0))
+      throw new Error("COACH_PAIRING_STATE_UNSAFE");
+    return join(dir,"coach-pairing-token");
+  }
+  private readPersistedPairingToken():Buffer|undefined {
+    const path=this.pairingTokenPath();if(!path||!existsSync(path))return undefined;
+    const st=lstatSync(path);
+    if(st.isSymbolicLink()||!st.isFile()||realpathSync(path)!==path||(process.getuid&&st.uid!==process.getuid())||(process.platform!=="win32"&&(st.mode&0o077)!==0))
+      throw new Error("COACH_PAIRING_TOKEN_UNSAFE");
+    const raw=readFileSync(path,"utf8").trim();
+    if(!/^[A-Za-z0-9_-]{43}$/.test(raw))throw new Error("COACH_PAIRING_TOKEN_INVALID");
+    return Buffer.from(raw,"base64url");
+  }
+  private persistPairingToken(token:Buffer):void {
+    const path=this.pairingTokenPath();if(!path)return;
+    if(existsSync(path)){const st=lstatSync(path);if(st.isSymbolicLink()||!st.isFile()||realpathSync(path)!==path||(process.getuid&&st.uid!==process.getuid()))throw new Error("COACH_PAIRING_TOKEN_UNSAFE");}
+    const temp=path+"."+randomUUID()+".tmp",fd=openSync(temp,"wx",0o600);
+    try{writeSync(fd,token.toString("base64url"));}finally{closeSync(fd);}
+    try{chmodSync(temp,0o600);renameSync(temp,path);chmodSync(path,0o600);}
+    catch(error){try{unlinkSync(temp);}catch{/* best-effort cleanup */}throw error;}
+  }
+
   async start(input: SidecarInput): Promise<CoachSidecarStartResult> {
     if (this.closing) throw new Error("coach-feed manager has been closed");
     validPort(input.port);
@@ -270,7 +300,8 @@ export class ManagedCoachSidecar {
           "result TEXT NOT NULL CHECK(result='dom_submitted'),recorded_at TEXT NOT NULL)");
         receiptDb.exec("CREATE TABLE IF NOT EXISTS app_delivery_receipts(event_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,operation_id TEXT NOT NULL,result TEXT NOT NULL CHECK(result='dom_submitted'),recorded_at TEXT NOT NULL)");
       }
-      const token = input.pairingToken?Buffer.from(input.pairingToken,"base64url"):randomBytes(32);
+      const token = input.pairingToken?Buffer.from(input.pairingToken,"base64url"):
+        (this.readPersistedPairingToken()??randomBytes(32));
       const entry = await new Promise<Entry>((resolve, reject) => {
         server = createServer((req, res) => this.handle(entry, req, res));
         server.requestTimeout = 5_000;
@@ -279,6 +310,7 @@ export class ManagedCoachSidecar {
         server.once("error", reject);
         server.listen(input.port, "127.0.0.1", () => resolve({ ...input, token, server: server!, database: database!, receiptDb, jobId, startedAt: new Date().toISOString() }));
       });
+      if(!input.pairingToken)this.persistPairingToken(token);
       entry.handoffPath=input.pairedExtensionId===PAIRING_EXTENSION_ID?this.publishHandoff(input.port,token):undefined;
       this.services.set(input.workspaceId, entry);
       // An unexpected listener exit must not strand its exclusive claims.

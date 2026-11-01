@@ -368,14 +368,27 @@ async function autoBind(workspaceId) {
 // DSH workspace and enables auto-delivery. No nonce/claim call: this is the
 // already-supported local manual bind path consolidated into a single user
 // gesture; the active-tab canonical URL is required and nothing is guessed.
+async function autoEnsurePairing(allowExplicitRecovery=false, forceNativeRefresh=false) {
+  const record=await chrome.storage.session.get("coachPairing");
+  let pair=record.coachPairing;
+  const hasValidShape=pair && Number.isInteger(pair.port) && pair.port>0 && pair.port<65536 && AUTO_TOKEN.test(pair.token);
+  // Stale tokens after a Sidecar restart are detected by the real feed request
+  // in autoPump(); here we only recover when the shape is missing/invalid, or
+  // when an explicit one-click asks for a fresh native handoff (force).
+  if(hasValidShape && !forceNativeRefresh) return pair;
+  const consent=(await chrome.storage.local.get("coachNativePairingConsent")).coachNativePairingConsent===true;
+  if(!allowExplicitRecovery && !consent) return null;
+  await chrome.storage.session.remove("coachPairing");
+  const paired=await requestNativePairing(true);
+  if(!paired?.ok) return null;
+  const next=(await chrome.storage.session.get("coachPairing")).coachPairing;
+  return next && AUTO_TOKEN.test(next.token) ? next : null;
+}
 async function autoDshOneClick() {
-  let pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
-  if(!pair || !AUTO_TOKEN.test(pair.token)) {
-    const paired=await requestNativePairing(true);
-    if(!paired?.ok)return {ok:false,error:"本机安全配对失败："+(paired?.message||"unknown")};
-    pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
-  }
-  if(!pair || !AUTO_TOKEN.test(pair.token))return {ok:false,error:"没有有效的 Sidecar 配对"};
+  // An explicit click always refreshes from the owner-only native handoff, so
+  // a service restart never requires the user to visit advanced settings.
+  const pair=await autoEnsurePairing(true, true);
+  if(!pair)return {ok:false,error:"本机安全配对失败：请确认 Sidecar 正在运行且扩展已加载"};
   const bound=await autoBind(DSH_WAKE_WORKSPACE);
   if(!bound?.ok)return {ok:false,error:bound?.error||"绑定失败"};
   const enabled=await autoToggle(true,DSH_WAKE_WORKSPACE);
@@ -827,9 +840,8 @@ async function autoPump() {
     if(!Object.values(routes).some(t=>t?.enabled)&&!multiEnabled) {
       code="not_enabled";message="未绑定或自动发送已暂停";return;
     }
-    const pair=(await chrome.storage.session.get("coachPairing")).coachPairing;
-    if(!pair || !Number.isInteger(pair.port) || pair.port<1 || pair.port>65535 ||
-       !AUTO_TOKEN.test(pair.token)) {
+    let pair=await autoEnsurePairing(false);
+    if(!pair) {
       code="not_paired";message="未配对有效的 Sidecar 会话";return;
     }
     if(multiEnabled){
@@ -841,7 +853,12 @@ async function autoPump() {
     if(!Object.values(routes).some(t=>t?.enabled)) {
       code="no_candidate";message="已同步精确路由，没有新的待投递事件";return;
     }
-    const feed=await autoFetchFeed(pair);
+    let feed=await autoFetchFeed(pair);
+    if(!feed.ok && feed.code==="sidecar_http" && (feed.status===401 || feed.status===403)) {
+      // One bounded recovery per pump: re-pair, then retry the verified feed.
+      const recovered=await autoEnsurePairing(false);
+      if(recovered) { pair=recovered; feed=await autoFetchFeed(pair); }
+    }
     if(!feed.ok) {
       if(feed.code==="sidecar_http") {
         code="sidecar_http";message="Sidecar 请求未通过（HTTP "+feed.status+"）";return;
