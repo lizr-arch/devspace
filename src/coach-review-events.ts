@@ -786,11 +786,16 @@ export class CoachReviewEventStore {
   recordWebGptTurnAck(input:{workspaceId:string;operationId:string;eventId:number;evidenceSha256:string}):unknown {
     const packet=this.getEvidenceByEvent(input.workspaceId,input.eventId) as
       {operationId:string;evidenceSha256:string;delivery?:{workspaceId:string;nonce:string}}|undefined;
-    if(!packet?.delivery||packet.operationId!==input.operationId||packet.evidenceSha256!==input.evidenceSha256)
+    if(!packet||packet.operationId!==input.operationId||packet.evidenceSha256!==input.evidenceSha256)
       throw new Error("COACH_TURN_ACK_SCOPE_MISMATCH");
-    this.assertDeliveryRoute(packet.delivery);
+    // Exact multi-route events keep the strict delivery grant. Legacy workspace
+    // bindings have no delivery grant; the acknowledge tool already verified the
+    // exact event identity plus the bearer-authenticated DOM receipt, so the
+    // execution workspace is the only authenticated delivery scope.
+    const deliveryWorkspaceId=packet.delivery?packet.delivery.workspaceId:input.workspaceId;
+    if(packet.delivery)this.assertDeliveryRoute(packet.delivery);
     this.db.prepare("INSERT OR IGNORE INTO coach_webgpt_turn_acks VALUES(?,?,?,?,?,?)")
-      .run(input.eventId,input.workspaceId,input.operationId,input.evidenceSha256,packet.delivery.workspaceId,new Date().toISOString());
+      .run(input.eventId,input.workspaceId,input.operationId,input.evidenceSha256,deliveryWorkspaceId,new Date().toISOString());
     return this.webGptTurnAck(input.workspaceId,input.eventId);
   }
   webGptTurnAck(workspaceId:string,eventId:number):unknown {
