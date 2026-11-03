@@ -206,6 +206,21 @@ function expectRefused(
   );
 }
 
+/**
+ * The OUTCOME_UNKNOWN text must never invite a retry: the destructive step may
+ * already have run. This is a text-level contract, not only a structured one.
+ */
+function assertUnknownOutcomeText(text: string): void {
+  assert.match(text, /Outcome: OUTCOME_UNKNOWN\./);
+  assert.match(text, /safeToRetry: false\./);
+  assert.match(text, /Do not retry this call blindly/);
+  assert.match(text, /git worktree list/);
+  assert.match(text, /list_workspaces\(audit=true\)/);
+  assert.doesNotMatch(text, /before retrying/i);
+  assert.doesNotMatch(text, /GENERIC_TOOL_ERROR/);
+  assert.doesNotMatch(text, /Recovery Hint:/);
+}
+
 try {
   // -------------------------------------------------------------------------
   // E1 — Session lifecycle
@@ -1744,6 +1759,34 @@ try {
     fixture.store.close();
   });
 
+  await test("the unknown-outcome text never suggests a retry (negative case)", async () => {
+    // This is the exact regression the previous text had: the generic
+    // `formatErrorRemedy` hint said "… before retrying", contradicting the
+    // dedicated "do not retry blindly" guidance in the same message.
+    class PostMutationThrowRegistry extends WorkspaceRegistry {
+      override async reclaimWorkspace(
+        input: Parameters<WorkspaceRegistry["reclaimWorkspace"]>[0],
+      ): Promise<Awaited<ReturnType<WorkspaceRegistry["reclaimWorkspace"]>>> {
+        await super.reclaimWorkspace(input);
+        throw new Error("SQLITE_BUSY: database is locked (post-removal)");
+      }
+    }
+    const fixture = createFixture("tool-unknown-text", {
+      registryClass: PostMutationThrowRegistry,
+    });
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "OUTCOME_UNKNOWN");
+    assertUnknownOutcomeText(result.text);
+    assert.doesNotMatch(result.error?.message ?? "", /before retrying/i);
+    assert.equal(result.error?.safeToRetry, false);
+    fixture.store.close();
+  });
+
   await test("a git worktree remove failure is not reported as success", async () => {
     const fixture = createFixture("tool-locked");
     const { workspace, headSha } = await createClosedWorktree(fixture);
@@ -1814,7 +1857,7 @@ try {
     assert.equal(result.isError, true);
     assert.equal(result.error?.code, "WORKSPACE_RECLAIM_OUTCOME_UNKNOWN");
     assert.equal(result.error?.safeToRetry, false);
-    assert.match(result.text, /does not prove the worktree is still present/);
+    assertUnknownOutcomeText(result.text);
     assert.equal(existsSync(workspace.root), false);
     fixture.store.close();
   });

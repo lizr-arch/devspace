@@ -441,6 +441,95 @@ try {
     assert.equal(existsSync(workspaceRoot), false);
   });
 
+  check("reclaim_workspace reports OUTCOME_UNKNOWN over MCP without a retry hint", async () => {
+    // OUTCOME_UNKNOWN is only reachable when the removal cannot be verified.
+    // Inject exactly that fault at the registry boundary so the MCP response
+    // shape and the model-readable text are both exercised.
+    const server = running;
+    assert.ok(server, "server not started");
+
+    const opened = await client.callTool({
+      name: "open_workspace",
+      arguments: { path: repo, mode: "worktree" },
+    });
+    const second = structured<{ workspaceId: string; root: string }>(opened);
+    assert.ok(second.workspaceId, textOf(opened));
+
+    // A freshly opened record is `active` because its own request is in flight;
+    // the listing path reconciles it to `idle`, exactly as the documented
+    // audit → decide → act workflow requires before a close.
+    const firstListing = await client.callTool({
+      name: "list_workspaces",
+      arguments: { audit: true, limit: 10 },
+    });
+    const firstAudit = structured<{
+      audits: Array<{ workspaceId: string; headSha: string | null }>;
+    }>(firstListing);
+    const secondHead = firstAudit.audits.find(
+      (item) => item.workspaceId === second.workspaceId,
+    )?.headSha;
+    assert.ok(secondHead, "the audit must report the second worktree HEAD");
+
+    const closed = await client.callTool({
+      name: "close_workspace_session",
+      arguments: {
+        workspaceId: second.workspaceId,
+        confirmWorkspaceId: second.workspaceId,
+      },
+    });
+    assert.equal(isToolError(closed), false, textOf(closed));
+
+    const registry = server.ctx.workspaces as unknown as {
+      verifyWorktreeRemoval: (input: {
+        root: string;
+        sourceRoot: string;
+        branch: string | null;
+        headSha: string | null;
+      }) => Promise<{ removed: boolean }>;
+    };
+    const original = registry.verifyWorktreeRemoval.bind(registry);
+    registry.verifyWorktreeRemoval = async (input) => ({
+      ...(await original(input)),
+      removed: false,
+    });
+    let result: unknown;
+    try {
+      result = await client.callTool({
+        name: "reclaim_workspace",
+        arguments: {
+          workspaceId: second.workspaceId,
+          expectedHeadSha: secondHead,
+          confirmWorkspaceId: second.workspaceId,
+        },
+      });
+    } finally {
+      delete (registry as { verifyWorktreeRemoval?: unknown })
+        .verifyWorktreeRemoval;
+    }
+
+    assert.equal(isToolError(result), true);
+    const payload = structured<{
+      outcome: string;
+      result: string;
+      error: { code: string; safeToRetry: boolean; recoveryHint: string };
+    }>(result);
+    assert.equal(payload.outcome, "OUTCOME_UNKNOWN");
+    assert.equal(payload.error.code, "WORKSPACE_RECLAIM_OUTCOME_UNKNOWN");
+    assert.equal(payload.error.safeToRetry, false);
+    assert.match(payload.result, /safeToRetry: false/);
+    assert.match(payload.result, /Do not retry this call blindly/);
+    assert.match(payload.result, /git worktree list/);
+    assert.doesNotMatch(payload.result, /before retrying/i);
+    assert.doesNotMatch(payload.result, /GENERIC_TOOL_ERROR/);
+    assert.doesNotMatch(payload.result, /Recovery Hint:/);
+    assert.doesNotMatch(payload.error.recoveryHint, /before retrying/i);
+    assert.equal(
+      existsSync(second.root),
+      false,
+      "the fault-injected removal still removed the directory; the record is kept",
+    );
+  });
+
   // Run every check, then report.
   const failures: string[] = [];
   for (const entry of checks) {

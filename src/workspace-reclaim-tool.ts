@@ -150,10 +150,24 @@ function unknownOutcome(
   projectMemory?: ReclaimToolResult["projectMemory"],
   error?: ReclaimToolResult["error"],
 ): ReclaimToolResult {
+  // Deliberately built here instead of reusing `formatErrorRemedy`: its generic
+  // hint ("… before retrying") tells the caller to retry, which is the opposite
+  // of what an unproven destructive step requires. Nothing in this text may
+  // suggest a retry.
+  const guidance = [
+    "Outcome: OUTCOME_UNKNOWN.",
+    "safeToRetry: false.",
+    "This result proves neither that the worktree was removed nor that it is still present.",
+    "Verify read-only before doing anything else:",
+    "  - whether the worktree directory still exists;",
+    "  - what `git worktree list` reports for that path;",
+    "  - what list_workspaces(audit=true) reports for this workspaceId.",
+    "Do not retry this call blindly: a retry could act on a worktree that is already gone.",
+  ].join("\n");
   return {
     outcome: "OUTCOME_UNKNOWN",
     isError: true,
-    text: `${message}\nOutcome: OUTCOME_UNKNOWN. The reclaim ended in a failure that does not prove the worktree is still present. Verify read-only (directory presence, \`git worktree list\`, list_workspaces) before any further action; do not retry blindly.`,
+    text: `${message}\n${guidance}`,
     ...(projectMemory ? { projectMemory } : {}),
     // The outcome, not the message, is what a client must branch on. Give it a
     // stable code so the three states are distinguishable without parsing text.
@@ -286,7 +300,9 @@ export async function reclaimWorkspaceViaTool(
 
     const { message: remedy, errorPayload } = formatErrorRemedy(error);
     if (message.startsWith("WORKSPACE_RECLAIM_OUTCOME_UNKNOWN:")) {
-      return unknownOutcome(remedy, projectMemory, errorPayload);
+      // Raw message: the formatted remedy carries the generic "before retrying"
+      // hint, which must never appear on an unproven destructive step.
+      return unknownOutcome(message, projectMemory, errorPayload);
     }
     // Fail closed: only a refusal that is proven to happen before the
     // destructive step may be called a no-mutation. Anything else — including a
@@ -295,6 +311,6 @@ export async function reclaimWorkspaceViaTool(
     if (isPreMutationRefusal(message)) {
       return noMutation(remedy, projectMemory, errorPayload);
     }
-    return unknownOutcome(remedy, projectMemory, errorPayload);
+    return unknownOutcome(message, projectMemory, errorPayload);
   }
 }
