@@ -15,6 +15,7 @@ import {
   textBlock,
   workspaceContextToolResponse,
 } from "./server-helpers.js";
+import { reclaimWorkspaceViaTool } from "../workspace-reclaim-tool.js";
 
 function projectMemoryReceiptInputSchema() {
   return z
@@ -143,7 +144,16 @@ export function registerWorkspaceListTools(
               (entry) =>
                 `  ${entry.verdict} | ${entry.workspaceId ?? "(orphan)"} | branch=${entry.branch ?? "(detached)"} | head=${entry.headSha ?? "unknown"} | branchDelete=${entry.branchDelete?.verdict ?? "n/a"}`,
             ),
-            `  orphaned worktree directories: ${plan.orphans.orphanedCount} of ${plan.orphans.directoryCount} under ${plan.orphans.worktreeRoot}${plan.orphans.truncated ? " (truncated)" : ""}`,
+            // An unreadable inventory must not be rendered as "0 orphans":
+            // that would state the opposite of what is known.
+            ...(plan.orphans.error
+              ? [
+                  `  orphan inventory FAILED: ${plan.orphans.error}`,
+                  "  (the orphan count is unknown, not zero)",
+                ]
+              : [
+                  `  orphaned worktree directories: ${plan.orphans.orphanedCount} of ${plan.orphans.directoryCount} under ${plan.orphans.worktreeRoot}${plan.orphans.truncated ? " (truncated)" : ""}`,
+                ]),
           ].join("\n")
         : "";
       const orphanText = orphanAudit
@@ -190,7 +200,7 @@ export function registerWorkspaceListTools(
       {
         title: "Reclaim a managed worktree",
         description:
-          "Remove ONE DevSpace-managed Git worktree after an explicit, SHA-pinned confirmation. Refuses anything with uncommitted files, untracked files, unmerged commits, a running job, a live session, or uncertain ownership. Only managed worktrees created by open_workspace(mode=\"worktree\") are eligible; normal checkouts are never removed. Removal uses `git worktree remove` WITHOUT --force, so Git independently refuses a dirty worktree. There is no recursive directory delete, no `git clean`, and no reset.",
+          "Remove ONE DevSpace-managed Git worktree after an explicit, SHA-pinned confirmation. Refuses anything with uncommitted files, untracked files, unmerged commits, a running job, a live session, or uncertain ownership. Only managed worktrees created by open_workspace(mode=\"worktree\") are eligible; normal checkouts are never removed. Removal uses `git worktree remove` WITHOUT --force, so Git independently refuses a dirty worktree. There is no recursive directory delete, no `git clean`, and no reset. The result is reported as `outcome`: CONFIRMED_SUCCESS only after the removal is verified (directory absent AND Git no longer registers the path), CONFIRMED_NO_MUTATION when nothing was changed, and OUTCOME_UNKNOWN when the removal cannot be proven — in that last case the workspace record is deliberately kept, so verify read-only (directory, `git worktree list`, list_workspaces) before doing anything else and never retry blindly.",
         inputSchema: {
           workspaceId: z
             .string()
@@ -210,6 +220,17 @@ export function registerWorkspaceListTools(
         },
         outputSchema: resultOutputSchema({
           reclaimed: z.unknown().optional(),
+          // CONFIRMED_SUCCESS | CONFIRMED_NO_MUTATION | OUTCOME_UNKNOWN. A
+          // caller must be able to tell "it happened" from "nothing happened"
+          // and from "cannot tell", because only the first two are safe to act on.
+          outcome: z
+            .enum([
+              "CONFIRMED_SUCCESS",
+              "CONFIRMED_NO_MUTATION",
+              "OUTCOME_UNKNOWN",
+            ])
+            .optional(),
+          verification: z.unknown().optional(),
           // Present on refusal: a refusal is structured data the client can
           // validate, not a transport-level failure.
           error: toolErrorOutputSchema,
@@ -228,40 +249,48 @@ export function registerWorkspaceListTools(
         confirmWorkspaceId,
         projectMemoryReceiptId,
       }) => {
-        // The safety guards must observe the workspace as it was BEFORE this
-        // call. The reclaim itself does not attach a live session (it reads the
-        // store directly), and the SHADOW observation is recorded afterwards so
-        // it cannot influence the decision it is recording.
-        const reclaimed = await workspaces.withExclusiveLease(
-          workspaceId,
-          (workspace, others) =>
-            workspaces.reclaimWorkspace({
-              workspaceId: workspace.id,
-              expectedHeadSha,
-              confirmation: confirmWorkspaceId,
-              activeJobIdsForRoot: (root) => jobs.activeJobIdsForRoot(root),
-              activeGameSessionIds: (id) =>
-                games
-                  .listActiveSessions(id)
-                  .map((session) => session.sessionId),
-              activeTaskSessionIds: (id) =>
-                tasks
-                  .listSessions(id, 50)
-                  .filter((session) => session.status === "running")
-                  .map((session) => session.sessionId),
-              othersHolding: others,
-            }),
+        // Sequencing lives in workspace-reclaim-tool.ts: read the record,
+        // observe Project Memory BEFORE the mutation, then reclaim. The
+        // response is built only from the value the reclaim returned, so a
+        // successful removal can never be reported as a failure caused by a
+        // later lookup of the record it just deleted.
+        const result = await reclaimWorkspaceViaTool(
+          {
+            workspaces,
+            activeJobIdsForRoot: (root) => jobs.activeJobIdsForRoot(root),
+            activeGameSessionIds: (id) =>
+              games.listActiveSessions(id).map((session) => session.sessionId),
+            activeTaskSessionIds: (id) =>
+              tasks
+                .listSessions(id, 50)
+                .filter((session) => session.status === "running")
+                .map((session) => session.sessionId),
+          },
+          {
+            workspaceId,
+            expectedHeadSha,
+            confirmWorkspaceId,
+            projectMemoryReceiptId,
+          },
         );
-        const projectMemory = workspaces.observeProjectMemoryAccess(
-          workspaceId,
-          "reclaim_workspace",
-          projectMemoryReceiptId,
-        );
-        const result = `Reclaimed ${reclaimed.workspaceId} at ${reclaimed.root} (HEAD ${reclaimed.headSha}). Store record removed: ${reclaimed.storeRecordRemoved}.`;
         return {
-          content: [textBlock(result)],
-          _meta: { tool: "reclaim_workspace", projectMemory },
-          structuredContent: { result, reclaimed },
+          content: [textBlock(result.text)],
+          ...(result.isError ? { isError: true } : {}),
+          _meta: {
+            tool: "reclaim_workspace",
+            projectMemory: result.projectMemory,
+            // Keep the wrapper's documented refusal shape: clients and log
+            // pipelines read `_meta.error`, and this handler now answers
+            // refusals itself instead of throwing them to the wrapper.
+            ...(result.error ? { error: result.error } : {}),
+          },
+          structuredContent: {
+            result: result.text,
+            outcome: result.outcome,
+            ...(result.reclaimed ? { reclaimed: result.reclaimed } : {}),
+            ...(result.verification ? { verification: result.verification } : {}),
+            ...(result.error ? { error: result.error } : {}),
+          },
         };
       },
     );

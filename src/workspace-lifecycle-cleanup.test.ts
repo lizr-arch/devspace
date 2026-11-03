@@ -13,12 +13,14 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { CoachReviewEventStore } from "./coach-review-events.js";
 import { loadConfig } from "./config.js";
 import {
   branchDeleteEligibility,
@@ -27,6 +29,7 @@ import {
 } from "./git-branch-cleanup.js";
 import { auditWorkspace } from "./workspace-audit.js";
 import { LsofWorktreeProcessProbe } from "./workspace-process-probe.js";
+import { reclaimWorkspaceViaTool, type ReclaimToolDeps } from "./workspace-reclaim-tool.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import type { WorkspaceLifecycleState } from "./workspace-lifecycle.js";
 import { WorkspaceRegistry } from "./workspaces.js";
@@ -114,7 +117,18 @@ function createRepo(label: string): string {
   return repo;
 }
 
-function createFixture(label: string): Fixture {
+function createFixture(
+  label: string,
+  options: {
+    /** Overrides the task-session probe (production validates workspace ids). */
+    activeTaskSessionIds?: (workspaceId: string) => string[];
+    activeGameSessionIds?: (workspaceId: string) => string[];
+    /** Lets a test inject a fault by subclassing the registry. */
+    registryClass?: typeof WorkspaceRegistry;
+    /** Lets a test inject a store fault (e.g. a failing deleteSession). */
+    storeClass?: typeof SqliteWorkspaceStore;
+  } = {},
+): Fixture {
   const base = mkdtempSync(join(scratch, `${label}-`));
   const repo = createRepo(label);
   const worktreeRoot = resolve(join(base, "worktrees"));
@@ -130,11 +144,12 @@ function createFixture(label: string): Fixture {
     DEVSPACE_OAUTH_OWNER_TOKEN: "lifecycle-test-owner-token-value",
     PORT: "1",
   });
-  const store = new SqliteWorkspaceStore(stateDir);
-  const registry = new WorkspaceRegistry(config, store, undefined, {
+  const store = new (options.storeClass ?? SqliteWorkspaceStore)(stateDir);
+  const RegistryClass = options.registryClass ?? WorkspaceRegistry;
+  const registry = new RegistryClass(config, store, undefined, {
     activeJobIdsForRoot: () => activeJobIds,
-    activeGameSessionIds: () => activeGameIds,
-    activeTaskSessionIds: () => activeTaskIds,
+    activeGameSessionIds: options.activeGameSessionIds ?? (() => activeGameIds),
+    activeTaskSessionIds: options.activeTaskSessionIds ?? (() => activeTaskIds),
     now: () => fakeNow,
     processProbe: PROBE,
   });
@@ -1515,6 +1530,620 @@ try {
     );
     fixture.store.close();
   });
+  // -------------------------------------------------------------------------
+  // E4 — Reclaim tool outcome contract
+  //
+  // The three outcomes must be distinguishable by the caller. These tests go
+  // through the same orchestration the MCP handler uses, so the sequencing that
+  // caused the production false negative is covered directly.
+  // -------------------------------------------------------------------------
+
+  async function createClosedWorktree(fixture: Fixture) {
+    const workspace = await createCleanManagedWorktree(fixture);
+    const headSha = revParse(workspace.root, "HEAD");
+    await fixture.registry.closeWorkspaceSession({
+      workspaceId: workspace.id,
+      confirmation: workspace.id,
+    });
+    return { workspace, headSha };
+  }
+
+  function toolDeps(fixture: Fixture): ReclaimToolDeps {
+    return {
+      workspaces: fixture.registry,
+      activeJobIdsForRoot: () => activeJobIds,
+      activeGameSessionIds: () => activeGameIds,
+      activeTaskSessionIds: () => activeTaskIds,
+    };
+  }
+
+  await test("a confirmed reclaim reports CONFIRMED_SUCCESS and keeps the branch", async () => {
+    const fixture = createFixture("tool-success");
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const branch = workspace.worktree?.branch as string;
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "CONFIRMED_SUCCESS");
+    assert.equal(result.isError, false);
+    assert.equal(result.verification?.removed, true);
+    assert.equal(result.verification?.directoryRemoved, true);
+    assert.equal(result.verification?.worktreeDeregistered, true);
+    assert.equal(result.verification?.branchPreserved, true);
+    assert.equal(result.verification?.branchSha, headSha);
+    assert.match(result.text, /CONFIRMED_SUCCESS/);
+    assert.equal(existsSync(workspace.root), false);
+    assert.equal(fixture.store.getSession(workspace.id), undefined);
+    assert.equal(
+      revParse(fixture.repo, `refs/heads/${branch}`),
+      headSha,
+      "the branch and its commit must survive reclamation",
+    );
+    // Project Memory is observed before the mutation, so it is still reported.
+    assert.ok(result.projectMemory, "the SHADOW observation must be recorded");
+    assert.notEqual(
+      result.projectMemory?.outcome,
+      "observation_failed",
+      "the observation must succeed when it runs before the mutation",
+    );
+    fixture.store.close();
+  });
+
+  await test("a duplicate reclaim is a no-mutation answer, never a second delete", async () => {
+    const fixture = createFixture("tool-duplicate");
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const first = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(first.outcome, "CONFIRMED_SUCCESS");
+    const worktreeCountAfterFirst = git(fixture.repo, ["worktree", "list", "--porcelain"])
+      .split("\n")
+      .filter((line) => line.startsWith("worktree ")).length;
+
+    const second = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(second.outcome, "CONFIRMED_NO_MUTATION");
+    assert.equal(second.isError, true);
+    assert.match(second.text, /WORKSPACE_RECLAIM_RECORD_MISSING/);
+    assert.match(second.text, /Nothing was removed by this call/);
+    const worktreeCountAfterSecond = git(fixture.repo, ["worktree", "list", "--porcelain"])
+      .split("\n")
+      .filter((line) => line.startsWith("worktree ")).length;
+    assert.equal(worktreeCountAfterSecond, worktreeCountAfterFirst);
+    assert.equal(existsSync(workspace.root), false);
+    fixture.store.close();
+  });
+
+  await test("a dirty worktree is CONFIRMED_NO_MUTATION and its files are untouched", async () => {
+    const fixture = createFixture("tool-dirty");
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    writeFileSync(join(workspace.root, "base.txt"), "changed by the operator\n");
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "CONFIRMED_NO_MUTATION");
+    assert.equal(result.isError, true);
+    assert.equal(existsSync(workspace.root), true);
+    assert.equal(readFileSync(join(workspace.root, "base.txt"), "utf8"), "changed by the operator\n");
+    assert.ok(fixture.store.getSession(workspace.id), "the record must survive a refusal");
+    fixture.store.close();
+  });
+
+  await test("an unmerged commit is CONFIRMED_NO_MUTATION", async () => {
+    const fixture = createFixture("tool-unmerged");
+    const workspace = await createCleanManagedWorktree(fixture);
+    writeFileSync(join(workspace.root, "work.txt"), "work\n");
+    git(workspace.root, ["add", "--", "work.txt"]);
+    git(workspace.root, ["commit", "-m", "unmerged work"]);
+    const headSha = revParse(workspace.root, "HEAD");
+    await fixture.registry.closeWorkspaceSession({
+      workspaceId: workspace.id,
+      confirmation: workspace.id,
+    });
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "CONFIRMED_NO_MUTATION");
+    assert.equal(existsSync(workspace.root), true);
+    fixture.store.close();
+  });
+
+  await test("a HEAD mismatch is CONFIRMED_NO_MUTATION", async () => {
+    const fixture = createFixture("tool-head-drift");
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: "0".repeat(40),
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "CONFIRMED_NO_MUTATION");
+    assert.match(result.text, /WORKSPACE_RECLAIM_HEAD_MISMATCH/);
+    assert.equal(existsSync(workspace.root), true);
+    assert.equal(revParse(workspace.root, "HEAD"), headSha);
+    fixture.store.close();
+  });
+
+  await test("a running job is CONFIRMED_NO_MUTATION", async () => {
+    const fixture = createFixture("tool-job");
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    activeJobIds = ["job_blocking_tool"];
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "CONFIRMED_NO_MUTATION");
+    assert.equal(existsSync(workspace.root), true);
+    fixture.store.close();
+  });
+
+  await test("a Project Memory observation failure cannot turn a success into a failure", async () => {
+    class ThrowingObservationRegistry extends WorkspaceRegistry {
+      override observeProjectMemoryAccess(): never {
+        throw new Error("project memory store unavailable");
+      }
+    }
+    const fixture = createFixture("tool-pm-failure", {
+      registryClass: ThrowingObservationRegistry,
+    });
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "CONFIRMED_SUCCESS");
+    assert.equal(result.isError, false);
+    assert.equal(result.projectMemory?.outcome, "observation_failed");
+    assert.equal(existsSync(workspace.root), false);
+    fixture.store.close();
+  });
+
+  await test("an unverifiable removal is OUTCOME_UNKNOWN, keeps the record, and never claims success", async () => {
+    class BlindVerificationRegistry extends WorkspaceRegistry {
+      protected override async verifyWorktreeRemoval(input: {
+        root: string;
+        sourceRoot: string;
+        branch: string | null;
+        headSha: string | null;
+      }) {
+        const real = await super.verifyWorktreeRemoval(input);
+        // Simulate "Git said it removed it, but the read-only check cannot
+        // prove it": the caller must not be told SUCCESS.
+        return { ...real, removed: false };
+      }
+    }
+    const fixture = createFixture("tool-unknown", {
+      registryClass: BlindVerificationRegistry,
+    });
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "OUTCOME_UNKNOWN");
+    assert.equal(result.isError, true);
+    assert.match(result.text, /OUTCOME_UNKNOWN/);
+    assert.match(result.text, /do not retry blindly/);
+    assert.ok(
+      fixture.store.getSession(workspace.id),
+      "an unverifiable removal must keep the record so the state stays reconcilable",
+    );
+    fixture.store.close();
+  });
+
+  await test("a git worktree remove failure is not reported as success", async () => {
+    const fixture = createFixture("tool-locked");
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    // A locked worktree is a real, non-forced failure of `git worktree remove`.
+    git(fixture.repo, ["worktree", "lock", workspace.root]);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "CONFIRMED_NO_MUTATION");
+    assert.match(result.text, /WORKSPACE_RECLAIM_FAILED/);
+    assert.equal(existsSync(workspace.root), true);
+    assert.ok(fixture.store.getSession(workspace.id));
+    git(fixture.repo, ["worktree", "unlock", workspace.root]);
+    fixture.store.close();
+  });
+
+  await test("a store failure after the removal is still a confirmed success, with the record kept", async () => {
+    class FailingDeleteStore extends SqliteWorkspaceStore {
+      override deleteSession(): boolean {
+        throw new Error("SQLITE_BUSY: database is locked");
+      }
+    }
+    const fixture = createFixture("tool-store-fault", {
+      storeClass: FailingDeleteStore,
+    });
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    // The worktree is gone; a store error must never be described as "nothing
+    // happened", and must not be hidden either.
+    assert.equal(result.outcome, "CONFIRMED_SUCCESS");
+    assert.equal(result.isError, false);
+    assert.equal(result.reclaimed?.storeRecordRemoved, false);
+    assert.match(result.text, /workspace record could not be deleted/);
+    assert.equal(existsSync(workspace.root), false);
+    assert.ok(
+      fixture.store.getSession(workspace.id),
+      "the leftover record is reported, not silently dropped",
+    );
+    fixture.store.close();
+  });
+
+  await test("an unrecognised failure after the removal is OUTCOME_UNKNOWN, never a no-op", async () => {
+    class PostMutationThrowRegistry extends WorkspaceRegistry {
+      override async reclaimWorkspace(
+        input: Parameters<WorkspaceRegistry["reclaimWorkspace"]>[0],
+      ): Promise<Awaited<ReturnType<WorkspaceRegistry["reclaimWorkspace"]>>> {
+        await super.reclaimWorkspace(input);
+        // Simulates any future statement added after the destructive step.
+        throw new Error("SQLITE_BUSY: database is locked (post-removal)");
+      }
+    }
+    const fixture = createFixture("tool-post-mutation", {
+      registryClass: PostMutationThrowRegistry,
+    });
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "OUTCOME_UNKNOWN");
+    assert.equal(result.isError, true);
+    assert.equal(result.error?.code, "WORKSPACE_RECLAIM_OUTCOME_UNKNOWN");
+    assert.equal(result.error?.safeToRetry, false);
+    assert.match(result.text, /does not prove the worktree is still present/);
+    assert.equal(existsSync(workspace.root), false);
+    fixture.store.close();
+  });
+
+  await test("a record that vanishes before the lease is a no-mutation answer", async () => {
+    class VanishingRecordRegistry extends WorkspaceRegistry {
+      override storedSession(
+        workspaceId: string,
+      ): ReturnType<WorkspaceRegistry["storedSession"]> {
+        // The pre-check sees a record; the lease lookup then finds none,
+        // exactly like a concurrent reclaim winning the race.
+        return { id: workspaceId } as ReturnType<
+          WorkspaceRegistry["storedSession"]
+        >;
+      }
+    }
+    const fixture = createFixture("tool-vanish", {
+      registryClass: VanishingRecordRegistry,
+    });
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: "ws_00000000-0000-4000-8000-000000000000",
+      expectedHeadSha: "0".repeat(40),
+      confirmWorkspaceId: "ws_00000000-0000-4000-8000-000000000000",
+    });
+    assert.equal(result.outcome, "CONFIRMED_NO_MUTATION");
+    assert.match(result.text, /disappeared before the reclaim started/);
+    fixture.store.close();
+  });
+
+  await test("two concurrent reclaims of one worktree: exactly one succeeds", async () => {
+    const fixture = createFixture("tool-concurrent");
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    const call = () =>
+      reclaimWorkspaceViaTool(toolDeps(fixture), {
+        workspaceId: workspace.id,
+        expectedHeadSha: headSha,
+        confirmWorkspaceId: workspace.id,
+      });
+    const [first, second] = await Promise.all([call(), call()]);
+    const outcomes = [first.outcome, second.outcome];
+    assert.equal(
+      outcomes.filter((outcome) => outcome === "CONFIRMED_SUCCESS").length,
+      1,
+      `exactly one call may succeed: ${JSON.stringify(outcomes)}`,
+    );
+    assert.equal(
+      outcomes.filter((outcome) => outcome === "CONFIRMED_NO_MUTATION").length,
+      1,
+      `the loser must be a no-mutation answer: ${JSON.stringify(outcomes)}`,
+    );
+    assert.equal(existsSync(workspace.root), false);
+    fixture.store.close();
+  });
+
+  await test("a partial removal that cannot be proven to be a no-op is OUTCOME_UNKNOWN", async () => {
+    class PartialRemovalRegistry extends WorkspaceRegistry {
+      protected override async verifyWorktreeRemoval(input: {
+        root: string;
+        sourceRoot: string;
+        branch: string | null;
+        headSha: string | null;
+      }) {
+        const real = await super.verifyWorktreeRemoval(input);
+        // "Directory gone but the path is still registered": the shape a real
+        // `git worktree remove` failure can leave behind when deleting
+        // .git/worktrees/<id> fails after the directory is gone.
+        return {
+          ...real,
+          directoryRemoved: true,
+          worktreeDeregistered: false,
+          registered: true,
+          removed: false,
+        };
+      }
+    }
+    const fixture = createFixture("tool-partial-removal", {
+      registryClass: PartialRemovalRegistry,
+    });
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    git(fixture.repo, ["worktree", "lock", workspace.root]);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    // A failed removal that may have mutated something must never be called a
+    // no-mutation.
+    assert.equal(result.outcome, "OUTCOME_UNKNOWN");
+    assert.match(result.text, /cannot be proven to be a no-op/);
+    assert.doesNotMatch(result.text, /CONFIRMED_NO_MUTATION/);
+    git(fixture.repo, ["worktree", "unlock", workspace.root]);
+    fixture.store.close();
+  });
+
+  await test("a failed removal with a lost registration is OUTCOME_UNKNOWN too", async () => {
+    class DeregisteredRegistry extends WorkspaceRegistry {
+      protected override async verifyWorktreeRemoval(input: {
+        root: string;
+        sourceRoot: string;
+        branch: string | null;
+        headSha: string | null;
+      }) {
+        const real = await super.verifyWorktreeRemoval(input);
+        // Directory still present, but Git no longer registers the path: the
+        // registration was mutated, so this is not a no-op either.
+        return {
+          ...real,
+          directoryRemoved: false,
+          worktreeDeregistered: true,
+          registered: false,
+          removed: false,
+        };
+      }
+    }
+    const fixture = createFixture("tool-deregistered", {
+      registryClass: DeregisteredRegistry,
+    });
+    const { workspace, headSha } = await createClosedWorktree(fixture);
+    git(fixture.repo, ["worktree", "lock", workspace.root]);
+    const result = await reclaimWorkspaceViaTool(toolDeps(fixture), {
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmWorkspaceId: workspace.id,
+    });
+    assert.equal(result.outcome, "OUTCOME_UNKNOWN");
+    assert.doesNotMatch(result.text, /CONFIRMED_NO_MUTATION/);
+    git(fixture.repo, ["worktree", "unlock", workspace.root]);
+    fixture.store.close();
+  });
+
+  await test("verifyWorktreeRemoval only confirms when both facts are proven", async () => {
+    class ExposedVerificationRegistry extends WorkspaceRegistry {
+      async verifyRemoval(input: {
+        root: string;
+        sourceRoot: string;
+        branch: string | null;
+        headSha: string | null;
+      }) {
+        return this.verifyWorktreeRemoval(input);
+      }
+    }
+    const fixture = createFixture("verify-facts", {
+      registryClass: ExposedVerificationRegistry,
+    });
+    const workspace = await createCleanManagedWorktree(fixture);
+    const headSha = revParse(workspace.root, "HEAD");
+    const branch = workspace.worktree?.branch as string;
+    const registry = fixture.registry as ExposedVerificationRegistry;
+
+    const present = await registry.verifyRemoval({
+      root: workspace.root,
+      sourceRoot: fixture.repo,
+      branch,
+      headSha,
+    });
+    assert.equal(present.directoryRemoved, false);
+    assert.equal(present.registered, true);
+    assert.equal(present.removed, false);
+    assert.equal(present.branchPreserved, true);
+
+    // Git cannot be read: "unknown", never "not registered".
+    const unreadable = await registry.verifyRemoval({
+      root: workspace.root,
+      sourceRoot: join(fixture.root, "not-a-repository"),
+      branch,
+      headSha,
+    });
+    assert.equal(unreadable.registered, null);
+    assert.equal(unreadable.removed, false);
+
+    await fixture.registry.closeWorkspaceSession({
+      workspaceId: workspace.id,
+      confirmation: workspace.id,
+    });
+    await fixture.registry.reclaimWorkspace({
+      workspaceId: workspace.id,
+      expectedHeadSha: headSha,
+      confirmation: workspace.id,
+    });
+    const gone = await registry.verifyRemoval({
+      root: workspace.root,
+      sourceRoot: fixture.repo,
+      branch,
+      headSha,
+    });
+    assert.equal(gone.removed, true);
+    assert.equal(gone.branchPreserved, true);
+
+    // A branch that moved is reported, not treated as preserved.
+    git(fixture.repo, ["branch", "-d", branch]);
+    const branchGone = await registry.verifyRemoval({
+      root: workspace.root,
+      sourceRoot: fixture.repo,
+      branch,
+      headSha,
+    });
+    assert.equal(branchGone.branchPreserved, false);
+    fixture.store.close();
+  });
+
+  // -------------------------------------------------------------------------
+  // E5 — Cleanup plan resilience
+  // -------------------------------------------------------------------------
+
+  await test("the cleanup plan survives an orphan directory when the task probe validates ids", async () => {
+    const seenIds: string[] = [];
+    // Exactly the production probe: a validating store that rejects any id that
+    // is not a real workspace id. Passing a synthetic `orphan:<path>` id here
+    // is what used to crash the whole plan.
+    const coach = new CoachReviewEventStore(mkdtempSync(join(scratch, "coach-")));
+    const fixture = createFixture("plan-coach-probe", {
+      activeTaskSessionIds: (workspaceId: string) => {
+        seenIds.push(workspaceId);
+        return coach.hasInterruptedRun(workspaceId)
+          ? ["codex:quarantined-interrupted-operation"]
+          : [];
+      },
+    });
+    const workspace = await createCleanManagedWorktree(fixture);
+    await fixture.registry.closeWorkspaceSession({
+      workspaceId: workspace.id,
+      confirmation: workspace.id,
+    });
+    const orphan = join(fixture.worktreeRoot, "orphan-no-record");
+    mkdirSync(orphan, { recursive: true });
+
+    const plan = await fixture.registry.cleanupPlan({
+      limit: 10,
+      includeOrphans: true,
+    });
+    assert.equal(plan.entries.length, 1);
+    assert.equal(plan.entries[0]?.workspaceId, workspace.id);
+    assert.equal(plan.entries[0]?.verdict, "SAFE_CANDIDATE");
+    assert.equal(plan.orphans.orphanedCount, 1);
+    assert.equal(plan.orphans.entries.length, 1);
+    assert.equal(plan.orphans.entries[0]?.verdict, "BLOCKED_NOT_MANAGED");
+    assert.equal(plan.orphans.entries[0]?.reclaimable, false);
+    assert.equal(plan.orphans.error, undefined);
+    // The tool's `includeOrphans` path calls the orphan audit directly, so it
+    // must be usable on its own as well.
+    const direct = await fixture.registry.orphanedWorktreeAudit({ limit: 50 });
+    assert.equal(direct.scan.orphaned.length, 1);
+    assert.equal(direct.audits[0]?.verdict, "BLOCKED_NOT_MANAGED");
+    assert.ok(seenIds.length > 0);
+    assert.ok(
+      seenIds.every((id) => /^ws_[0-9a-f-]{36}$/.test(id)),
+      `no synthetic id may reach a workspace-scoped probe: ${JSON.stringify(seenIds)}`,
+    );
+    fixture.store.close();
+  });
+
+  await test("one broken record cannot crash the plan or become a candidate", async () => {
+    let failingWorkspaceId: string | null = null;
+    const fixture = createFixture("plan-isolate", {
+      activeTaskSessionIds: (workspaceId: string) => {
+        if (workspaceId === failingWorkspaceId) {
+          throw new Error("task subsystem exploded");
+        }
+        return [];
+      },
+    });
+    const healthy = await createCleanManagedWorktree(fixture);
+    const broken = await createCleanManagedWorktree(fixture);
+    failingWorkspaceId = broken.id;
+
+    const plan = await fixture.registry.cleanupPlan({ limit: 10 });
+    assert.equal(plan.entries.length, 2);
+    const healthyEntry = plan.entries.find((entry) => entry.workspaceId === healthy.id);
+    const brokenEntry = plan.entries.find((entry) => entry.workspaceId === broken.id);
+    assert.equal(healthyEntry?.verdict, "SAFE_CANDIDATE");
+    assert.ok(brokenEntry, "the broken record must still appear in the plan");
+    assert.equal(brokenEntry?.verdict, "UNKNOWN");
+    assert.equal(brokenEntry?.reclaimable, false);
+    assert.match(brokenEntry?.blockedReasons.join(" ") ?? "", /could not be audited/);
+    assert.equal(plan.summary.UNKNOWN, 1);
+    assert.equal(plan.summary.TOTAL, 2);
+    fixture.store.close();
+  });
+
+  await test("the plan classifies missing directories and closed sessions explicitly", async () => {
+    const fixture = createFixture("plan-missing");
+    const present = await createCleanManagedWorktree(fixture);
+    await fixture.registry.closeWorkspaceSession({
+      workspaceId: present.id,
+      confirmation: present.id,
+    });
+    const vanished = await createCleanManagedWorktree(fixture);
+    const vanishedRoot = vanished.root;
+    await fixture.registry.closeWorkspaceSession({
+      workspaceId: vanished.id,
+      confirmation: vanished.id,
+    });
+    rmSync(vanishedRoot, { recursive: true, force: true });
+
+    const plan = await fixture.registry.cleanupPlan({ limit: 10 });
+    const closed = plan.entries.find((entry) => entry.workspaceId === present.id);
+    const missing = plan.entries.find((entry) => entry.workspaceId === vanished.id);
+    assert.equal(closed?.verdict, "SAFE_CANDIDATE");
+    assert.equal(closed?.sessionState, "closed");
+    assert.equal(missing?.verdict, "BLOCKED_MISSING");
+    assert.equal(missing?.reclaimable, false);
+    assert.equal(missing?.staleRecord, true);
+    assert.ok(plan.summary.BLOCKED_MISSING >= 1);
+    fixture.store.close();
+  });
+
+  await test("an orphan inventory failure is reported, not silently swallowed", async () => {
+    class FailingOrphanRegistry extends WorkspaceRegistry {
+      override async orphanedWorktreeAudit(): Promise<never> {
+        throw new Error("worktree root unreadable");
+      }
+    }
+    const fixture = createFixture("plan-orphan-failure", {
+      registryClass: FailingOrphanRegistry,
+    });
+    const workspace = await createCleanManagedWorktree(fixture);
+    await fixture.registry.closeWorkspaceSession({
+      workspaceId: workspace.id,
+      confirmation: workspace.id,
+    });
+    const plan = await fixture.registry.cleanupPlan({ limit: 10, includeOrphans: true });
+    assert.equal(plan.entries.length, 1);
+    assert.equal(plan.entries[0]?.verdict, "SAFE_CANDIDATE");
+    assert.equal(plan.orphans.truncated, true);
+    assert.match(plan.orphans.error ?? "", /worktree root unreadable/);
+    assert.equal(plan.orphans.entries.length, 0);
+    fixture.store.close();
+  });
+
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
