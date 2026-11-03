@@ -98,6 +98,32 @@ export type {
   OpenWorkspaceInput,
 };
 
+/**
+ * What a caller may conclude from a reclaim attempt.
+ *
+ * The three states are deliberately distinct, because "I could not tell" is a
+ * different instruction to the caller than either "it happened" or "it did
+ * not": only CONFIRMED_NO_MUTATION may be retried after fixing the cause, and
+ * OUTCOME_UNKNOWN requires a read-only check first.
+ */
+export type WorkspaceReclaimOutcome =
+  | "CONFIRMED_SUCCESS"
+  | "CONFIRMED_NO_MUTATION"
+  | "OUTCOME_UNKNOWN";
+
+/** Read-only proof collected immediately after `git worktree remove`. */
+export interface WorktreeRemovalVerification {
+  directoryRemoved: boolean;
+  worktreeDeregistered: boolean;
+  /** null when the Git worktree listing could not be read at all. */
+  registered: boolean | null;
+  /** True only when both facts above are proven. */
+  removed: boolean;
+  /** null when there is no local branch to check, or it could not be read. */
+  branchPreserved: boolean | null;
+  branchSha: string | null;
+}
+
 /** Narrow a worktree factory result to the fields the workspace type declares. */
 function worktreeAttachment(worktree: {
   path: string;
@@ -325,20 +351,42 @@ export class WorkspaceRegistry {
    */
   sessionActivityFor(
     session: {
-      id: string;
+      /**
+       * `null` means "this directory has no workspace record" (an orphan
+       * directory under the managed worktree root). Workspace-scoped
+       * subsystems are keyed by a real workspace id, so they must not be
+       * queried with a synthetic one: a made-up id is not a weaker answer, it
+       * is a different question, and validating stores reject it outright
+       * (`COACH_AGENT_RUN_INVALID`). Root-scoped probes still run.
+       */
+      id: string | null;
       root: string;
       lifecycleState: WorkspaceLifecycleState;
     },
     overrides: { liveLeases?: number } = {},
   ): WorkspaceSessionActivity {
+    const workspaceId = session.id;
     return {
       sessionState: session.lifecycleState,
-      liveLeases: overrides.liveLeases ?? this.liveLeases(session.id),
+      liveLeases:
+        workspaceId === null
+          ? 0
+          : (overrides.liveLeases ?? this.liveLeases(workspaceId)),
       activeJobIds: this.probes.activeJobIdsForRoot?.(session.root) ?? [],
       activeGameSessionIds:
-        this.probes.activeGameSessionIds?.(session.id, session.root) ?? [],
+        workspaceId === null
+          ? []
+          : (this.probes.activeGameSessionIds?.(
+              workspaceId,
+              session.root,
+            ) ?? []),
       activeTaskSessionIds:
-        this.probes.activeTaskSessionIds?.(session.id, session.root) ?? [],
+        workspaceId === null
+          ? []
+          : (this.probes.activeTaskSessionIds?.(
+              workspaceId,
+              session.root,
+            ) ?? []),
     };
   }
 
@@ -351,7 +399,7 @@ export class WorkspaceRegistry {
    * must never look available merely because nobody checked.
    */
   private async sessionActivityWithProcesses(session: {
-    id: string;
+    id: string | null;
     root: string;
     lifecycleState: WorkspaceLifecycleState;
   }): Promise<WorkspaceSessionActivity> {
@@ -723,7 +771,8 @@ export class WorkspaceRegistry {
     // roots and the Git listing are canonicalised before they are compared.
     const knownRoots = summaries
       .map((summary) => canonicalPath(summary.root));
-    const scan = scanWorktreeDirectories(this.config.worktreeRoot, knownRoots);    const registered =
+    const scan = scanWorktreeDirectories(this.config.worktreeRoot, knownRoots);
+    const registered =
       input.registeredWorktrees !== undefined
         ? input.registeredWorktrees
         : await listRegisteredWorktrees(this.config.worktreeRoot);
@@ -740,7 +789,11 @@ export class WorkspaceRegistry {
           lastUsedAt: null,
           activity: {
             ...(await this.sessionActivityWithProcesses({
-              id: `orphan:${directory}`,
+              // No record exists for an orphan directory, so there is no
+              // workspace id to ask about. Passing a synthetic `orphan:<path>`
+              // id here used to crash the whole plan inside the task-session
+              // probe, because that id is not a valid workspace id.
+              id: null,
               root: directory,
               lifecycleState: null as unknown as WorkspaceLifecycleState,
             })),
@@ -810,6 +863,9 @@ export class WorkspaceRegistry {
     headSha: string;
     storeRecordRemoved: boolean;
     lifecycleState: WorkspaceLifecycleState;
+    /** Always CONFIRMED_SUCCESS here: the removal was verified before returning. */
+    outcome: "CONFIRMED_SUCCESS";
+    verification: WorktreeRemovalVerification;
   }> {
     if (input.confirmation !== input.workspaceId) {
       throw new Error(
@@ -908,20 +964,65 @@ export class WorkspaceRegistry {
 
     // `git worktree remove` without --force: Git refuses a dirty or locked
     // worktree, which is exactly the second check we want.
+    //
+    // The removal and its verification must run against the SAME repository:
+    // verifying "this path is not a worktree of <other repo>" would prove
+    // nothing. `sourceRoot` is what the audit already used to check
+    // registration, so it is the right repository for both steps.
+    const repositoryRoot = session.sourceRoot ?? this.config.worktreeRoot;
     try {
-      await runGit(session.sourceRoot ?? session.root, [
-        "worktree",
-        "remove",
-        session.root,
-      ]);
+      await runGit(repositoryRoot, ["worktree", "remove", session.root]);
     } catch (error) {
+      // A failed `git worktree remove` is not automatically "nothing happened":
+      // Git can fail after it has already detached the worktree. Decide from
+      // the filesystem and the Git registry, never from the exit code alone.
+      const afterFailure = await this.verifyWorktreeRemoval({
+        root: session.root,
+        sourceRoot: repositoryRoot,
+        branch: audit.branch,
+        headSha: audit.headSha,
+      });
+      if (!afterFailure.removed) {
+        // Only a still-present, still-registered worktree proves the failed
+        // removal was a no-op. A missing directory or a lost registration means
+        // the attempt may have mutated something, which must never be reported
+        // as "nothing happened".
+        const provablyIntact =
+          !afterFailure.directoryRemoved && afterFailure.registered === true;
+        throw new Error(
+          provablyIntact
+            ? `WORKSPACE_RECLAIM_FAILED: git worktree remove refused ${session.root}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            : `WORKSPACE_RECLAIM_OUTCOME_UNKNOWN: git worktree remove reported an error for ${session.root} and the attempt cannot be proven to be a no-op (directoryRemoved=${afterFailure.directoryRemoved}, registered=${String(afterFailure.registered)}). The store record was kept on purpose. Verify read-only before doing anything else; do not retry blindly.`,
+        );
+      }
       throw new Error(
-        `WORKSPACE_RECLAIM_FAILED: git worktree remove refused ${session.root}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `WORKSPACE_RECLAIM_OUTCOME_UNKNOWN: git worktree remove reported an error for ${session.root}, but the directory is gone and Git no longer registers it. The store record was kept on purpose. Verify read-only before doing anything else; do not retry blindly.`,
       );
     }
-    const storeRecordRemoved = this.store?.deleteSession?.(session.id) ?? false;
+    const verification = await this.verifyWorktreeRemoval({
+      root: session.root,
+      sourceRoot: repositoryRoot,
+      branch: audit.branch,
+      headSha: audit.headSha,
+    });
+    if (!verification.removed) {
+      // The destructive step claims success but cannot be proven. Keep the
+      // record so the state stays reconcilable, and never report success.
+      throw new Error(
+        `WORKSPACE_RECLAIM_OUTCOME_UNKNOWN: git worktree remove returned success for ${session.root}, but the removal could not be verified (directoryRemoved=${verification.directoryRemoved}, worktreeDeregistered=${verification.worktreeDeregistered}, registered=${String(verification.registered)}). The store record was kept. Verify read-only before doing anything else; do not retry blindly.`,
+      );
+    }
+    // The worktree is provably gone. From here on the result is a fact, so no
+    // later failure may be allowed to describe this call as a no-op: a store
+    // error is reported through `storeRecordRemoved`, not thrown.
+    let storeRecordRemoved = false;
+    try {
+      storeRecordRemoved = this.store?.deleteSession?.(session.id) ?? false;
+    } catch {
+      storeRecordRemoved = false;
+    }
     this.workspaces.delete(session.id);
     return {
       workspaceId: session.id,
@@ -931,6 +1032,73 @@ export class WorkspaceRegistry {
       headSha: audit.headSha,
       storeRecordRemoved,
       lifecycleState: session.lifecycleState,
+      outcome: "CONFIRMED_SUCCESS",
+      verification,
+    };
+  }
+
+  /**
+   * Read-only proof that a managed worktree is really gone.
+   *
+   * Two independent facts are required: the directory is absent, and Git no
+   * longer lists the path as a worktree. When either fact cannot be
+   * established, the answer is `removed: false` — an unverifiable removal is
+   * never upgraded to a confirmed one.
+   */
+  protected async verifyWorktreeRemoval(input: {
+    root: string;
+    sourceRoot: string;
+    branch: string | null;
+    headSha: string | null;
+  }): Promise<WorktreeRemovalVerification> {
+    let directoryRemoved = false;
+    try {
+      directoryRemoved = !(await stat(input.root)).isDirectory();
+    } catch (error) {
+      // Only "the path is gone" proves removal. EACCES, ELOOP, EMFILE or a
+      // parent that is not a directory mean "cannot tell", which must stay
+      // false so the caller reports OUTCOME_UNKNOWN.
+      const code = (error as NodeJS.ErrnoException).code;
+      directoryRemoved = code === "ENOENT" || code === "ENOTDIR";
+    }
+    // `listRegisteredWorktrees` already answers `null` when Git cannot be read;
+    // it never throws. `registered: null` therefore means "unknown", not "not
+    // registered".
+    const worktrees = await listRegisteredWorktrees(input.sourceRoot);
+    const registered = worktrees
+      ? worktrees.has(canonicalPath(input.root))
+      : null;
+    let branchSha: string | null = null;
+    let branchPreserved: boolean | null = null;
+    if (input.branch) {
+      try {
+        const result = await runGit(input.sourceRoot, [
+          "rev-parse",
+          "--verify",
+          `refs/heads/${input.branch}`,
+        ]);
+        branchSha = result.stdout.trim() || null;
+        branchPreserved =
+          branchSha !== null &&
+          (input.headSha === null || branchSha === input.headSha);
+      } catch {
+        // Distinguish "the branch is gone" (dangerous, report false) from
+        // "the repository cannot be read" (unknown, report null).
+        try {
+          await runGit(input.sourceRoot, ["rev-parse", "--git-dir"]);
+          branchPreserved = false;
+        } catch {
+          branchPreserved = null;
+        }
+      }
+    }
+    return {
+      directoryRemoved,
+      worktreeDeregistered: registered === false,
+      registered,
+      removed: directoryRemoved && registered === false,
+      branchPreserved,
+      branchSha,
     };
   }
 
@@ -1232,18 +1400,131 @@ export class WorkspaceRegistry {
       orphanedCount: number;
       truncated: boolean;
       entries: WorkspaceCleanupPlanEntry[];
+      /** Set when the orphan inventory itself could not be produced. */
+      error?: string;
     };
     summary: Record<WorkspaceCleanupVerdict | "TOTAL", number>;
     readOnly: true;
   }> {
     const limit = input.limit ?? 50;
     const summaries = await this.listWorkspaces(limit);
+    // `listRegisteredWorktrees` answers `null` when Git cannot be read; it never
+    // throws. Passing that through makes `auditWorkspace` fall back to a
+    // per-path registration check, which fails closed: an unreadable path is
+    // reported as `not_a_worktree`/`stale_session_record` (BLOCKED_MISSING), not
+    // as a candidate.
     const registered = await listRegisteredWorktrees(this.config.worktreeRoot);
     const entries: WorkspaceCleanupPlanEntry[] = [];
     for (const summary of summaries) {
-      const stored = this.store?.getSession(summary.workspaceId);
-      const lifecycleState =
-        stored?.lifecycleState ?? normalizeWorkspaceLifecycleState(undefined);
+      entries.push(await this.planEntryForSummary(summary, registered));
+    }
+
+    let orphanResult:
+      | { scan: WorktreeDirectoryScan; audits: WorkspaceAudit[]; truncated: boolean }
+      | undefined;
+    let orphanError: string | undefined;
+    try {
+      orphanResult = await this.orphanedWorktreeAudit({
+        limit: input.orphanLimit ?? 50,
+        registeredWorktrees: registered,
+      });
+    } catch (error) {
+      // One unreadable directory must not hide every workspace's verdict, but
+      // the plan must not pretend the orphan inventory succeeded either.
+      orphanError = error instanceof Error ? error.message : String(error);
+    }
+
+    const orphanEntries: WorkspaceCleanupPlanEntry[] = [];
+    if (input.includeOrphans && orphanResult) {
+      for (const audit of orphanResult.audits) {
+        try {
+          orphanEntries.push(
+            await this.toPlanEntry(audit, {
+              workspaceId: null,
+              lifecycleState: null,
+              managed: false,
+              registeredWorktrees: registered,
+              activity: {
+                sessionState: null,
+                liveLeases: 0,
+                activeJobIds: audit.activeJobIds,
+                activeGameSessionIds: audit.activeGameSessionIds,
+                activeTaskSessionIds: audit.activeTaskSessionIds,
+              },
+            }),
+          );
+        } catch (error) {
+          orphanEntries.push(
+            this.unknownPlanEntry({
+              root: audit.root,
+              workspaceId: null,
+              mode: "worktree",
+              managed: false,
+              lifecycleState: null,
+              reason: `the orphan entry could not be classified: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            }),
+          );
+        }
+      }
+    }
+
+    const summary: Record<WorkspaceCleanupVerdict | "TOTAL", number> = {
+      SAFE_CANDIDATE: 0,
+      BLOCKED_ACTIVE: 0,
+      BLOCKED_DIRTY: 0,
+      BLOCKED_UNMERGED: 0,
+      BLOCKED_PROTECTED: 0,
+      BLOCKED_NOT_MANAGED: 0,
+      BLOCKED_MISSING: 0,
+      UNKNOWN: 0,
+      TOTAL: entries.length,
+    };
+    for (const entry of entries) summary[entry.verdict] += 1;
+
+    return {
+      auditedAt: this.now(),
+      entries,
+      orphans: {
+        worktreeRoot: orphanResult?.scan.worktreeRoot ?? this.config.worktreeRoot,
+        directoryCount: orphanResult?.scan.directories.length ?? 0,
+        orphanedCount: orphanResult?.scan.orphaned.length ?? 0,
+        truncated:
+          orphanError !== undefined ||
+          (orphanResult?.truncated ?? false) ||
+          (input.includeOrphans === true &&
+            orphanEntries.length < (orphanResult?.scan.orphaned.length ?? 0)),
+        entries: orphanEntries,
+        ...(orphanError ? { error: orphanError } : {}),
+      },
+      summary,
+      readOnly: true,
+    };
+  }
+
+  /**
+   * Classify one stored workspace for the plan.
+   *
+   * A single damaged record must not hide every other verdict, so a failure
+   * here becomes an explicit UNKNOWN entry carrying the reason. UNKNOWN is
+   * never reclaimable: the fallback cannot be mistaken for a safe candidate.
+   */
+  private async planEntryForSummary(
+    summary: {
+      workspaceId: string;
+      root: string;
+      mode: "checkout" | "worktree";
+      managed: boolean;
+      createdAt: string;
+      lastUsedAt: string;
+    },
+    registered: Set<string> | null,
+  ): Promise<WorkspaceCleanupPlanEntry> {
+    const stored = this.store?.getSession(summary.workspaceId);
+    const lifecycleState =
+      stored?.lifecycleState ?? normalizeWorkspaceLifecycleState(undefined);
+    try {
       const activity: WorkspaceSessionActivity =
         await this.sessionActivityWithProcesses(
           stored ?? {
@@ -1264,69 +1545,68 @@ export class WorkspaceRegistry {
         protectedWorktreePatterns:
           this.config.worktreeCleanup?.protectedWorktreePatterns,
       });
-      entries.push(
-        await this.toPlanEntry(audit, {
-          workspaceId: summary.workspaceId,
-          lifecycleState,
-          managed: summary.managed,
-          registeredWorktrees: registered,
-          activity,
-        }),
-      );
+      return await this.toPlanEntry(audit, {
+        workspaceId: summary.workspaceId,
+        lifecycleState,
+        managed: summary.managed,
+        registeredWorktrees: registered,
+        activity,
+      });
+    } catch (error) {
+      return this.unknownPlanEntry({
+        root: summary.root,
+        workspaceId: summary.workspaceId,
+        mode: summary.mode,
+        managed: summary.managed,
+        lifecycleState,
+        reason: `the workspace could not be audited: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
     }
+  }
 
-    const orphanResult = await this.orphanedWorktreeAudit({
-      limit: input.orphanLimit ?? 50,
-      registeredWorktrees: registered,
-    });
-    const orphanEntries = input.includeOrphans
-      ? await Promise.all(
-          orphanResult.audits.map((audit) =>
-            this.toPlanEntry(audit, {
-              workspaceId: null,
-              lifecycleState: null,
-              managed: false,
-              registeredWorktrees: registered,
-              activity: {
-                sessionState: null,
-                liveLeases: 0,
-                activeJobIds: audit.activeJobIds,
-                activeGameSessionIds: audit.activeGameSessionIds,
-                activeTaskSessionIds: audit.activeTaskSessionIds,
-              },
-            }),
-          ),
-        )
-      : [];
-
-    const summary: Record<WorkspaceCleanupVerdict | "TOTAL", number> = {
-      SAFE_CANDIDATE: 0,
-      BLOCKED_ACTIVE: 0,
-      BLOCKED_DIRTY: 0,
-      BLOCKED_UNMERGED: 0,
-      BLOCKED_PROTECTED: 0,
-      BLOCKED_NOT_MANAGED: 0,
-      BLOCKED_MISSING: 0,
-      UNKNOWN: 0,
-      TOTAL: entries.length,
-    };
-    for (const entry of entries) summary[entry.verdict] += 1;
-
+  /**
+   * The fail-closed entry for anything the plan could not classify.
+   *
+   * It reports what is known (path, record id, session state) and refuses to
+   * claim anything else: `reclaimable` is false and the reason is carried in
+   * `blockedReasons`, so a caller can neither miss it nor act on it.
+   */
+  private unknownPlanEntry(input: {
+    root: string;
+    workspaceId: string | null;
+    mode: "checkout" | "worktree";
+    managed: boolean;
+    lifecycleState: WorkspaceLifecycleState | null;
+    reason: string;
+  }): WorkspaceCleanupPlanEntry {
     return {
-      auditedAt: this.now(),
-      entries,
-      orphans: {
-        worktreeRoot: orphanResult.scan.worktreeRoot,
-        directoryCount: orphanResult.scan.directories.length,
-        orphanedCount: orphanResult.scan.orphaned.length,
-        truncated:
-          orphanResult.truncated ||
-          (input.includeOrphans === true &&
-            orphanEntries.length < orphanResult.scan.orphaned.length),
-        entries: orphanEntries,
-      },
-      summary,
-      readOnly: true,
+      workspaceId: input.workspaceId,
+      root: input.root,
+      mode: input.mode,
+      managed: input.managed,
+      branch: null,
+      detached: false,
+      headSha: null,
+      clean: false,
+      dirtyFileCount: 0,
+      untrackedFileCount: 0,
+      unmergedCommitCount: 0,
+      hasRunningTask: false,
+      activeJobIds: [],
+      activeGameSessionIds: [],
+      activeTaskSessionIds: [],
+      sessionState: input.lifecycleState,
+      sessionIsLive: false,
+      liveLeases: 0,
+      staleRecord: false,
+      isManagedWorktree: input.managed && input.mode === "worktree",
+      verdict: "UNKNOWN",
+      reclaimable: false,
+      blockedReasons: [input.reason],
+      risks: [],
+      branchDelete: undefined,
     };
   }
 
@@ -1512,6 +1792,18 @@ export class WorkspaceRegistry {
       }
     }
     return false;
+  }
+
+  /**
+   * The persisted record for an id, without attaching it to the in-memory
+   * registry, touching `lastUsedAt`, or throwing when it is gone.
+   *
+   * Lifecycle tools need this to tell "this id was never/ no longer a record"
+   * apart from "a live workspace could not be resolved", which are different
+   * answers and must not collapse into one error.
+   */
+  storedSession(workspaceId: string): ReturnType<WorkspaceStore["getSession"]> {
+    return this.store?.getSession(workspaceId);
   }
 
   /**

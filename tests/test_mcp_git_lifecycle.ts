@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -125,6 +125,8 @@ try {
   await client.connect(clientTransport);
 
   let workspaceId = "";
+  let workspaceRoot = "";
+  let workspaceBranch = "";
 
   check("both new tools are registered with exact schemas", async () => {
     const list = await client.listTools();
@@ -182,6 +184,8 @@ try {
     const opened = structured<{ workspaceId: string; root: string }>(result);
     assert.ok(opened.workspaceId, textOf(result));
     workspaceId = opened.workspaceId;
+    workspaceRoot = opened.root;
+    workspaceBranch = git(workspaceRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
   });
 
   check("list_workspaces(cleanupPlan) returns a read-only plan", async () => {
@@ -380,6 +384,61 @@ try {
     });
     assert.equal(isToolError(result), true);
     assert.match(textOf(result), /WORKSPACE_RECLAIM_(HEAD_MISMATCH|UNSAFE)/);
+  });
+
+  check("reclaim_workspace reports CONFIRMED_SUCCESS over MCP, never a false negative", async () => {
+    // The regression this guards: the tool used to remove the worktree and then
+    // fail while observing the record it had just deleted, so a successful
+    // removal surfaced as WORKSPACE_NOT_FOUND.
+    const closed = await client.callTool({
+      name: "close_workspace_session",
+      arguments: { workspaceId, confirmWorkspaceId: workspaceId },
+    });
+    assert.equal(isToolError(closed), false, textOf(closed));
+
+    const listed = await client.callTool({
+      name: "list_workspaces",
+      arguments: { audit: true, limit: 10 },
+    });
+    const audit = structured<{
+      audits: Array<{ workspaceId: string; headSha: string | null }>;
+    }>(listed);
+    const entry = audit.audits.find((item) => item.workspaceId === workspaceId);
+    assert.ok(entry?.headSha, "the audit must report the worktree HEAD");
+    const headSha = entry.headSha;
+
+    const result = await client.callTool({
+      name: "reclaim_workspace",
+      arguments: { workspaceId, expectedHeadSha: headSha, confirmWorkspaceId: workspaceId },
+    });
+    assert.equal(isToolError(result), false, textOf(result));
+    const payload = structured<{
+      outcome: string;
+      verification?: { removed: boolean; branchPreserved: boolean | null };
+      reclaimed?: { storeRecordRemoved: boolean };
+    }>(result);
+    assert.equal(payload.outcome, "CONFIRMED_SUCCESS");
+    assert.equal(payload.verification?.removed, true);
+    assert.equal(payload.reclaimed?.storeRecordRemoved, true);
+    assert.equal(existsSync(workspaceRoot), false, "the worktree directory must be gone");
+    assert.equal(
+      git(repo, ["rev-parse", `refs/heads/${workspaceBranch}`]),
+      headSha,
+      "the branch and its commit must survive the reclaim",
+    );
+
+    // A duplicate call must be a clear no-mutation answer, not a second delete.
+    const again = await client.callTool({
+      name: "reclaim_workspace",
+      arguments: { workspaceId, expectedHeadSha: headSha, confirmWorkspaceId: workspaceId },
+    });
+    assert.equal(isToolError(again), true);
+    assert.match(textOf(again), /WORKSPACE_RECLAIM_RECORD_MISSING/);
+    assert.equal(
+      structured<{ outcome: string }>(again).outcome,
+      "CONFIRMED_NO_MUTATION",
+    );
+    assert.equal(existsSync(workspaceRoot), false);
   });
 
   // Run every check, then report.
