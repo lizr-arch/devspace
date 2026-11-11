@@ -1,0 +1,10 @@
+{
+  "method": "tools/call",
+  "name": "opencode_test_session_send",
+  "arguments": {
+    "workspaceId": "ws_e82a6601-6fa2-4443-ae08-ac9d879b2f0e",
+    "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "operationId": "opencode-native-session-001-turn-1",
+    "text": "For this acceptance, use an actual filesystem tool to create `.devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt` containing exactly `NATIVE_SESSION_CONTEXT_7F3A`. Then report the exact path and content. Do not change any other files."
+  }
+}

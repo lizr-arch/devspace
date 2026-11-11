@@ -1,0 +1,39 @@
+{
+  "httpStatus": 200,
+  "ok": true,
+  "body": {
+    "result": {
+      "_meta": {
+        "tool": "opencode_test_session_send",
+        "error": {
+          "code": "GENERIC_TOOL_ERROR",
+          "layer": "tool",
+          "message": "OPENCODE_TEST_DIRECTORY_NOT_AUTHORIZED",
+          "retryable": false,
+          "safeToRetry": false,
+          "recoveryHint": "Review the error message details and parameters before retrying."
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "[GENERIC_TOOL_ERROR] OPENCODE_TEST_DIRECTORY_NOT_AUTHORIZED\nRecovery Hint: Review the error message details and parameters before retrying."
+        }
+      ],
+      "structuredContent": {
+        "error": {
+          "code": "GENERIC_TOOL_ERROR",
+          "layer": "tool",
+          "message": "OPENCODE_TEST_DIRECTORY_NOT_AUTHORIZED",
+          "retryable": false,
+          "safeToRetry": false,
+          "recoveryHint": "Review the error message details and parameters before retrying."
+        },
+        "result": "[GENERIC_TOOL_ERROR] OPENCODE_TEST_DIRECTORY_NOT_AUTHORIZED\nRecovery Hint: Review the error message details and parameters before retrying."
+      },
+      "isError": true
+    },
+    "jsonrpc": "2.0",
+    "id": 8
+  }
+}

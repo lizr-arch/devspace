@@ -1,0 +1,30 @@
+{
+  "data": {
+    "id": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "projectID": "c16468d455c5925be5366eddb018d34629cd844a",
+    "agent": "build",
+    "model": {
+      "id": "gpt-6-luna",
+      "providerID": "openai",
+      "variant": "medium"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "time": {
+      "created": 1794400402959,
+      "updated": 1794400402959
+    },
+    "title": "DEVSPACE OpenCode native Session adapter acceptance",
+    "location": {
+      "directory": "/Users/liz/agy/projects/DEVSPACE-OPENCODE-NATIVE-SESSION-001"
+    }
+  }
+}

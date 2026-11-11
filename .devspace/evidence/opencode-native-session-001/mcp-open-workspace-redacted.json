@@ -1,0 +1,71 @@
+{
+  "httpStatus": 200,
+  "ok": true,
+  "body": {
+    "result": {
+      "_meta": {
+        "tool": "open_workspace",
+        "card": {
+          "workspaceId": "ws_e82a6601-6fa2-4443-ae08-ac9d879b2f0e",
+          "root": "/Users/liz/agy/projects/DEVSPACE-OPENCODE-NATIVE-SESSION-001",
+          "path": "/Users/liz/agy/projects/DEVSPACE-OPENCODE-NATIVE-SESSION-001",
+          "summary": {
+            "agentsFiles": 2,
+            "availableAgentsFiles": 0,
+            "skills": 2,
+            "skillDiagnostics": 0
+          }
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Opened workspace ws_e82a6601-6fa2-4443-ae08-ac9d879b2f0e (session reused)\nRoot: /Users/liz/agy/projects/DEVSPACE-OPENCODE-NATIVE-SESSION-001\nMode: checkout\nLoaded project instructions: /Users/liz/.codex/AGENTS.md, AGENTS.md\nAvailable skills: chronicle, devspace-webgpt-coach\nProject Memory SHADOW: unconfigured; decision=none; receipt=none\nUse this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. Project Memory did not issue a receipt. SHADOW does not block existing tools; call project_memory_preflight again when the task changes."
+        }
+      ],
+      "structuredContent": {
+        "workspaceId": "ws_e82a6601-6fa2-4443-ae08-ac9d879b2f0e",
+        "root": "/Users/liz/agy/projects/DEVSPACE-OPENCODE-NATIVE-SESSION-001",
+        "mode": "checkout",
+        "agentsFiles": [
+          {
+            "path": "/Users/liz/.codex/AGENTS.md",
+            "content": ""
+          },
+          {
+            "path": "AGENTS.md",
+            "content": "# DevSpace\n\nThis project exposes a local development workspace over MCP so ChatGPT, Claude,  \nor another MCP-capable host can operate directly on this machine's approved  \ndevelopment directories.\n\nThe goal is not to delegate work to a separate local coding agent. The MCP host  \nshould call tools that read files, edit files, search code, and run shell  \ncommands directly against approved local project roots.\n\nPi's SDK is currently used as the backend adapter for mature local coding  \nprimitives such as read, edit, write, grep, find, ls, and bash. DevSpace wraps  \nthose primitives behind a remote Streamable HTTP MCP interface, suitable for use  \nthrough a Cloudflare Tunnel.\n\nThe model-facing workflow is workspace based. MCP clients should call  \n`open_workspace` once per local project directory or worktree, then reuse the  \nreturned `workspaceId` for subsequent tool calls in that same folder. Do not  \ncall `open_workspace` again for the same folder unless the `workspaceId` is  \nrejected as unknown, the client switches folders/worktrees or checkout/worktree  \nmode, or the user explicitly asks to reopen. `AGENTS.md` files are returned  \nautomatically by `open_workspace` and by later tool calls when the requested path  \nenters a directory with instructions that have not been loaded for that  \nworkspace.\n\nReliability and Idempotency Guidelines:\n\n- **Idempotent Mutations**: Pass `operationId` on mutating tool calls (`write_file`,  \n  `edit_file`, `project_task`). If a network interruption occurs, replaying the  \n  request with the same `operationId` safely returns the cached result without  \n  side-effects.\n- **Network Recovery**: If an operation status is uncertain after a timeout or  \n  transport reset, call `query_operation` with the `operationId` before retrying.\n- **Actionable Self-Healing**: When a tool call returns an error, follow the  \n  provided `recoveryHint` and `nextRecommendedTools` instead of blindly retrying  \n  the identical payload.\n\nCore constraints:\n\n- Treat this as remote access to the local machine; security is part of the  \n  core design, not a later add-on.\n- Start with a narrow filesystem allowlist.\n- Prefer explicit, inspectable tool calls over autonomous local agent loops.\n- Keep the first version small enough to validate with real ChatGPT/Claude MCP  \n  clients before adding UI or workflow features.\n"
+          }
+        ],
+        "availableAgentsFiles": [],
+        "skills": [
+          {
+            "name": "chronicle",
+            "description": "Allows you to view the user's screen as well as several hours of history. Use when the user makes a reference to their recent work, for which it'd be helpful to see the screen. This skill MUST be used whenever you need to resolve ambiguity in a user request, where the user hasn't specified enough context to do the task. Examples include disambiguating the specific user/app/document/error the user is referring to.\n\nYou must also use this skill if the user asks about any question regarding Chronicle or asks what you can see from the screen.\n",
+            "path": "~/.codex/skills/chronicle/SKILL.md"
+          },
+          {
+            "name": "devspace-webgpt-coach",
+            "description": "Coordinate and independently review native Codex CLI development through DevSpace MCP from ChatGPT Web. Use for requests mentioning DevSpace Coach, Codex CLI, Web GPT review, unattended iterative development, multi-chat/multi-worktree Codex sessions, approved test gates, or Chrome Coach notification delivery.",
+            "path": "~/.codex/skills/devspace-webgpt-coach/SKILL.md"
+          }
+        ],
+        "skillDiagnostics": [],
+        "projectMemory": {
+          "status": "unconfigured",
+          "wouldDeny": false,
+          "denialReasons": []
+        },
+        "requestedAdditionalRoots": [],
+        "effectiveAdditionalRoots": [],
+        "rejectedAdditionalRoots": [],
+        "additionalRootsScope": "in_memory_session",
+        "additionalRootsPersisted": false,
+        "reused": true,
+        "instruction": "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. Project Memory did not issue a receipt. SHADOW does not block existing tools; call project_memory_preflight again when the task changes."
+      }
+    },
+    "jsonrpc": "2.0",
+    "id": 3
+  }
+}

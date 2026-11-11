@@ -1,0 +1,18 @@
+{
+  "method": "POST",
+  "path": "/api/session",
+  "service": "http://127.0.0.1:49374",
+  "headers": {
+    "x-opencode-directory": "/Users/liz/agy/projects/DEVSPACE-OPENCODE-NATIVE-SESSION-001"
+  },
+  "body": {
+    "title": "DEVSPACE OpenCode native Session adapter acceptance",
+    "agent": "build",
+    "model": {
+      "providerID": "openai",
+      "id": "gpt-6-luna",
+      "variant": "medium"
+    }
+  },
+  "note": "Deliberate setup mistake: body.location was omitted; OpenCode created the Session under /Users/liz. This Session was never messaged."
+}

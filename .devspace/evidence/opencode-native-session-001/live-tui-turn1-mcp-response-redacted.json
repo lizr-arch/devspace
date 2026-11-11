@@ -1,0 +1,76 @@
+{
+  "httpStatus": 200,
+  "ok": true,
+  "body": {
+    "result": {
+      "_meta": {
+        "tool": "opencode_test_session_send"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "OpenCode turn completed in authorized Session ses_e3566c1f3ffeCFWoDxZB8A9EUz."
+        }
+      ],
+      "structuredContent": {
+        "result": "OpenCode test Session turn",
+        "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+        "userMessageId": "msg_1cac93fb8001Em62qkVI91bpKj",
+        "assistantMessageId": "msg_1cac94ba8001vO2BRJBIfqhkBA",
+        "model": {
+          "id": "gpt-6-luna",
+          "providerID": "openai",
+          "variant": "medium"
+        },
+        "assistant": {
+          "id": "msg_1cac94ba8001vO2BRJBIfqhkBA",
+          "time": {
+            "created": 1794403552169,
+            "streamed": 1794403556694,
+            "completed": 1794403556720
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "gpt-6-luna",
+            "providerID": "openai",
+            "variant": "medium"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Command: `printf %s LIVE_TUI_EXECUTION_91BD > .devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt`\n\nResult: created `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt` containing exactly `LIVE_TUI_EXECUTION_91BD`.",
+              "native": {
+                "itemId": "msg_0574ce99917a584f016af46ce35e8087d2be74d423bf3f868a",
+                "phase": "final_answer"
+              }
+            }
+          ],
+          "snapshot": {
+            "start": "9970ca764e1361f939560b1f34f75479abb9cf57",
+            "end": "9970ca764e1361f939560b1f34f75479abb9cf57",
+            "files": []
+          },
+          "finish": "stop",
+          "native": {
+            "responseId": "resp_0574ce99917a584f016af46ce297dc87d2a25b077d043a7757",
+            "serviceTier": "default"
+          },
+          "cost": 0,
+          "tokens": {
+            "input": 141,
+            "output": 72,
+            "reasoning": 0,
+            "cache": {
+              "read": 10240,
+              "write": 0
+            }
+          }
+        },
+        "receipt": "COMPLETED"
+      }
+    },
+    "jsonrpc": "2.0",
+    "id": 10
+  }
+}

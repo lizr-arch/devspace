@@ -1,0 +1,10 @@
+{
+  "method": "tools/call",
+  "name": "opencode_test_session_send",
+  "arguments": {
+    "workspaceId": "ws_e82a6601-6fa2-4443-ae08-ac9d879b2f0e",
+    "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "operationId": "opencode-native-session-001-live-tui-turn-1",
+    "text": "While this Session is open in its original visible TUI, use a shell tool to create `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt` containing exactly `LIVE_TUI_EXECUTION_91BD`. Report the command and result. Do not modify other files."
+  }
+}

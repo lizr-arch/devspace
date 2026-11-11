@@ -114,6 +114,7 @@ import { startNativeEventSnapshotRefresher } from "./coach-native-snapshot.js";
 import { publishNativeReceipt } from "./coach-native-events.js";
 import { registerCodexReviewTools } from "./server/tools-codex-review.js";
 import { registerAgentAuditTools } from "./server/tools-agent-audit.js";
+import { registerOpenCodeSessionTestTool } from "./server/tools-opencode-session.js";
 import {
   LiveRequestMonitor,
   ProcessResourceMonitor,
@@ -200,6 +201,7 @@ export function createMcpServer(ctx: ServerContext): McpServer {
   registerCodexReviewTools(server, ctx);
   registerCoachRealtimeTools(server, ctx);
   registerAgentAuditTools(server, ctx);
+  registerOpenCodeSessionTestTool(server, ctx);
 
   return server;
 }

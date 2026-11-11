@@ -1,0 +1,419 @@
+{
+  "target": {
+    "base": "http://127.0.0.1:49375",
+    "resource": "http://127.0.0.1:49375/mcp",
+    "redirect": "http://127.0.0.1:49376/oauth/callback",
+    "scope": "devspace"
+  },
+  "health": {
+    "status": 200,
+    "ok": true
+  },
+  "protected": {
+    "status": 200,
+    "ok": true
+  },
+  "protectedMetadata": {
+    "resource": "http://127.0.0.1:49375/mcp",
+    "authorization_servers": [
+      "http://127.0.0.1:49375/"
+    ],
+    "scopes_supported": [
+      "devspace"
+    ],
+    "resource_name": "DevSpace"
+  },
+  "authorizationServer": {
+    "status": 200,
+    "ok": true
+  },
+  "authorizationServerMetadata": {
+    "issuer": "http://127.0.0.1:49375/",
+    "authorization_endpoint": "http://127.0.0.1:49375/authorize",
+    "response_types_supported": [
+      "code"
+    ],
+    "code_challenge_methods_supported": [
+      "S256"
+    ],
+    "token_endpoint": "http://127.0.0.1:49375/token",
+    "token_endpoint_auth_methods_supported": [
+      "client_secret_post",
+      "none"
+    ],
+    "grant_types_supported": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "scopes_supported": [
+      "devspace"
+    ],
+    "revocation_endpoint": "http://127.0.0.1:49375/revoke",
+    "revocation_endpoint_auth_methods_supported": [
+      "client_secret_post"
+    ],
+    "registration_endpoint": "http://127.0.0.1:49375/register"
+  },
+  "endpointValidation": "PASS",
+  "registration": {
+    "status": 201,
+    "ok": true,
+    "redirectUri": "http://127.0.0.1:49376/oauth/callback",
+    "clientIdIssued": true,
+    "clientSecretIssued": true
+  },
+  "authorization": {
+    "status": 302,
+    "ok": true,
+    "redirectOrigin": "http://127.0.0.1:49376",
+    "redirectPath": "/oauth/callback",
+    "stateMatches": true,
+    "codeIssued": true
+  },
+  "tokenExchange": {
+    "status": 200,
+    "ok": true,
+    "accessTokenIssued": true,
+    "tokenType": "bearer",
+    "scope": "devspace"
+  },
+  "initialize": {
+    "status": 200,
+    "ok": true,
+    "protocolVersion": "2024-11-05"
+  },
+  "toolsList": {
+    "status": 200,
+    "ok": true,
+    "count": 104,
+    "authorizedSessionToolRegistered": true
+  },
+  "openWorkspace": {
+    "httpStatus": 200,
+    "workspaceIdPresent": true
+  },
+  "turn1": {
+    "httpStatus": 200,
+    "ok": true,
+    "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "assistantId": "msg_1cac51cd6001XQGFygZt8DqQi3",
+    "result": {
+      "result": {
+        "_meta": {
+          "tool": "opencode_test_session_send"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "OpenCode turn completed in authorized Session ses_e3566c1f3ffeCFWoDxZB8A9EUz."
+          }
+        ],
+        "structuredContent": {
+          "result": "OpenCode test Session turn",
+          "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+          "userMessageId": "msg_1cac50f5d001i90QNfgOPof1E1",
+          "assistantMessageId": "msg_1cac51cd6001XQGFygZt8DqQi3",
+          "model": {
+            "id": "gpt-6-luna",
+            "providerID": "openai",
+            "variant": "medium"
+          },
+          "assistant": {
+            "id": "msg_1cac51cd6001XQGFygZt8DqQi3",
+            "time": {
+              "created": 1794403278039,
+              "streamed": 1794403281096,
+              "completed": 1794403281106
+            },
+            "type": "assistant",
+            "agent": "build",
+            "model": {
+              "id": "gpt-6-luna",
+              "providerID": "openai",
+              "variant": "medium"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Created `.devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt` with exactly:\n\n`NATIVE_SESSION_CONTEXT_7F3A`",
+                "native": {
+                  "itemId": "msg_0574ce99917a584f016af46bd090a887d29319fb7234a45757",
+                  "phase": "final_answer"
+                }
+              }
+            ],
+            "snapshot": {
+              "start": "42970d84b88e730d093894a2777de8a90b3cde2b",
+              "end": "42970d84b88e730d093894a2777de8a90b3cde2b",
+              "files": []
+            },
+            "finish": "stop",
+            "native": {
+              "responseId": "resp_0574ce99917a584f016af46bcffdac87d2a3cbcda420f33b03",
+              "serviceTier": "default"
+            },
+            "cost": 0,
+            "tokens": {
+              "input": 277,
+              "output": 38,
+              "reasoning": 0,
+              "cache": {
+                "read": 9856,
+                "write": 0
+              }
+            }
+          },
+          "receipt": "COMPLETED"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 4
+    }
+  },
+  "turn2": {
+    "httpStatus": 200,
+    "ok": true,
+    "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "assistantId": "msg_1cac52a51001yUxMOLCsSr18n9",
+    "result": {
+      "result": {
+        "_meta": {
+          "tool": "opencode_test_session_send"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "OpenCode turn completed in authorized Session ses_e3566c1f3ffeCFWoDxZB8A9EUz."
+          }
+        ],
+        "structuredContent": {
+          "result": "OpenCode test Session turn",
+          "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+          "userMessageId": "msg_1cac52a4c001Y85JStD9LJSW2O",
+          "assistantMessageId": "msg_1cac52a51001yUxMOLCsSr18n9",
+          "model": {
+            "id": "gpt-6-luna",
+            "providerID": "openai",
+            "variant": "medium"
+          },
+          "assistant": {
+            "id": "msg_1cac52a51001yUxMOLCsSr18n9",
+            "time": {
+              "created": 1794403281491,
+              "streamed": 1794403284935,
+              "completed": 1794403284958
+            },
+            "type": "assistant",
+            "agent": "build",
+            "model": {
+              "id": "gpt-6-luna",
+              "providerID": "openai",
+              "variant": "medium"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "You asked for the marker `NATIVE_SESSION_CONTEXT_7F3A` in `.devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt`. I created it.",
+                "native": {
+                  "itemId": "msg_0574ce99917a584f016af46bd3c67c87d2ae906130de1b31e3",
+                  "phase": "final_answer"
+                }
+              }
+            ],
+            "snapshot": {
+              "start": "9f98989901b33b96afd4ac0d7dbd802c5730f74a",
+              "end": "9f98989901b33b96afd4ac0d7dbd802c5730f74a",
+              "files": []
+            },
+            "finish": "stop",
+            "native": {
+              "responseId": "resp_0574ce99917a584f016af46bd32f2087d282ef84d8e12be6ef",
+              "serviceTier": "default"
+            },
+            "cost": 0,
+            "tokens": {
+              "input": 227,
+              "output": 44,
+              "reasoning": 0,
+              "cache": {
+                "read": 9984,
+                "write": 0
+              }
+            }
+          },
+          "receipt": "COMPLETED"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 5
+    }
+  },
+  "negativeWrongSession": {
+    "rejected": true,
+    "httpStatus": 200
+  },
+  "negativeWrongDirectory": {
+    "rejected": true,
+    "httpStatus": 200
+  },
+  "negativeUnapprovedSession": {
+    "rejected": true,
+    "httpStatus": 200,
+    "sessionId": "ses_e3566fc25ffesLKNtg891uDT54"
+  },
+  "liveTuiTurn1": {
+    "httpStatus": 200,
+    "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "assistantId": "msg_1cac94ba8001vO2BRJBIfqhkBA",
+    "result": {
+      "result": {
+        "_meta": {
+          "tool": "opencode_test_session_send"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "OpenCode turn completed in authorized Session ses_e3566c1f3ffeCFWoDxZB8A9EUz."
+          }
+        ],
+        "structuredContent": {
+          "result": "OpenCode test Session turn",
+          "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+          "userMessageId": "msg_1cac93fb8001Em62qkVI91bpKj",
+          "assistantMessageId": "msg_1cac94ba8001vO2BRJBIfqhkBA",
+          "model": {
+            "id": "gpt-6-luna",
+            "providerID": "openai",
+            "variant": "medium"
+          },
+          "assistant": {
+            "id": "msg_1cac94ba8001vO2BRJBIfqhkBA",
+            "time": {
+              "created": 1794403552169,
+              "streamed": 1794403556694,
+              "completed": 1794403556720
+            },
+            "type": "assistant",
+            "agent": "build",
+            "model": {
+              "id": "gpt-6-luna",
+              "providerID": "openai",
+              "variant": "medium"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Command: `printf %s LIVE_TUI_EXECUTION_91BD > .devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt`\n\nResult: created `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt` containing exactly `LIVE_TUI_EXECUTION_91BD`.",
+                "native": {
+                  "itemId": "msg_0574ce99917a584f016af46ce35e8087d2be74d423bf3f868a",
+                  "phase": "final_answer"
+                }
+              }
+            ],
+            "snapshot": {
+              "start": "9970ca764e1361f939560b1f34f75479abb9cf57",
+              "end": "9970ca764e1361f939560b1f34f75479abb9cf57",
+              "files": []
+            },
+            "finish": "stop",
+            "native": {
+              "responseId": "resp_0574ce99917a584f016af46ce297dc87d2a25b077d043a7757",
+              "serviceTier": "default"
+            },
+            "cost": 0,
+            "tokens": {
+              "input": 141,
+              "output": 72,
+              "reasoning": 0,
+              "cache": {
+                "read": 10240,
+                "write": 0
+              }
+            }
+          },
+          "receipt": "COMPLETED"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 10
+    }
+  },
+  "liveTuiTurn2": {
+    "httpStatus": 200,
+    "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "assistantId": "msg_1cac95f3f001k08VclxAqAKquw",
+    "result": {
+      "result": {
+        "_meta": {
+          "tool": "opencode_test_session_send"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "OpenCode turn completed in authorized Session ses_e3566c1f3ffeCFWoDxZB8A9EUz."
+          }
+        ],
+        "structuredContent": {
+          "result": "OpenCode test Session turn",
+          "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+          "userMessageId": "msg_1cac95f3b001inTRmm6JFiWKjG",
+          "assistantMessageId": "msg_1cac95f3f001k08VclxAqAKquw",
+          "model": {
+            "id": "gpt-6-luna",
+            "providerID": "openai",
+            "variant": "medium"
+          },
+          "assistant": {
+            "id": "msg_1cac95f3f001k08VclxAqAKquw",
+            "time": {
+              "created": 1794403557184,
+              "streamed": 1794403560521,
+              "completed": 1794403560535
+            },
+            "type": "assistant",
+            "agent": "build",
+            "model": {
+              "id": "gpt-6-luna",
+              "providerID": "openai",
+              "variant": "medium"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Marker: `LIVE_TUI_EXECUTION_91BD`  \nPath: `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt`\n\nConfirmed: the shell command completed.",
+                "native": {
+                  "itemId": "msg_0574ce99917a584f016af46ce781dc87d29ce3c3d84d766425",
+                  "phase": "final_answer"
+                }
+              }
+            ],
+            "snapshot": {
+              "start": "6886a196031f451b9e833760061d909bad00fed4",
+              "end": "6886a196031f451b9e833760061d909bad00fed4",
+              "files": []
+            },
+            "finish": "stop",
+            "native": {
+              "responseId": "resp_0574ce99917a584f016af46ce650dc87d2926ee1bd419e90b8",
+              "serviceTier": "default"
+            },
+            "cost": 0,
+            "tokens": {
+              "input": 244,
+              "output": 45,
+              "reasoning": 0,
+              "cache": {
+                "read": 10240,
+                "write": 0
+              }
+            }
+          },
+          "receipt": "COMPLETED"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 11
+    }
+  },
+  "sessionMessageCount": 14
+}

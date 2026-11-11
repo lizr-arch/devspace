@@ -1,0 +1,392 @@
+{
+  "data": [
+    {
+      "id": "msg_1cac96c58002sb7bcQ3lEAIVTX",
+      "time": {
+        "created": 1794403560536
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_1cac95f3f001k08VclxAqAKquw",
+      "time": {
+        "created": 1794403557184,
+        "streamed": 1794403560521,
+        "completed": 1794403560535
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-6-luna",
+        "providerID": "openai",
+        "variant": "medium"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Marker: `LIVE_TUI_EXECUTION_91BD`  \nPath: `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt`\n\nConfirmed: the shell command completed.",
+          "native": {
+            "itemId": "msg_0574ce99917a584f016af46ce781dc87d29ce3c3d84d766425",
+            "phase": "final_answer"
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "6886a196031f451b9e833760061d909bad00fed4",
+        "end": "6886a196031f451b9e833760061d909bad00fed4",
+        "files": []
+      },
+      "finish": "stop",
+      "native": {
+        "responseId": "resp_0574ce99917a584f016af46ce650dc87d2926ee1bd419e90b8",
+        "serviceTier": "default"
+      },
+      "cost": 0,
+      "tokens": {
+        "input": 244,
+        "output": 45,
+        "reasoning": 0,
+        "cache": {
+          "read": 10240,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1cac95f3b001inTRmm6JFiWKjG",
+      "time": {
+        "created": 1794403557181
+      },
+      "text": "Without reopening or reading the file, recall exactly the marker and path from my immediately previous message, and confirm the command completed.",
+      "type": "user"
+    },
+    {
+      "id": "msg_1cac95d76001uCCdMwFp1i9pDe",
+      "time": {
+        "created": 1794403556726
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_1cac94ba8001vO2BRJBIfqhkBA",
+      "time": {
+        "created": 1794403552169,
+        "streamed": 1794403556694,
+        "completed": 1794403556720
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-6-luna",
+        "providerID": "openai",
+        "variant": "medium"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Command: `printf %s LIVE_TUI_EXECUTION_91BD > .devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt`\n\nResult: created `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt` containing exactly `LIVE_TUI_EXECUTION_91BD`.",
+          "native": {
+            "itemId": "msg_0574ce99917a584f016af46ce35e8087d2be74d423bf3f868a",
+            "phase": "final_answer"
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9970ca764e1361f939560b1f34f75479abb9cf57",
+        "end": "9970ca764e1361f939560b1f34f75479abb9cf57",
+        "files": []
+      },
+      "finish": "stop",
+      "native": {
+        "responseId": "resp_0574ce99917a584f016af46ce297dc87d2a25b077d043a7757",
+        "serviceTier": "default"
+      },
+      "cost": 0,
+      "tokens": {
+        "input": 141,
+        "output": 72,
+        "reasoning": 0,
+        "cache": {
+          "read": 10240,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1cac93fbf001bxSsrKUfk7Feqa",
+      "time": {
+        "created": 1794403549120,
+        "streamed": 1794403552127,
+        "completed": 1794403552164
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-6-luna",
+        "providerID": "openai",
+        "variant": "medium"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_07b8972272ee4f4589da1e61e4162556",
+          "name": "shell",
+          "executed": false,
+          "native": {
+            "itemId": "fc_0574ce99917a584f016af46cdf83b887d28fbb7fbea85daaa5"
+          },
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "printf %s LIVE_TUI_EXECUTION_91BD > .devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "(no output)"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1794403551491,
+            "ran": 1794403552038,
+            "completed": 1794403552045
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "e2eeeff3d7e5957572308ae34d7a85a34d10df7e",
+        "end": "9970ca764e1361f939560b1f34f75479abb9cf57",
+        "files": [
+          ".devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt"
+        ]
+      },
+      "finish": "tool-calls",
+      "native": {
+        "responseId": "resp_0574ce99917a584f016af46cded30c87d296712cb1b07047ec",
+        "serviceTier": "default"
+      },
+      "cost": 0,
+      "tokens": {
+        "input": 210,
+        "output": 46,
+        "reasoning": 0,
+        "cache": {
+          "read": 10112,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1cac93fb8001Em62qkVI91bpKj",
+      "time": {
+        "created": 1794403549117
+      },
+      "text": "While this Session is open in its original visible TUI, use a shell tool to create `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt` containing exactly `LIVE_TUI_EXECUTION_91BD`. Report the command and result. Do not modify other files.",
+      "type": "user"
+    },
+    {
+      "id": "msg_1cac537e1001BrPQh9vcfQ7A2W",
+      "time": {
+        "created": 1794403284961
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_1cac52a51001yUxMOLCsSr18n9",
+      "time": {
+        "created": 1794403281491,
+        "streamed": 1794403284935,
+        "completed": 1794403284958
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-6-luna",
+        "providerID": "openai",
+        "variant": "medium"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "You asked for the marker `NATIVE_SESSION_CONTEXT_7F3A` in `.devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt`. I created it.",
+          "native": {
+            "itemId": "msg_0574ce99917a584f016af46bd3c67c87d2ae906130de1b31e3",
+            "phase": "final_answer"
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9f98989901b33b96afd4ac0d7dbd802c5730f74a",
+        "end": "9f98989901b33b96afd4ac0d7dbd802c5730f74a",
+        "files": []
+      },
+      "finish": "stop",
+      "native": {
+        "responseId": "resp_0574ce99917a584f016af46bd32f2087d282ef84d8e12be6ef",
+        "serviceTier": "default"
+      },
+      "cost": 0,
+      "tokens": {
+        "input": 227,
+        "output": 44,
+        "reasoning": 0,
+        "cache": {
+          "read": 9984,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1cac52a4c001Y85JStD9LJSW2O",
+      "time": {
+        "created": 1794403281487
+      },
+      "text": "In the same conversation, without rereading the file, what exact marker and file path did I ask you to create in my previous turn? Confirm whether you created it.",
+      "type": "user"
+    },
+    {
+      "id": "msg_1cac528d3002k6M3VEznZmb0mW",
+      "time": {
+        "created": 1794403281107
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_1cac51cd6001XQGFygZt8DqQi3",
+      "time": {
+        "created": 1794403278039,
+        "streamed": 1794403281096,
+        "completed": 1794403281106
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-6-luna",
+        "providerID": "openai",
+        "variant": "medium"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Created `.devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt` with exactly:\n\n`NATIVE_SESSION_CONTEXT_7F3A`",
+          "native": {
+            "itemId": "msg_0574ce99917a584f016af46bd090a887d29319fb7234a45757",
+            "phase": "final_answer"
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "42970d84b88e730d093894a2777de8a90b3cde2b",
+        "end": "42970d84b88e730d093894a2777de8a90b3cde2b",
+        "files": []
+      },
+      "finish": "stop",
+      "native": {
+        "responseId": "resp_0574ce99917a584f016af46bcffdac87d2a3cbcda420f33b03",
+        "serviceTier": "default"
+      },
+      "cost": 0,
+      "tokens": {
+        "input": 277,
+        "output": 38,
+        "reasoning": 0,
+        "cache": {
+          "read": 9856,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1cac50f69001qBr913DydGEZnM",
+      "time": {
+        "created": 1794403274604,
+        "streamed": 1794403277978,
+        "completed": 1794403278034
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-6-luna",
+        "providerID": "openai",
+        "variant": "medium"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_6218ba3b16b64df390105225bbc951f2",
+          "name": "shell",
+          "executed": false,
+          "native": {
+            "itemId": "fc_0574ce99917a584f016af46bcd2ae487d296bff13177215459"
+          },
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "mkdir -p .devspace/evidence/opencode-native-session-001 && printf %s NATIVE_SESSION_CONTEXT_7F3A > .devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "(no output)"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1794403277146,
+            "ran": 1794403277912,
+            "completed": 1794403277933
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "5389b41f2fa7433277ce3b8c69e675d14e1e3b96",
+        "end": "42970d84b88e730d093894a2777de8a90b3cde2b",
+        "files": [
+          ".devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt"
+        ]
+      },
+      "finish": "tool-calls",
+      "native": {
+        "responseId": "resp_0574ce99917a584f016af46bcc657487d2a1903eaffbdccdff",
+        "serviceTier": "default"
+      },
+      "cost": 0,
+      "tokens": {
+        "input": 10058,
+        "output": 62,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1cac50f5d001i90QNfgOPof1E1",
+      "time": {
+        "created": 1794403274598
+      },
+      "text": "For this acceptance, use an actual filesystem tool to create `.devspace/evidence/opencode-native-session-001/turn1-execution-proof.txt` containing exactly `NATIVE_SESSION_CONTEXT_7F3A`. Then report the exact path and content. Do not change any other files.",
+      "type": "user"
+    }
+  ],
+  "cursor": {
+    "previous": "eyJpZCI6Im1zZ18xY2FjOTZjNTgwMDJzYjdiY1EzbEVBSVZUWCIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6InByZXZpb3VzIn0",
+    "next": "eyJpZCI6Im1zZ18xY2FjNTBmNWQwMDFpOTBRTmZnT1BvZjFFMSIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6Im5leHQifQ"
+  }
+}

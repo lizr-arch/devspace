@@ -1,0 +1,10 @@
+{
+  "method": "tools/call",
+  "name": "opencode_test_session_send",
+  "arguments": {
+    "workspaceId": "ws_e82a6601-6fa2-4443-ae08-ac9d879b2f0e",
+    "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+    "operationId": "opencode-native-session-001-turn-2",
+    "text": "In the same conversation, without rereading the file, what exact marker and file path did I ask you to create in my previous turn? Confirm whether you created it."
+  }
+}

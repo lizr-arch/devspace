@@ -1,0 +1,76 @@
+{
+  "httpStatus": 200,
+  "ok": true,
+  "body": {
+    "result": {
+      "_meta": {
+        "tool": "opencode_test_session_send"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "OpenCode turn completed in authorized Session ses_e3566c1f3ffeCFWoDxZB8A9EUz."
+        }
+      ],
+      "structuredContent": {
+        "result": "OpenCode test Session turn",
+        "sessionId": "ses_e3566c1f3ffeCFWoDxZB8A9EUz",
+        "userMessageId": "msg_1cac95f3b001inTRmm6JFiWKjG",
+        "assistantMessageId": "msg_1cac95f3f001k08VclxAqAKquw",
+        "model": {
+          "id": "gpt-6-luna",
+          "providerID": "openai",
+          "variant": "medium"
+        },
+        "assistant": {
+          "id": "msg_1cac95f3f001k08VclxAqAKquw",
+          "time": {
+            "created": 1794403557184,
+            "streamed": 1794403560521,
+            "completed": 1794403560535
+          },
+          "type": "assistant",
+          "agent": "build",
+          "model": {
+            "id": "gpt-6-luna",
+            "providerID": "openai",
+            "variant": "medium"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Marker: `LIVE_TUI_EXECUTION_91BD`  \nPath: `.devspace/evidence/opencode-native-session-001/live-tui-execution-proof.txt`\n\nConfirmed: the shell command completed.",
+              "native": {
+                "itemId": "msg_0574ce99917a584f016af46ce781dc87d29ce3c3d84d766425",
+                "phase": "final_answer"
+              }
+            }
+          ],
+          "snapshot": {
+            "start": "6886a196031f451b9e833760061d909bad00fed4",
+            "end": "6886a196031f451b9e833760061d909bad00fed4",
+            "files": []
+          },
+          "finish": "stop",
+          "native": {
+            "responseId": "resp_0574ce99917a584f016af46ce650dc87d2926ee1bd419e90b8",
+            "serviceTier": "default"
+          },
+          "cost": 0,
+          "tokens": {
+            "input": 244,
+            "output": 45,
+            "reasoning": 0,
+            "cache": {
+              "read": 10240,
+              "write": 0
+            }
+          }
+        },
+        "receipt": "COMPLETED"
+      }
+    },
+    "jsonrpc": "2.0",
+    "id": 11
+  }
+}
