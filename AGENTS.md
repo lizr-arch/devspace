@@ -35,6 +35,13 @@ Reliability and Idempotency Guidelines:
   provided `recoveryHint` and `nextRecommendedTools` instead of blindly retrying  
   the identical payload.
 
+Native OpenCode Session bridge: for Web GPT ↔ local Luna/DSH/OpenCode communication,
+read `docs/WEBGPT_OPENCODE_NATIVE_SESSION_RUNBOOK.md` before sending. The verified
+path is `devspace_info` → exact `open_workspace` → pinned
+`opencode_test_session_send` → `query_operation`. Discover live Session/Boot IDs;
+do not guess, reuse historical IDs, or equate synchronous replies with autonomous
+ChatGPT wakeups. Do not bypass trusted route-principal verification.
+
 Core constraints:
 
 - Treat this as remote access to the local machine; security is part of the  
